@@ -60,6 +60,7 @@ import { isTauriRuntime } from "@/lib/tauriRuntime";
 import { generateDatabaseExportId } from "@/lib/databaseExport";
 import { copyToClipboard } from "@/lib/clipboard";
 import { formatSqlInsert } from "@/lib/exportFormats";
+import { buildSingleDdlExportFileContent } from "@/lib/ddlExport";
 import { fetchTableDataForExport } from "@/lib/tableDataExport";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { useExportTracker, type ExportTask } from "@/composables/useExportTracker";
@@ -799,7 +800,7 @@ async function exportStructure(row: ObjectBrowserRow) {
   try {
     const schema = row.schema || selectedSchema.value || props.database;
     const ddl = await api.getTableDdl(props.connection.id, props.database, schema, row.name, tableDdlObjectType(row.type));
-    await saveFileContent(ddl + "\n", `${row.name}.sql`, "SQL", "sql");
+    await saveFileContent(buildSingleDdlExportFileContent(ddl), `${row.name}.sql`, "SQL", "sql");
   } catch (e: any) {
     console.error("Export structure failed:", e);
   }

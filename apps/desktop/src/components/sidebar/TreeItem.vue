@@ -77,6 +77,7 @@ import { editableRowIdentifierColumns, usesSyntheticRowIdKey } from "@/lib/table
 import { supportsDatabaseCreation, supportsDatabaseSearch, supportsFieldLineage, supportsObjectBrowserTreeNode, supportsSchemaDiagram, supportsSqlFileExecution, supportsTableImport, supportsTableTruncate, supportsTableStructureEditing, usesTreeSchemaMode } from "@/lib/databaseCapabilities";
 import { copyNameForTreeNode, objectSourceKindForTreeNode, sidebarSelectionCopyAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/treeNodeClick";
 import { formatSqlInsert } from "@/lib/exportFormats";
+import { joinExportedDdls } from "@/lib/ddlExport";
 import { fetchTableDataForExport } from "@/lib/tableDataExport";
 import { buildCreateDatabaseSql, buildDuckDbAttachDatabaseSql, duckDbAttachedDatabaseNameFromPath, supportsCreateDatabaseCharset, uniqueDuckDbAttachedDatabaseName } from "@/lib/createDatabaseSql";
 import {
@@ -2592,7 +2593,7 @@ async function exportStructure() {
       const ddl = await api.getTableDdl(target.connectionId, target.database, target.schema || target.database, target.label, tableDdlObjectTypeForNode(target.type));
       parts.push(ddl.trim());
     }
-    structurePreviewSql.value = `${parts.filter(Boolean).join("\n\n")}\n`;
+    structurePreviewSql.value = joinExportedDdls(parts);
   } catch (e: any) {
     structurePreviewError.value = e?.message || String(e);
     console.error("Export structure failed:", e);
