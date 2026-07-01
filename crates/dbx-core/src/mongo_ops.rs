@@ -96,6 +96,58 @@ pub async fn mongo_find_documents_core(
     .await
 }
 
+/// Read MongoDB documents as relaxed Extended JSON for MongoDB transfer paths.
+#[allow(clippy::too_many_arguments)]
+pub async fn mongo_find_documents_extended_json_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    skip: u64,
+    limit: i64,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    sort: Option<&str>,
+) -> Result<MongoDocumentResult, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::find_documents_extended_json(
+                client, database, collection, skip, limit, filter, projection, sort,
+            )
+            .await
+        }
+        PoolKind::Agent(client) => {
+            let mut client = client.lock().await;
+            let mut params = serde_json::json!({
+                "database": database,
+                "collection": collection,
+                "skip": skip,
+                "limit": limit,
+                "filter": filter,
+                "sort": sort,
+            });
+            if let Some(projection) = projection {
+                params["projection"] = serde_json::json!(projection);
+            }
+            match client.mongo_find_documents_extended_json(params.clone()).await {
+                Ok(result) => Ok(result),
+                Err(error) if is_unknown_agent_method_error(&error, "find_documents_extended_json") => {
+                    client.mongo_find_documents(params).await
+                }
+                Err(error) => Err(error),
+            }
+        }
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+fn is_unknown_agent_method_error(error: &str, method: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains(method) && (lower.contains("unknown method") || lower.contains("method not found"))
+}
+
 pub async fn mongo_aggregate_documents_core(
     state: &AppState,
     connection_id: &str,
@@ -155,6 +207,24 @@ pub async fn mongo_insert_documents_core(
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
         PoolKind::MongoDb(client) => mongo_driver::insert_documents(client, database, collection, docs_json).await,
+        PoolKind::Agent(_) => Err("MongoDB legacy agent does not support bulk insertMany/insertOne writes".to_string()),
+        _ => Err("Not a MongoDB connection".to_string()),
+    }
+}
+
+pub async fn mongo_insert_documents_extended_json_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    docs_json: &str,
+) -> Result<u64, String> {
+    ensure_document_pool(state, connection_id).await?;
+    let connections = state.connections.read().await;
+    match connections.get(connection_id).ok_or("Not found")? {
+        PoolKind::MongoDb(client) => {
+            mongo_driver::insert_documents_extended_json(client, database, collection, docs_json).await
+        }
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support bulk insertMany/insertOne writes".to_string()),
         _ => Err("Not a MongoDB connection".to_string()),
     }
