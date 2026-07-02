@@ -8,11 +8,14 @@ import {
   mongoDocumentsToQueryResult,
   mongoIndexesToQueryResult,
   parseMongoAggregateCommand,
+  parseMongoCommand,
   parseMongoCountDocumentsCommand,
   parseMongoFindCommand,
   parseMongoGetIndexesCommand,
   parseMongoVersionCommand,
   parseMongoWriteCommand,
+  splitMongoCommands,
+  splitMongoCommandRanges,
 } from "../../apps/desktop/src/lib/mongoShellCommand.ts";
 import { buildMongoUpdateDocument as buildMongoDocumentUpdate, formatMongoShellLiteral as formatMongoDocumentShellLiteral } from "../../apps/desktop/src/lib/mongoDocumentValues.ts";
 
@@ -89,6 +92,21 @@ test("parseMongoFindCommand rejects unsupported mongo shell commands", () => {
 test("parseMongoVersionCommand parses db.version", () => {
   assert.deepEqual(parseMongoVersionCommand("db.version();"), { kind: "version" });
   assert.equal(parseMongoVersionCommand("db.jobs.version()"), null);
+});
+
+test("parseMongoCommand normalizes outer comments around a command", () => {
+  const parsed = parseMongoCommand(`
+    // current database
+    use accounting;
+    // keep working here
+  `);
+  assert.deepEqual(parsed, {
+    text: "use accounting;",
+    command: {
+      kind: "use",
+      database: "accounting",
+    },
+  });
 });
 
 test("parseMongoWriteCommand accepts unquoted insert and update commands", () => {
@@ -209,6 +227,69 @@ test("parseMongoGetIndexesCommand parses collection index commands", () => {
     collection: "audit.logs",
   });
   assert.equal(parseMongoGetIndexesCommand("db.web_log.getIndexes({})"), null);
+});
+
+test("splitMongoCommands keeps semicolon-separated mongo commands in order", () => {
+  const commands = splitMongoCommands(`
+    db.users.insertOne({ name: "A" });
+    db.users.insertOne({ name: "B" });
+  `);
+  assert.deepEqual(
+    commands.map(({ text, command }) => ({ kind: command.kind, text })),
+    [
+      { kind: "insert", text: 'db.users.insertOne({ name: "A" })' },
+      { kind: "insert", text: 'db.users.insertOne({ name: "B" })' },
+    ],
+  );
+});
+
+test("splitMongoCommands splits top-level line starts without semicolons", () => {
+  const commands = splitMongoCommands(`
+    use accounting
+    db.getCollection("entries")
+      .find({ status: "open" })
+      .limit(5)
+  `);
+  assert.deepEqual(
+    commands.map(({ text, command }) => ({ kind: command.kind, text })),
+    [
+      { kind: "use", text: "use accounting" },
+      { kind: "find", text: 'db.getCollection("entries")\n      .find({ status: "open" })\n      .limit(5)' },
+    ],
+  );
+});
+
+test("splitMongoCommandRanges preserve document offsets for newline-separated commands", () => {
+  const source = `
+    use accounting
+    db.getCollection("entries")
+      .find({ status: "open" })
+      .limit(5)
+  `;
+  const commands = splitMongoCommandRanges(source);
+
+  assert.deepEqual(
+    commands.map(({ from, to, text, command }) => ({
+      from,
+      to,
+      text,
+      kind: command.kind,
+    })),
+    [
+      {
+        from: source.indexOf("use accounting"),
+        to: source.indexOf("use accounting") + "use accounting".length,
+        text: "use accounting",
+        kind: "use",
+      },
+      {
+        from: source.indexOf('db.getCollection("entries")'),
+        to: source.indexOf('      .limit(5)') + "      .limit(5)".length,
+        text: 'db.getCollection("entries")\n      .find({ status: "open" })\n      .limit(5)',
+        kind: "find",
+      },
+    ],
+  );
 });
 
 test("evaluateMongoAggregateSafety blocks write stages unless MCP write flags allow them", () => {

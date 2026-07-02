@@ -572,7 +572,9 @@ function executeSqlStatementFromGutter(currentView: EditorViewType, line: { from
   if (!statementRange) return false;
   event.preventDefault();
   event.stopPropagation();
-  requestExecuteFromView(currentView, line.from, { ignoreSelection: true });
+  // Gutter play is always scoped to the statement/command for that line, even
+  // when the main editor execute action would run the full document.
+  emit("execute", statementRange.sql);
   currentView.focus();
   return true;
 }
