@@ -2120,6 +2120,189 @@ test("mongo dropIndexes execution returns dropped index names", async () => {
   }
 });
 
+test("mongo multi-command execution runs writes sequentially and keeps grouped results", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const insertBodies: any[] = [];
+
+  connectionStore.addEphemeralConnection({
+    ...conn("mongo-1"),
+    db_type: "mongodb",
+    port: 27017,
+  });
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/mongo/insert-documents") {
+      insertBodies.push(JSON.parse(String(init?.body ?? "{}")));
+      return new Response(JSON.stringify({ affected_rows: 1 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("mongo-1", "accounting", "Query", "query", "");
+    await store.executeTabSql(
+      tabId,
+      `
+        db.users.insertOne({ name: "Ada" });
+        db.users.insertOne({ name: "Grace" });
+      `,
+    );
+    const tab = store.tabs.find((item) => item.id === tabId);
+
+    assert.equal(insertBodies.length, 2);
+    assert.deepEqual(
+      insertBodies.map((body) => ({ database: body.database, collection: body.collection, docsJson: body.docsJson })),
+      [
+        { database: "accounting", collection: "users", docsJson: '{ "name": "Ada" }' },
+        { database: "accounting", collection: "users", docsJson: '{ "name": "Grace" }' },
+      ],
+    );
+    assert.equal(tab?.results?.length, 2);
+    assert.equal(tab?.activeResultIndex, 0);
+    assert.equal(tab?.result?.affected_rows, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("mongo multi-command execution reconnects before running commands", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const requests: string[] = [];
+
+  connectionStore.addEphemeralConnection({
+    ...conn("mongo-1"),
+    db_type: "mongodb",
+    port: 27017,
+  });
+  connectionStore.connectedIds.delete("mongo-1");
+
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url === "/api/connection/connect") {
+      requests.push(url);
+      return new Response(JSON.stringify("connected"), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    if (url === "/api/mongo/insert-documents") {
+      requests.push(url);
+      const body = JSON.parse(String(init?.body ?? "{}"));
+      assert.equal(body.database, "accounting");
+      return new Response(JSON.stringify({ affected_rows: 1 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  };
+
+  try {
+    const tabId = store.createTab("mongo-1", "accounting", "Query", "query", "");
+    await store.executeTabSql(tabId, 'db.users.insertOne({ name: "Ada" })');
+
+    assert.deepEqual(requests, ["/api/connection/connect", "/api/mongo/insert-documents"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("mongo multi-command execution applies use database before later commands", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const insertBodies: any[] = [];
+
+  connectionStore.addEphemeralConnection({
+    ...conn("mongo-1"),
+    db_type: "mongodb",
+    port: 27017,
+  });
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/mongo/insert-documents") {
+      insertBodies.push(JSON.parse(String(init?.body ?? "{}")));
+      return new Response(JSON.stringify({ affected_rows: 1 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("mongo-1", "accounting", "Query", "query", "");
+    await store.executeTabSql(
+      tabId,
+      `
+        use archive
+        db.users.insertOne({ name: "Ada" })
+      `,
+    );
+    const tab = store.tabs.find((item) => item.id === tabId);
+
+    assert.equal(insertBodies.length, 1);
+    assert.equal(insertBodies[0]?.database, "archive");
+    assert.equal(tab?.database, "archive");
+    assert.equal(tab?.results?.length, 2);
+    assert.deepEqual(tab?.results?.[0]?.rows, [["switched to db archive"]]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
+test("mongo use-only execution updates the tab without reconnecting", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const requests: string[] = [];
+
+  connectionStore.addEphemeralConnection({
+    ...conn("mongo-1"),
+    db_type: "mongodb",
+    port: 27017,
+  });
+  connectionStore.connectedIds.delete("mongo-1");
+
+  globalThis.fetch = async (input) => {
+    requests.push(String(input));
+    return new Response("unexpected request", { status: 500 });
+  };
+
+  try {
+    const tabId = store.createTab("mongo-1", "accounting", "Query", "query", "");
+    await store.executeTabSql(tabId, "use archive");
+    const tab = store.tabs.find((item) => item.id === tabId);
+
+    assert.deepEqual(requests, []);
+    assert.equal(tab?.database, "archive");
+    assert.deepEqual(tab?.result?.rows, [["switched to db archive"]]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("table data export fetches every filtered page", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

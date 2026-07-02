@@ -342,6 +342,14 @@ describe("executableStatementRanges", () => {
     expect(ranges.map((range) => range.from)).toEqual([0, sql.indexOf("DEL")]);
   });
 
+  it("returns MongoDB command ranges for newline-separated shell commands", () => {
+    const sql = 'use archive\ndb.users.find({ status: "open" })\n  .limit(5)';
+    const ranges = executableStatementRanges(sql, "mongodb");
+
+    expect(rangeSqlTexts(ranges)).toEqual(["use archive", 'db.users.find({ status: "open" })\n  .limit(5)']);
+    expect(ranges.map((range) => range.from)).toEqual([0, sql.indexOf("db.users.find")]);
+  });
+
   it("does not split executable Oracle PL/SQL ranges at inner statement starts", () => {
     expect(rangeSqlTexts(executableStatementRanges(oraclePlSqlFixture, "oracle"))).toEqual([oraclePlSqlFixture.slice(0, oraclePlSqlFixture.indexOf("\n/")), "SELECT 1"]);
   });

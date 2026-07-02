@@ -19,13 +19,7 @@ import {
   mongoUseToQueryResult,
   mongoVersionToQueryResult,
   mongoWriteToQueryResult,
-  parseMongoAggregateCommand,
-  parseMongoCountDocumentsCommand,
-  parseMongoFindCommand,
-  parseMongoGetIndexesCommand,
-  parseMongoWriteCommand,
-  parseMongoUseCommand,
-  parseMongoVersionCommand,
+  splitMongoCommands,
   type MongoAggregateSafetyOptions,
 } from "@/lib/mongoShellCommand";
 import { redisCommandResultToQueryResult } from "@/lib/redisQueryResult";
@@ -1605,14 +1599,24 @@ export const useQueryStore = defineStore("query", () => {
     let useAgentResultSession = false;
     try {
       const connStore = useConnectionStore();
+      let conn = connStore.getConfig(tab.connectionId);
+      const parsedMongoCommands = conn?.db_type === "mongodb" ? splitMongoCommands(sql) : undefined;
+      let mongoCommands = parsedMongoCommands ?? [];
+      const mongoNeedsConnection = mongoCommands.some(({ command }) => command.kind !== "use");
+
       if (options?.skipEnsureConnected) {
         console.info("[DBX][executeTabSql:ensure-connected:skip]", { traceId, elapsed: elapsed(), reason: "caller" });
+      } else if (conn?.db_type === "mongodb" && mongoCommands.length > 0 && !mongoNeedsConnection) {
+        console.info("[DBX][executeTabSql:ensure-connected:skip]", { traceId, elapsed: elapsed(), reason: "mongo-use-only" });
       } else {
         console.info("[DBX][executeTabSql:ensure-connected:start]", { traceId, elapsed: elapsed() });
         await connStore.ensureConnected(tab.connectionId);
         console.info("[DBX][executeTabSql:ensure-connected:done]", { traceId, elapsed: elapsed() });
       }
-      const conn = connStore.getConfig(tab.connectionId);
+      conn = connStore.getConfig(tab.connectionId);
+      if (parsedMongoCommands === undefined && conn?.db_type === "mongodb") {
+        mongoCommands = splitMongoCommands(sql);
+      }
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
       const useAgentCursor = usesAgentCursorForQuery(conn?.db_type);
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
@@ -1690,6 +1694,195 @@ export const useQueryStore = defineStore("query", () => {
         return;
       }
 
+      if (mongoCommands.length > 0) {
+        console.info("[DBX][executeTabSql:mongo:start]", { traceId, database: tab.database, commandCount: mongoCommands.length, sql });
+
+        const allResults: QueryResult[] = [];
+        // Track the effective db as we walk the batch so later commands observe
+        // earlier `use ...` statements in the same editor selection.
+        let currentDatabase = tab.database;
+        let mongoEditTarget: QueryTab["mongoEditTarget"] | undefined;
+
+        for (const parsedCommand of mongoCommands) {
+          const mongoCommand = parsedCommand.command;
+          const commandStartedAt = performance.now();
+          try {
+            switch (mongoCommand.kind) {
+              case "find": {
+                console.info("[DBX][executeTabSql:mongo-find:start]", { traceId, collection: mongoCommand.collection, database: currentDatabase });
+                const result = await api.mongoFindDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.skip, mongoCommand.limit, mongoCommand.filter, mongoCommand.projection, mongoCommand.sort, executionId);
+                const queryResult = markQueryResultRowsRaw(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total));
+                allResults.push(queryResult);
+                mongoEditTarget = mongoCommands.length === 1 && queryResult.columns.includes("_id") ? { collection: mongoCommand.collection, idColumn: "_id" } : undefined;
+                console.info("[DBX][executeTabSql:mongo-find:done]", {
+                  traceId,
+                  collection: mongoCommand.collection,
+                  database: currentDatabase,
+                  rowCount: result.documents.length,
+                  total: result.total,
+                  elapsed: elapsed(),
+                });
+                break;
+              }
+              case "version": {
+                console.info("[DBX][executeTabSql:mongo-version:start]", { traceId, database: currentDatabase });
+                const version = await api.mongoServerVersion(tab.connectionId, currentDatabase, executionId);
+                allResults.push(markQueryResultRowsRaw(mongoVersionToQueryResult(version, performance.now() - commandStartedAt)));
+                mongoEditTarget = undefined;
+                console.info("[DBX][executeTabSql:mongo-version:done]", {
+                  traceId,
+                  database: currentDatabase,
+                  version,
+                  elapsed: elapsed(),
+                });
+                break;
+              }
+              case "countDocuments": {
+                console.info("[DBX][executeTabSql:mongo-count:start]", { traceId, collection: mongoCommand.collection, database: currentDatabase });
+                const result = await api.mongoFindDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, 0, 1, mongoCommand.filter, undefined, undefined, executionId);
+                allResults.push(markQueryResultRowsRaw(mongoCountToQueryResult(result.total, performance.now() - commandStartedAt)));
+                mongoEditTarget = undefined;
+                console.info("[DBX][executeTabSql:mongo-count:done]", {
+                  traceId,
+                  collection: mongoCommand.collection,
+                  database: currentDatabase,
+                  total: result.total,
+                  elapsed: elapsed(),
+                });
+                break;
+              }
+              case "aggregate": {
+                if (options?.mongoSafety) {
+                  const safety = evaluateMongoAggregateSafety(mongoCommand, options.mongoSafety);
+                  if (!safety.allowed) throw new Error(safety.reason);
+                }
+                console.info("[DBX][executeTabSql:mongo-aggregate:start]", { traceId, collection: mongoCommand.collection, database: currentDatabase });
+                const aggregateMaxRows = normalizeResultPageSize(pageLimit ?? options?.pagination?.limit ?? settingsStore.editorSettings.pageSize);
+                const result = await api.mongoAggregateDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.pipeline, aggregateMaxRows, executionId);
+                allResults.push(markQueryResultRowsRaw(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total)));
+                mongoEditTarget = undefined;
+                console.info("[DBX][executeTabSql:mongo-aggregate:done]", {
+                  traceId,
+                  collection: mongoCommand.collection,
+                  database: currentDatabase,
+                  rowCount: result.documents.length,
+                  total: result.total,
+                  elapsed: elapsed(),
+                });
+                break;
+              }
+              case "getIndexes": {
+                console.info("[DBX][executeTabSql:mongo-indexes:start]", { traceId, collection: mongoCommand.collection, database: currentDatabase });
+                const indexes = await api.listIndexes(tab.connectionId, currentDatabase, "", mongoCommand.collection);
+                allResults.push(markQueryResultRowsRaw(mongoIndexesToQueryResult(indexes, performance.now() - commandStartedAt)));
+                mongoEditTarget = undefined;
+                console.info("[DBX][executeTabSql:mongo-indexes:done]", {
+                  traceId,
+                  collection: mongoCommand.collection,
+                  database: currentDatabase,
+                  indexCount: indexes.length,
+                  elapsed: elapsed(),
+                });
+                break;
+              }
+              case "insert":
+              case "update":
+              case "delete":
+              case "createIndex":
+              case "dropIndex":
+              case "dropIndexes": {
+                if (options?.mongoSafety) {
+                  const safety = evaluateMongoWriteSafety(mongoCommand, options.mongoSafety);
+                  if (!safety.allowed) throw new Error(safety.reason);
+                }
+                console.info("[DBX][executeTabSql:mongo-write:start]", {
+                  traceId,
+                  database: currentDatabase,
+                  kind: mongoCommand.kind,
+                  collection: mongoCommand.collection,
+                });
+                mongoEditTarget = undefined;
+                if (mongoCommand.kind === "insert") {
+                  const result = await api.mongoInsertDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.docsJson);
+                  allResults.push(markQueryResultRowsRaw(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt)));
+                } else if (mongoCommand.kind === "update") {
+                  const result = await api.mongoUpdateDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.update, mongoCommand.many);
+                  allResults.push(markQueryResultRowsRaw(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt)));
+                } else if (mongoCommand.kind === "createIndex") {
+                  const result = await api.mongoCreateIndex(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.keys, mongoCommand.options);
+                  allResults.push(markQueryResultRowsRaw(mongoCreateIndexToQueryResult(result.name, performance.now() - commandStartedAt)));
+                } else if (mongoCommand.kind === "dropIndex" || mongoCommand.kind === "dropIndexes") {
+                  const result = await api.mongoDropIndexes(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.kind === "dropIndex" ? mongoCommand.index : mongoCommand.indexes, mongoCommand.kind === "dropIndex");
+                  allResults.push(markQueryResultRowsRaw(mongoDroppedIndexesToQueryResult(result.dropped_names, performance.now() - commandStartedAt)));
+                } else {
+                  const result = await api.mongoDeleteDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.filter, mongoCommand.many);
+                  allResults.push(markQueryResultRowsRaw(mongoWriteToQueryResult(result.affected_rows, performance.now() - commandStartedAt)));
+                }
+                console.info("[DBX][executeTabSql:mongo-write:done]", {
+                  traceId,
+                  database: currentDatabase,
+                  kind: mongoCommand.kind,
+                  collection: mongoCommand.collection,
+                  elapsed: elapsed(),
+                });
+                break;
+              }
+              case "use": {
+                currentDatabase = mongoCommand.database;
+                allResults.push(markQueryResultRowsRaw(mongoUseToQueryResult(currentDatabase, performance.now() - commandStartedAt)));
+                mongoEditTarget = undefined;
+                console.info("[DBX][executeTabSql:mongo-use:done]", {
+                  traceId,
+                  database: currentDatabase,
+                  elapsed: elapsed(),
+                });
+                break;
+              }
+            }
+          } catch (error: any) {
+            // Surface per-command failures inline and continue collecting results
+            // for the rest of the batch, matching the grouped-result UX.
+            allResults.push(toErrorResult(error));
+            mongoEditTarget = undefined;
+          }
+        }
+
+        console.info("[DBX][executeTabSql:mongo:done]", {
+          traceId,
+          database: currentDatabase,
+          commandCount: mongoCommands.length,
+          elapsed: elapsed(),
+        });
+
+        const current = tabs.value.find((t) => t.id === id);
+        if (current?.executionId === executionId) {
+          if (allResults.length > 1) {
+            // Open grouped output on the first non-error result when possible so
+            // mixed success/error batches land on the most useful table first.
+            const activeResultIndex = allResults.findIndex((result) => !result.columns.includes("Error"));
+            const resultIndex = activeResultIndex >= 0 ? activeResultIndex : 0;
+            current.results = allResults;
+            current.activeResultIndex = resultIndex;
+            current.result = allResults[resultIndex];
+          } else {
+            current.results = undefined;
+            current.activeResultIndex = undefined;
+            current.result = allResults[0];
+          }
+          touchResult(current);
+          current.queryAnalysis = undefined;
+          current.querySourceColumns = undefined;
+          current.queryEditabilityReason = undefined;
+          current.mongoEditTarget = mongoCommands.length === 1 ? mongoEditTarget : undefined;
+          current.tableMeta = undefined;
+          current.resultBaseSql = options?.resultBaseSql ?? sql;
+          current.resultSortedSql = options?.resultSortedSql;
+          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
+          if (current.database !== currentDatabase) current.database = currentDatabase;
+        }
+        return;
+      }
+
       if (tab.mode === "query") {
         const pagination = options?.pagination ?? { limit: settingsStore.editorSettings.pageSize, offset: 0 };
         const plan = await api.prepareQueryPaginationExecutionPlan({
@@ -1708,269 +1901,6 @@ export const useQueryStore = defineStore("query", () => {
       } else if (tab.mode === "data") {
         pageLimit = options?.pagination?.limit ?? tableOpenPageLimit();
         pageOffset = options?.pagination?.offset ?? 0;
-      }
-      const mongoFind = conn?.db_type === "mongodb" ? parseMongoFindCommand(sql) : null;
-      if (mongoFind) {
-        await connStore.ensureConnected(tab.connectionId);
-        console.info("[DBX][executeTabSql:mongo-find:start]", { traceId, collection: mongoFind.collection });
-        const result = await api.mongoFindDocuments(tab.connectionId, tab.database, mongoFind.collection, mongoFind.skip, mongoFind.limit, mongoFind.filter, mongoFind.projection, mongoFind.sort, executionId);
-        console.info("[DBX][executeTabSql:mongo-find:done]", {
-          traceId,
-          rowCount: result.documents.length,
-          total: result.total,
-          elapsed: elapsed(),
-        });
-        const current = tabs.value.find((t) => t.id === id);
-        if (current?.executionId === executionId) {
-          current.results = undefined;
-          current.activeResultIndex = undefined;
-          current.result = markQueryResultRowsRaw(mongoDocumentsToQueryResult(result.documents, performance.now() - startedAt, result.total));
-          touchResult(current);
-          current.queryAnalysis = undefined;
-          current.querySourceColumns = undefined;
-          current.queryEditabilityReason = undefined;
-          current.mongoEditTarget = current.result.columns.includes("_id") ? { collection: mongoFind.collection, idColumn: "_id" } : undefined;
-          current.tableMeta = undefined;
-          current.resultBaseSql = options?.resultBaseSql ?? sql;
-          current.resultSortedSql = options?.resultSortedSql;
-          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
-        }
-        return;
-      }
-      const mongoVersion = conn?.db_type === "mongodb" ? parseMongoVersionCommand(sql) : null;
-      if (mongoVersion) {
-        await connStore.ensureConnected(tab.connectionId);
-        console.info("[DBX][executeTabSql:mongo-version:start]", { traceId });
-        const version = await api.mongoServerVersion(tab.connectionId, tab.database, executionId);
-        console.info("[DBX][executeTabSql:mongo-version:done]", {
-          traceId,
-          version,
-          elapsed: elapsed(),
-        });
-        const current = tabs.value.find((t) => t.id === id);
-        if (current?.executionId === executionId) {
-          current.results = undefined;
-          current.activeResultIndex = undefined;
-          current.result = markQueryResultRowsRaw(mongoVersionToQueryResult(version, performance.now() - startedAt));
-          touchResult(current);
-          current.queryAnalysis = undefined;
-          current.querySourceColumns = undefined;
-          current.queryEditabilityReason = undefined;
-          current.mongoEditTarget = undefined;
-          current.tableMeta = undefined;
-          current.resultBaseSql = options?.resultBaseSql ?? sql;
-          current.resultSortedSql = options?.resultSortedSql;
-          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
-        }
-        return;
-      }
-      const mongoCount = conn?.db_type === "mongodb" ? parseMongoCountDocumentsCommand(sql) : null;
-      if (mongoCount) {
-        await connStore.ensureConnected(tab.connectionId);
-        console.info("[DBX][executeTabSql:mongo-count:start]", { traceId, collection: mongoCount.collection });
-        const result = await api.mongoFindDocuments(tab.connectionId, tab.database, mongoCount.collection, 0, 1, mongoCount.filter, undefined, undefined, executionId);
-        console.info("[DBX][executeTabSql:mongo-count:done]", {
-          traceId,
-          total: result.total,
-          elapsed: elapsed(),
-        });
-        const current = tabs.value.find((t) => t.id === id);
-        if (current?.executionId === executionId) {
-          current.results = undefined;
-          current.activeResultIndex = undefined;
-          current.result = markQueryResultRowsRaw(mongoCountToQueryResult(result.total, performance.now() - startedAt));
-          touchResult(current);
-          current.queryAnalysis = undefined;
-          current.querySourceColumns = undefined;
-          current.queryEditabilityReason = undefined;
-          current.mongoEditTarget = undefined;
-          current.tableMeta = undefined;
-          current.resultBaseSql = options?.resultBaseSql ?? sql;
-          current.resultSortedSql = options?.resultSortedSql;
-          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
-        }
-        return;
-      }
-
-      const mongoAggregate = conn?.db_type === "mongodb" ? parseMongoAggregateCommand(sql) : null;
-      if (mongoAggregate) {
-        if (options?.mongoSafety) {
-          const safety = evaluateMongoAggregateSafety(mongoAggregate, options.mongoSafety);
-          if (!safety.allowed) throw new Error(safety.reason);
-        }
-        await connStore.ensureConnected(tab.connectionId);
-        console.info("[DBX][executeTabSql:mongo-aggregate:start]", { traceId, collection: mongoAggregate.collection });
-        const aggregateMaxRows = normalizeResultPageSize(pageLimit ?? options?.pagination?.limit ?? settingsStore.editorSettings.pageSize);
-        const result = await api.mongoAggregateDocuments(tab.connectionId, tab.database, mongoAggregate.collection, mongoAggregate.pipeline, aggregateMaxRows, executionId);
-        console.info("[DBX][executeTabSql:mongo-aggregate:done]", {
-          traceId,
-          rowCount: result.documents.length,
-          total: result.total,
-          elapsed: elapsed(),
-        });
-        const current = tabs.value.find((t) => t.id === id);
-        if (current?.executionId === executionId) {
-          current.results = undefined;
-          current.activeResultIndex = undefined;
-          current.result = markQueryResultRowsRaw(mongoDocumentsToQueryResult(result.documents, performance.now() - startedAt, result.total));
-          touchResult(current);
-          current.queryAnalysis = undefined;
-          current.querySourceColumns = undefined;
-          current.queryEditabilityReason = undefined;
-          current.mongoEditTarget = undefined;
-          current.tableMeta = undefined;
-          current.resultBaseSql = options?.resultBaseSql ?? sql;
-          current.resultSortedSql = options?.resultSortedSql;
-          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
-        }
-        return;
-      }
-
-      const mongoGetIndexes = conn?.db_type === "mongodb" ? parseMongoGetIndexesCommand(sql) : null;
-      if (mongoGetIndexes) {
-        await connStore.ensureConnected(tab.connectionId);
-        console.info("[DBX][executeTabSql:mongo-indexes:start]", { traceId, collection: mongoGetIndexes.collection });
-        const indexes = await api.listIndexes(tab.connectionId, tab.database, "", mongoGetIndexes.collection);
-        console.info("[DBX][executeTabSql:mongo-indexes:done]", {
-          traceId,
-          indexCount: indexes.length,
-          elapsed: elapsed(),
-        });
-        const current = tabs.value.find((t) => t.id === id);
-        if (current?.executionId === executionId) {
-          current.results = undefined;
-          current.activeResultIndex = undefined;
-          current.result = markQueryResultRowsRaw(mongoIndexesToQueryResult(indexes, performance.now() - startedAt));
-          touchResult(current);
-          current.queryAnalysis = undefined;
-          current.querySourceColumns = undefined;
-          current.queryEditabilityReason = undefined;
-          current.mongoEditTarget = undefined;
-          current.tableMeta = undefined;
-          current.resultBaseSql = options?.resultBaseSql ?? sql;
-          current.resultSortedSql = options?.resultSortedSql;
-          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
-        }
-        return;
-      }
-
-      const mongoWrite = conn?.db_type === "mongodb" ? parseMongoWriteCommand(sql) : null;
-      if (mongoWrite) {
-        if (options?.mongoSafety) {
-          const safety = evaluateMongoWriteSafety(mongoWrite, options.mongoSafety);
-          if (!safety.allowed) throw new Error(safety.reason);
-        }
-        await connStore.ensureConnected(tab.connectionId);
-        console.info("[DBX][executeTabSql:mongo-write:start]", {
-          traceId,
-          kind: mongoWrite.kind,
-          collection: mongoWrite.collection,
-        });
-        let affectedRows = 0;
-        if (mongoWrite.kind === "insert") {
-          const result = await api.mongoInsertDocuments(tab.connectionId, tab.database, mongoWrite.collection, mongoWrite.docsJson);
-          affectedRows = result.affected_rows;
-        } else if (mongoWrite.kind === "update") {
-          const result = await api.mongoUpdateDocuments(tab.connectionId, tab.database, mongoWrite.collection, mongoWrite.filter, mongoWrite.update, mongoWrite.many);
-          affectedRows = result.affected_rows;
-        } else if (mongoWrite.kind === "createIndex") {
-          const result = await api.mongoCreateIndex(tab.connectionId, tab.database, mongoWrite.collection, mongoWrite.keys, mongoWrite.options);
-          console.info("[DBX][executeTabSql:mongo-write:done]", {
-            traceId,
-            indexName: result.name,
-            elapsed: elapsed(),
-          });
-          const current = tabs.value.find((t) => t.id === id);
-          if (current?.executionId === executionId) {
-            current.results = undefined;
-            current.activeResultIndex = undefined;
-            current.result = markQueryResultRowsRaw(mongoCreateIndexToQueryResult(result.name, performance.now() - startedAt));
-            touchResult(current);
-            current.queryAnalysis = undefined;
-            current.querySourceColumns = undefined;
-            current.queryEditabilityReason = undefined;
-            current.mongoEditTarget = undefined;
-            current.tableMeta = undefined;
-            current.resultBaseSql = options?.resultBaseSql ?? sql;
-            current.resultSortedSql = options?.resultSortedSql;
-            syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
-          }
-          return;
-        } else if (mongoWrite.kind === "dropIndex" || mongoWrite.kind === "dropIndexes") {
-          const result = await api.mongoDropIndexes(tab.connectionId, tab.database, mongoWrite.collection, mongoWrite.kind === "dropIndex" ? mongoWrite.index : mongoWrite.indexes, mongoWrite.kind === "dropIndex");
-          console.info("[DBX][executeTabSql:mongo-write:done]", {
-            traceId,
-            droppedNames: result.dropped_names,
-            elapsed: elapsed(),
-          });
-          const current = tabs.value.find((t) => t.id === id);
-          if (current?.executionId === executionId) {
-            current.results = undefined;
-            current.activeResultIndex = undefined;
-            current.result = markQueryResultRowsRaw(mongoDroppedIndexesToQueryResult(result.dropped_names, performance.now() - startedAt));
-            touchResult(current);
-            current.queryAnalysis = undefined;
-            current.querySourceColumns = undefined;
-            current.queryEditabilityReason = undefined;
-            current.mongoEditTarget = undefined;
-            current.tableMeta = undefined;
-            current.resultBaseSql = options?.resultBaseSql ?? sql;
-            current.resultSortedSql = options?.resultSortedSql;
-            syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
-          }
-          return;
-        } else {
-          const result = await api.mongoDeleteDocuments(tab.connectionId, tab.database, mongoWrite.collection, mongoWrite.filter, mongoWrite.many);
-          affectedRows = result.affected_rows;
-        }
-        console.info("[DBX][executeTabSql:mongo-write:done]", {
-          traceId,
-          affectedRows,
-          elapsed: elapsed(),
-        });
-        const current = tabs.value.find((t) => t.id === id);
-        if (current?.executionId === executionId) {
-          current.results = undefined;
-          current.activeResultIndex = undefined;
-          current.result = markQueryResultRowsRaw(mongoWriteToQueryResult(affectedRows, performance.now() - startedAt));
-          touchResult(current);
-          current.queryAnalysis = undefined;
-          current.querySourceColumns = undefined;
-          current.queryEditabilityReason = undefined;
-          current.mongoEditTarget = undefined;
-          current.tableMeta = undefined;
-          current.resultBaseSql = options?.resultBaseSql ?? sql;
-          current.resultSortedSql = options?.resultSortedSql;
-          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
-        }
-        return;
-      }
-
-      const mongoUse = conn?.db_type === "mongodb" ? parseMongoUseCommand(sql) : null;
-      if (mongoUse) {
-        console.info("[DBX][executeTabSql:mongo-use:start]", { traceId, database: mongoUse.database });
-        const current = tabs.value.find((t) => t.id === id);
-        if (current?.executionId === executionId) {
-          current.database = mongoUse.database;
-          current.results = undefined;
-          current.activeResultIndex = undefined;
-          current.result = markQueryResultRowsRaw(mongoUseToQueryResult(mongoUse.database, performance.now() - startedAt));
-          touchResult(current);
-          current.queryAnalysis = undefined;
-          current.querySourceColumns = undefined;
-          current.queryEditabilityReason = undefined;
-          current.mongoEditTarget = undefined;
-          current.tableMeta = undefined;
-          current.resultBaseSql = options?.resultBaseSql ?? sql;
-          current.resultSortedSql = options?.resultSortedSql;
-          syncDisplayedResultRun(current, options?.resultBaseSql ?? sql);
-        }
-        console.info("[DBX][executeTabSql:mongo-use:done]", {
-          traceId,
-          database: mongoUse.database,
-          elapsed: elapsed(),
-        });
-        return;
       }
 
       const executionSchema = connectionUsesSchemaExecutionContext(conn) ? tab.schema || tab.database : tab.mode === "data" || connectionUsesDatabaseObjectTreeMode(conn) ? undefined : tab.schema;

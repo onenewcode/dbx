@@ -31,13 +31,33 @@ export interface MongoVersionCommand {
   kind: "version";
 }
 
-export type MongoWriteCommand =
+type MongoWriteKind = "insert" | "update" | "delete" | "createIndex" | "dropIndex" | "dropIndexes";
+
+export type MongoCommand =
+  | ({ kind: "find" } & MongoFindCommand)
+  | MongoVersionCommand
+  | ({ kind: "countDocuments" } & MongoCountDocumentsCommand)
+  | ({ kind: "aggregate" } & MongoAggregateCommand)
+  | ({ kind: "getIndexes" } & MongoGetIndexesCommand)
+  | ({ kind: "use" } & MongoUseCommand)
   | { kind: "insert"; collection: string; docsJson: string }
   | { kind: "update"; collection: string; filter: string; update: string; many: boolean }
   | { kind: "delete"; collection: string; filter: string; many: boolean }
   | { kind: "createIndex"; collection: string; keys: string; options?: string }
   | { kind: "dropIndex"; collection: string; index: string }
   | { kind: "dropIndexes"; collection: string; indexes?: string };
+
+export type MongoWriteCommand = Extract<MongoCommand, { kind: MongoWriteKind }>;
+
+export interface ParsedMongoCommand {
+  text: string;
+  command: MongoCommand;
+}
+
+export interface ParsedMongoCommandRange extends ParsedMongoCommand {
+  from: number;
+  to: number;
+}
 
 export interface MongoAggregateSafetyOptions {
   allowWrites?: boolean;
@@ -239,6 +259,65 @@ export function parseMongoWriteCommand(input: string): MongoWriteCommand | null 
   }
 
   return null;
+}
+
+export function parseMongoCommand(input: string): ParsedMongoCommand | null {
+  const text = trimMongoOuterComments(input);
+  if (!text) return null;
+
+  // Keep the more specific readers ahead of generic write parsing so the
+  // returned kind matches the result renderer we want to use downstream.
+  const parsers: Array<(source: string) => MongoCommand | null> = [
+    (source) => {
+      const find = parseMongoFindCommand(source);
+      return find ? { kind: "find", ...find } : null;
+    },
+    (source) => {
+      const version = parseMongoVersionCommand(source);
+      return version ?? null;
+    },
+    (source) => {
+      const count = parseMongoCountDocumentsCommand(source);
+      return count ? { kind: "countDocuments", ...count } : null;
+    },
+    (source) => {
+      const aggregate = parseMongoAggregateCommand(source);
+      return aggregate ? { kind: "aggregate", ...aggregate } : null;
+    },
+    (source) => {
+      const getIndexes = parseMongoGetIndexesCommand(source);
+      return getIndexes ? { kind: "getIndexes", ...getIndexes } : null;
+    },
+    (source) => {
+      const write = parseMongoWriteCommand(source);
+      return write ?? null;
+    },
+    (source) => {
+      const use = parseMongoUseCommand(source);
+      return use ? { kind: "use", ...use } : null;
+    },
+  ];
+
+  for (const parse of parsers) {
+    const command = parse(text);
+    if (command) return { text, command };
+  }
+
+  return null;
+}
+
+export function splitMongoCommands(input: string): ParsedMongoCommand[] {
+  return splitMongoCommandRanges(input).map(({ from: _from, to: _to, ...command }) => command);
+}
+
+export function splitMongoCommandRanges(input: string): ParsedMongoCommandRange[] {
+  const commands: ParsedMongoCommandRange[] = [];
+  for (const segment of splitMongoCommandTextRanges(input)) {
+    const parsed = parseMongoCommand(segment.text);
+    if (!parsed) return [];
+    commands.push({ from: segment.from, to: segment.to, ...parsed });
+  }
+  return commands;
 }
 
 export function evaluateMongoWriteSafety(command: MongoWriteCommand, options: MongoAggregateSafetyOptions): { allowed: boolean; reason?: string } {
@@ -445,6 +524,263 @@ function parseMethodArgs(source: string, methodCallIndex: number): string[] | nu
   const closeIndex = findMatchingParen(source, openIndex);
   if (closeIndex < 0 || source.slice(closeIndex + 1).trim()) return null;
   return splitTopLevel(source.slice(openIndex + 1, closeIndex));
+}
+
+interface MongoTextRange {
+  from: number;
+  to: number;
+  text: string;
+}
+
+function splitMongoCommandTextRanges(input: string): MongoTextRange[] {
+  const commands: MongoTextRange[] = [];
+  for (const segment of splitMongoSemicolonSeparatedSegments(input)) {
+    const parsed = parseMongoCommand(segment.text);
+    if (parsed) {
+      commands.push({ ...segment, text: parsed.text });
+      continue;
+    }
+
+    // Mongo shell users often omit semicolons and rely on one top-level
+    // command per line, so fall back to a conservative newline split.
+    const softSplit = splitMongoSegmentAtSoftStarts(segment);
+    if (softSplit.length > 1) {
+      commands.push(...softSplit);
+      continue;
+    }
+
+    commands.push(segment);
+  }
+  return commands;
+}
+
+function splitMongoSemicolonSeparatedSegments(input: string): MongoTextRange[] {
+  const segments: MongoTextRange[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote: string | null = null;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+
+  // Respect semicolons only when they appear at the top level; JSON literals,
+  // strings and comments are allowed to contain semicolons verbatim.
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i] ?? "";
+    const next = input[i + 1] ?? "";
+
+    if (lineComment) {
+      if (char === "\n") lineComment = false;
+      continue;
+    }
+
+    if (blockComment) {
+      if (char === "*" && next === "/") {
+        blockComment = false;
+        i += 1;
+      }
+      continue;
+    }
+
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+
+    if (char === "/" && next === "/") {
+      lineComment = true;
+      i += 1;
+      continue;
+    }
+
+    if (char === "/" && next === "*") {
+      blockComment = true;
+      i += 1;
+      continue;
+    }
+
+    if (char === '"' || char === "'" || char === "`") {
+      quote = char;
+      continue;
+    }
+
+    if (char === "{" || char === "[" || char === "(") depth += 1;
+    else if ((char === "}" || char === "]" || char === ")") && depth > 0) depth -= 1;
+    else if (char === ";" && depth === 0) {
+      pushMongoSegment(segments, input, start, i);
+      start = i + 1;
+    }
+  }
+
+  pushMongoSegment(segments, input, start, input.length);
+  return segments;
+}
+
+function splitMongoSegmentAtSoftStarts(segment: MongoTextRange): MongoTextRange[] {
+  const boundaries = mongoTopLevelCommandLineStarts(segment.text);
+  if (boundaries.length <= 1) return [segment];
+
+  const segments: MongoTextRange[] = [];
+  let start = boundaries[0] ?? 0;
+  for (let index = 1; index < boundaries.length; index += 1) {
+    const boundary = boundaries[index] ?? 0;
+    const candidate = trimMongoOuterCommentRange(segment.text, start, boundary);
+    // Only accept newline-based splitting when every slice is a valid command;
+    // otherwise keep the original text intact and let normal parsing reject it.
+    if (!candidate || !parseMongoCommand(candidate.text)) return [segment];
+    segments.push({
+      from: segment.from + candidate.from,
+      to: segment.from + candidate.to,
+      text: candidate.text,
+    });
+    start = boundary;
+  }
+
+  const last = trimMongoOuterCommentRange(segment.text, start, segment.text.length);
+  if (!last || !parseMongoCommand(last.text)) return [segment];
+  segments.push({
+    from: segment.from + last.from,
+    to: segment.from + last.to,
+    text: last.text,
+  });
+  return segments;
+}
+
+function mongoTopLevelCommandLineStarts(segment: string): number[] {
+  const starts: number[] = [];
+  let depth = 0;
+  let quote: string | null = null;
+  let escaped = false;
+  let lineComment = false;
+  let blockComment = false;
+  let lineStart = 0;
+  let firstNonWhitespaceOnLine = -1;
+
+  for (let i = 0; i < segment.length; i += 1) {
+    const char = segment[i] ?? "";
+    const next = segment[i + 1] ?? "";
+
+    if (char === "\n") {
+      if (lineComment) lineComment = false;
+      lineStart = i + 1;
+      firstNonWhitespaceOnLine = -1;
+      continue;
+    }
+
+    if (lineComment) continue;
+
+    if (blockComment) {
+      if (char === "*" && next === "/") {
+        blockComment = false;
+        i += 1;
+      }
+      continue;
+    }
+
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+
+    if (char === "/" && next === "/") {
+      lineComment = true;
+      i += 1;
+      continue;
+    }
+
+    if (char === "/" && next === "*") {
+      blockComment = true;
+      i += 1;
+      continue;
+    }
+
+    if (char === '"' || char === "'" || char === "`") {
+      if (firstNonWhitespaceOnLine === -1 && !/\s/.test(char)) firstNonWhitespaceOnLine = i;
+      quote = char;
+      continue;
+    }
+
+    if (char === "{" || char === "[" || char === "(") depth += 1;
+    else if ((char === "}" || char === "]" || char === ")") && depth > 0) depth -= 1;
+
+    if (firstNonWhitespaceOnLine === -1 && !/\s/.test(char)) {
+      firstNonWhitespaceOnLine = i;
+      if (depth === 0 && char !== "." && isMongoCommandLineStart(segment, i)) starts.push(i);
+    }
+  }
+
+  return starts.length > 0 ? starts : [lineStart];
+}
+
+function isMongoCommandLineStart(segment: string, index: number): boolean {
+  const rest = segment.slice(index);
+  return /^use\b/i.test(rest) || /^db(?:\s*\.|\b)/i.test(rest);
+}
+
+function pushMongoSegment(segments: MongoTextRange[], source: string, from: number, to: number) {
+  const trimmed = trimMongoOuterCommentRange(source, from, to);
+  if (trimmed) segments.push(trimmed);
+}
+
+function trimMongoOuterComments(source: string): string {
+  let value = source.trim();
+  while (value) {
+    const next = value.replace(/^(?:\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)\s*/u, "");
+    if (next === value) break;
+    value = next.trimStart();
+  }
+  while (value) {
+    const next = value.replace(/\s*(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/)\s*$/u, "");
+    if (next === value) break;
+    value = next.trimEnd();
+  }
+  return value.trim();
+}
+
+function trimMongoOuterCommentRange(source: string, from: number, to: number): MongoTextRange | null {
+  let start = from;
+  let end = to;
+
+  while (start < end) {
+    const value = source.slice(start, end);
+    const trimmed = value.trimStart();
+    if (trimmed !== value) {
+      start += value.length - trimmed.length;
+      continue;
+    }
+    const next = value.replace(/^(?:\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)\s*/u, "");
+    if (next !== value) {
+      start += value.length - next.length;
+      continue;
+    }
+    break;
+  }
+
+  while (start < end) {
+    const value = source.slice(start, end);
+    const trimmed = value.trimEnd();
+    if (trimmed !== value) {
+      end -= value.length - trimmed.length;
+      continue;
+    }
+    const next = value.replace(/\s*(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/)\s*$/u, "");
+    if (next !== value) {
+      end -= value.length - next.length;
+      continue;
+    }
+    break;
+  }
+
+  if (start >= end) return null;
+  return {
+    from: start,
+    to: end,
+    text: source.slice(start, end),
+  };
 }
 
 function convertSingleQuotedStrings(source: string): string {

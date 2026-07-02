@@ -1,4 +1,5 @@
 import type { SqlExecutionCandidate } from "./sqlExecutionTarget";
+import { splitMongoCommandRanges } from "./mongoShellCommand";
 import type { DatabaseType } from "@/types/database";
 
 /**
@@ -1103,6 +1104,7 @@ function normalizeSql(sql: string): string {
  */
 export function executableStatementRanges(sql: string, databaseType?: DatabaseType): SqlTextRange[] {
   if (databaseType === "redis") return redisExecutableCommandRanges(sql);
+  if (databaseType === "mongodb") return splitMongoCommandRanges(sql).map(({ from, to, text }) => ({ from, to, sql: text }));
   return splitSqlStatementRanges(sql, databaseType).flatMap((statement) => splitStatementRangeAtSoftStarts(sql, statement, databaseType).map((range) => rangeFor(range, sql)));
 }
 
