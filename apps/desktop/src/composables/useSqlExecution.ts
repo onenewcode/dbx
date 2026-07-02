@@ -6,6 +6,7 @@ import { useConnectionStore } from "@/stores/connectionStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import { isSingleDatabase } from "@/lib/databaseCapabilities";
+import { canExecuteWithoutSelectedDatabase } from "@/lib/connectionLevelDatabaseBootstrap";
 import { classifySqlActivityKind } from "@/lib/historyActivityKind";
 import { sqlMetadataRefreshTarget } from "@/lib/sqlMetadataRefresh";
 import { classifyRedisCommandSafety, firstRedisCommandToken } from "@/lib/redisCommandSafety";
@@ -14,7 +15,6 @@ import { extractSqlParameters } from "@/lib/sqlParameters";
 import type { ConnectionConfig, QueryTab } from "@/types/database";
 
 const DANGER_RE = /^\s*(DROP|DELETE|TRUNCATE|ALTER|UPDATE|MERGE|REPLACE)\b/i;
-const CONNECTION_LEVEL_CREATE_DATABASE_RE = /^\s*CREATE\s+(?:DATABASE|SCHEMA)\s+(?:IF\s+NOT\s+EXISTS\s+)?[`"[\]\w$.-]+/i;
 
 export function stripSqlComments(sql: string): string {
   return sql
@@ -225,17 +225,6 @@ export function useSqlExecution(deps: {
 function supportsSqlTemplateParameters(connection: ConnectionConfig | undefined): boolean {
   if (!connection) return false;
   return connection.db_type !== "redis" && connection.db_type !== "mongodb";
-}
-
-function canExecuteWithoutSelectedDatabase(connection: ConnectionConfig, sql: string): boolean {
-  if (connection.db_type !== "mysql") return false;
-  const statements = stripSqlComments(sql)
-    .split(";")
-    .map((stmt) => stmt.trim())
-    .filter(Boolean);
-  // Only connection-level database creation may bypass the selected-database guard.
-  if (statements.length !== 1) return false;
-  return CONNECTION_LEVEL_CREATE_DATABASE_RE.test(statements[0]);
 }
 
 export function requiresDatabaseSelection(tab: QueryTab, connection: ConnectionConfig | undefined, sql = ""): boolean {

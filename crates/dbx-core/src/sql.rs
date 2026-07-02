@@ -68,6 +68,7 @@ pub struct SqlFilePreview {
     pub file_path: String,
     pub size_bytes: u64,
     pub preview: String,
+    pub can_execute_without_selected_database: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1478,6 +1479,31 @@ fn executable_sql_keyword_matches(token: &str, keyword: &str) -> bool {
         || (keyword.eq_ignore_ascii_case("DESCRIBE") && token.eq_ignore_ascii_case("DESC"))
 }
 
+fn is_mysql_compatible_import_profile(profile: &str) -> bool {
+    matches!(
+        profile,
+        "mariadb"
+            | "tidb"
+            | "oceanbase"
+            | "custom_mysql"
+            | "doris"
+            | "starrocks"
+            | "manticoresearch"
+            | "selectdb"
+            | "goldendb"
+    )
+}
+
+pub(crate) fn supports_connection_level_database_bootstrap_target(
+    db_type: &DatabaseType,
+    driver_profile: Option<&str>,
+) -> bool {
+    matches!(db_type, DatabaseType::Mysql | DatabaseType::Doris | DatabaseType::StarRocks | DatabaseType::Goldendb)
+        || driver_profile
+            .map(|profile| profile.to_ascii_lowercase())
+            .is_some_and(|profile| is_mysql_compatible_import_profile(&profile) && profile != "manticoresearch")
+}
+
 fn is_mysql_compatible_import_target(db_type: &DatabaseType, driver_profile: Option<&str>) -> bool {
     matches!(
         db_type,
@@ -1486,20 +1512,9 @@ fn is_mysql_compatible_import_target(db_type: &DatabaseType, driver_profile: Opt
             | DatabaseType::StarRocks
             | DatabaseType::ManticoreSearch
             | DatabaseType::Goldendb
-    ) || driver_profile.map(|profile| profile.to_ascii_lowercase()).is_some_and(|profile| {
-        matches!(
-            profile.as_str(),
-            "mariadb"
-                | "tidb"
-                | "oceanbase"
-                | "custom_mysql"
-                | "doris"
-                | "starrocks"
-                | "manticoresearch"
-                | "selectdb"
-                | "goldendb"
-        )
-    })
+    ) || driver_profile
+        .map(|profile| profile.to_ascii_lowercase())
+        .is_some_and(|profile| is_mysql_compatible_import_profile(&profile))
 }
 
 fn mysql_executable_comment_body(statement: &str) -> Option<&str> {
