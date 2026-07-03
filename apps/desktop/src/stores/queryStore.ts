@@ -11,6 +11,7 @@ import { ACTIVE_TAB_STORAGE_KEY, OPEN_TABS_STORAGE_KEY, restoreOpenTabsState, se
 import {
   evaluateMongoAggregateSafety,
   evaluateMongoWriteSafety,
+  mongoCollectionStatsToQueryResult,
   mongoCountToQueryResult,
   mongoCreateIndexToQueryResult,
   mongoDocumentsToQueryResult,
@@ -1992,6 +1993,25 @@ export const useQueryStore = defineStore("query", () => {
                   collection: mongoCommand.collection,
                   database: currentDatabase,
                   indexCount: indexes.length,
+                  elapsed: elapsed(),
+                });
+                break;
+              }
+              case "collectionStats": {
+                console.info("[DBX][executeTabSql:mongo-collection-stats:start]", {
+                  traceId,
+                  collection: mongoCommand.collection,
+                  metric: mongoCommand.metric,
+                  database: currentDatabase,
+                });
+                const stats = await api.mongoCollectionStats(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.scale, executionId);
+                allResults.push(markQueryResultRowsRaw(mongoCollectionStatsToQueryResult(mongoCommand.metric, stats as unknown as Record<string, unknown>, performance.now() - commandStartedAt)));
+                mongoEditTarget = undefined;
+                console.info("[DBX][executeTabSql:mongo-collection-stats:done]", {
+                  traceId,
+                  collection: mongoCommand.collection,
+                  metric: mongoCommand.metric,
+                  database: currentDatabase,
                   elapsed: elapsed(),
                 });
                 break;

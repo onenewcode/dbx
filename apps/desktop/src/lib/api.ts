@@ -390,6 +390,7 @@ export const documentFindDocuments = forward("documentFindDocuments");
 export const mongoFindDocuments = forward("mongoFindDocuments");
 export const mongoServerVersion = forward("mongoServerVersion");
 export const mongoAggregateDocuments = forward("mongoAggregateDocuments");
+export const mongoCollectionStats = forward("mongoCollectionStats");
 export const mongoCreateIndex = forward("mongoCreateIndex");
 export const mongoDropIndexes = forward("mongoDropIndexes");
 export const documentInsertDocument = forward("documentInsertDocument");

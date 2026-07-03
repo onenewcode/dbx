@@ -461,6 +461,7 @@ async fn main() {
         .route("/document-store/delete-document", post(routes::document_store::delete_document))
         .route("/mongo/find-documents", post(routes::mongo::find_documents))
         .route("/mongo/server-version", post(routes::mongo::server_version))
+        .route("/mongo/collection-stats", post(routes::mongo::collection_stats))
         .route("/mongo/aggregate-documents", post(routes::mongo::aggregate_documents))
         .route("/mongo/create-index", post(routes::mongo::create_index))
         .route("/mongo/drop-indexes", post(routes::mongo::drop_indexes))

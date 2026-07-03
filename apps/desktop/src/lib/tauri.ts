@@ -1484,6 +1484,15 @@ export interface MongoDocumentResult {
   total: number;
 }
 
+export interface MongoCollectionStatsResult {
+  count: unknown;
+  size: unknown;
+  avgObjSize: unknown;
+  storageSize: unknown;
+  totalIndexSize: unknown;
+  nindexes: unknown;
+}
+
 export interface MongoGridFsFileInfo {
   id: string;
   filename?: string;
@@ -1593,6 +1602,10 @@ export async function mongoServerVersion(connectionId: string, database: string,
 
 export async function mongoAggregateDocuments(connectionId: string, database: string, collection: string, pipelineJson: string, maxRows?: number, executionId?: string): Promise<MongoDocumentResult> {
   return invoke("mongo_aggregate_documents", { connectionId, database, collection, pipelineJson, maxRows, executionId });
+}
+
+export async function mongoCollectionStats(connectionId: string, database: string, collection: string, scale?: number, executionId?: string): Promise<MongoCollectionStatsResult> {
+  return invoke("mongo_collection_stats", { connectionId, database, collection, scale, executionId });
 }
 
 export async function mongoCreateIndex(connectionId: string, database: string, collection: string, keysJson: string, optionsJson?: string): Promise<{ name: string }> {

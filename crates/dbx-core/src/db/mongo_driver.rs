@@ -24,6 +24,19 @@ pub struct MongoDropIndexesResult {
     pub affected_rows: u64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MongoCollectionStatsResult {
+    pub count: serde_json::Value,
+    pub size: serde_json::Value,
+    #[serde(rename = "avgObjSize")]
+    pub avg_obj_size: serde_json::Value,
+    #[serde(rename = "storageSize")]
+    pub storage_size: serde_json::Value,
+    #[serde(rename = "totalIndexSize")]
+    pub total_index_size: serde_json::Value,
+    pub nindexes: serde_json::Value,
+}
+
 pub async fn connect(url: &str, timeout: Duration, idle_timeout: Duration) -> Result<Client, String> {
     let url = normalize_mongo_uri_direct_connection(url);
     let is_multi_host = is_multi_host_mongo_uri(&url);
@@ -134,6 +147,52 @@ pub async fn server_version(client: &Client, database: &str) -> Result<String, S
 
 fn server_version_from_build_info(result: &Document) -> Result<String, String> {
     result.get_str("version").map(str::to_string).map_err(|e| format!("MongoDB server version not found: {e}"))
+}
+
+pub async fn collection_stats(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    scale: Option<serde_json::Number>,
+) -> Result<MongoCollectionStatsResult, String> {
+    let database = database.trim();
+    let collection = collection.trim();
+    if database.is_empty() {
+        return Err("Database name is required".to_string());
+    }
+    if collection.is_empty() {
+        return Err("Collection name is required".to_string());
+    }
+
+    let result = client
+        .database(database)
+        .run_command(collection_stats_command_document(collection, scale.as_ref()))
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(collection_stats_result_from_document(&result))
+}
+
+fn collection_stats_command_document(collection: &str, scale: Option<&serde_json::Number>) -> Document {
+    let mut command = doc! { "collStats": collection };
+    if let Some(scale) = scale {
+        command.insert("scale", json_value_to_bson(&serde_json::Value::Number(scale.clone())));
+    }
+    command
+}
+
+fn collection_stats_result_from_document(result: &Document) -> MongoCollectionStatsResult {
+    MongoCollectionStatsResult {
+        count: collection_stats_field(result, "count"),
+        size: collection_stats_field(result, "size"),
+        avg_obj_size: collection_stats_field(result, "avgObjSize"),
+        storage_size: collection_stats_field(result, "storageSize"),
+        total_index_size: collection_stats_field(result, "totalIndexSize"),
+        nindexes: collection_stats_field(result, "nindexes"),
+    }
+}
+
+fn collection_stats_field(result: &Document, key: &str) -> serde_json::Value {
+    result.get(key).map(bson_to_json).unwrap_or(serde_json::Value::Null)
 }
 
 pub async fn list_databases(client: &Client) -> Result<Vec<String>, String> {
@@ -1548,6 +1607,53 @@ mod tests {
         let error = server_version_from_build_info(&doc! { "ok": 1 }).unwrap_err();
 
         assert!(error.contains("MongoDB server version not found"));
+    }
+
+    #[test]
+    fn collection_stats_result_reads_expected_fields() {
+        let result = collection_stats_result_from_document(&doc! {
+            "count": 12_i64,
+            "size": 4096_i64,
+            "avgObjSize": 341.3_f64,
+            "storageSize": 8192_i64,
+            "totalIndexSize": 2048_i64,
+            "nindexes": 3_i32,
+        });
+
+        assert_eq!(
+            result,
+            MongoCollectionStatsResult {
+                count: serde_json::json!(12),
+                size: serde_json::json!(4096),
+                avg_obj_size: serde_json::json!(341.3),
+                storage_size: serde_json::json!(8192),
+                total_index_size: serde_json::json!(2048),
+                nindexes: serde_json::json!(3),
+            }
+        );
+    }
+
+    #[test]
+    fn collection_stats_result_fills_missing_fields_with_null() {
+        let result = collection_stats_result_from_document(&doc! {
+            "count": 7_i32,
+            "storageSize": 512_i32,
+        });
+
+        assert_eq!(result.count, serde_json::json!(7));
+        assert_eq!(result.size, serde_json::Value::Null);
+        assert_eq!(result.avg_obj_size, serde_json::Value::Null);
+        assert_eq!(result.storage_size, serde_json::json!(512));
+        assert_eq!(result.total_index_size, serde_json::Value::Null);
+        assert_eq!(result.nindexes, serde_json::Value::Null);
+    }
+
+    #[test]
+    fn collection_stats_command_serializes_scale() {
+        let command = collection_stats_command_document("users", Some(&serde_json::Number::from(1024)));
+
+        assert_eq!(command.get_str("collStats").unwrap(), "users");
+        assert!(matches!(command.get("scale"), Some(Bson::Int64(1024))));
     }
 
     #[test]

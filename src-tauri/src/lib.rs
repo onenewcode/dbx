@@ -952,6 +952,7 @@ pub fn run() {
             commands::document_cmd::document_delete_gridfs_file,
             commands::mongo_cmd::mongo_find_documents,
             commands::mongo_cmd::mongo_server_version,
+            commands::mongo_cmd::mongo_collection_stats,
             commands::mongo_cmd::mongo_aggregate_documents,
             commands::mongo_cmd::mongo_create_index,
             commands::mongo_cmd::mongo_drop_indexes,

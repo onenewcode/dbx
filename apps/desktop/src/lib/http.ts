@@ -64,6 +64,7 @@ import type {
   KvPutResponse,
   KvDeleteResponse,
   MongoDocumentResult,
+  MongoCollectionStatsResult,
   MongoGridFsBucketInfo,
   HistoryEntry,
   SqlFileRequest,
@@ -1857,6 +1858,10 @@ export async function mongoServerVersion(connectionId: string, database: string,
 
 export async function mongoAggregateDocuments(connectionId: string, database: string, collection: string, pipelineJson: string, maxRows?: number, executionId?: string): Promise<MongoDocumentResult> {
   return post("/api/mongo/aggregate-documents", { connectionId, database, collection, pipelineJson, maxRows, executionId });
+}
+
+export async function mongoCollectionStats(connectionId: string, database: string, collection: string, scale?: number, executionId?: string): Promise<MongoCollectionStatsResult> {
+  return post("/api/mongo/collection-stats", { connectionId, database, collection, scale, executionId });
 }
 
 export async function mongoCreateIndex(connectionId: string, database: string, collection: string, keysJson: string, optionsJson?: string): Promise<{ name: string }> {
