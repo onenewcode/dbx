@@ -30,7 +30,7 @@ export function clampRedisMemberDetailSheetWidth(width: number, viewportWidth: n
 export function formatRedisMemberDetail(value: unknown): RedisMemberDetail {
   if (typeof value === "string") {
     const json = parseRedisJsonDetail(value);
-    return json ? { text: json.formattedText, rawText: value, format: "json", json } : { text: value, rawText: value, format: "text" };
+    return json ? { text: json.formattedText, rawText: value, format: "json", json } : { text: sanitizeRedisDisplayText(value), rawText: value, format: "text" };
   }
 
   try {
@@ -49,7 +49,7 @@ export function formatRedisMemberDetail(value: unknown): RedisMemberDetail {
 
 export function formatRedisStringValue(value: unknown): string {
   if (typeof value !== "string") return String(value ?? "");
-  return formatRedisJsonString(value) ?? value;
+  return formatRedisJsonString(value) ?? sanitizeRedisDisplayText(value);
 }
 
 export function formatRedisCommandResult(value: unknown): string {
@@ -117,7 +117,26 @@ function isJsonContainer(value: unknown): boolean {
 }
 
 export function getRedisMemberSelectionKey(title: string, value: unknown): string {
-  return `${title}\n${formatRedisMemberDetail(value).text}`;
+  const detail = formatRedisMemberDetail(value);
+  return `${title}\n${detail.format === "json" ? detail.text : detail.rawText}`;
+}
+
+export function sanitizeRedisDisplayText(value: string): string {
+  let output = "";
+  for (const ch of value) {
+    if (ch === "\n" || ch === "\r" || ch === "\t") {
+      output += ch;
+      continue;
+    }
+    if (ch >= " " && ch !== "\u007f" && !isUtf8ControlCharacter(ch)) {
+      output += ch;
+    }
+  }
+  return output;
+}
+
+function isUtf8ControlCharacter(ch: string): boolean {
+  return /\p{Cc}/u.test(ch);
 }
 
 export function highlightRedisJsonDetail(json: string): string {
