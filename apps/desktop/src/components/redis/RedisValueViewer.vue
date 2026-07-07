@@ -615,8 +615,13 @@ function generateInsertStatements(): string | null {
     }
     case "stream": {
       for (const entry of data.value.data.entries) {
-        const fields = entry.fields.map(({ field, value }) => `${escapeRedisArg(field)} ${escapeRedisArg(value)}`).join(" ");
-        commands.push(`XADD ${escapeRedisArg(key)} * ${fields}`);
+        const fields = entry.fields.map(({ field, value }) => {
+          const fieldText = blobWriteText(field);
+          const valueText = blobWriteText(value);
+          return fieldText == null || valueText == null ? null : `${escapeRedisArg(fieldText)} ${escapeRedisArg(valueText)}`;
+        });
+        if (fields.some((field) => field == null)) return null;
+        commands.push(`XADD ${escapeRedisArg(key)} * ${(fields as string[]).join(" ")}`);
       }
       break;
     }
@@ -832,7 +837,7 @@ function selectDefaultMember(redisValue: RedisValue) {
       const firstEntry = redisValue.data.entries[0];
       const firstField = firstEntry?.fields[0];
       if (!firstField) return clearSelectedMember();
-      return selectMember(firstField.field, firstField.value, { kind: "stream", field: firstField.field, canEdit: false }, streamFieldSelectionIdentity(firstEntry.id, 0));
+      return selectMember(formatValue(firstField.field), firstField.value, { kind: "stream", field: formatValue(firstField.field), canEdit: false }, streamFieldSelectionIdentity(firstEntry.id, 0));
     }
     default:
       clearSelectedMember();
@@ -1445,15 +1450,20 @@ onBeforeUnmount(() => {
                 <div class="mb-1 text-xs text-muted-foreground">{{ row.entry.id }}</div>
                 <div
                   v-for="(field, fieldIndex) in row.entry.fields"
-                  :key="`${row.id}:${field.field}:${fieldIndex}`"
+                  :key="`${row.id}:${field.field.raw_base64}:${fieldIndex}`"
                   class="grid grid-cols-[minmax(6rem,0.35fr)_1fr_56px] gap-3 py-0.5 group cursor-pointer"
-                  :class="{ 'bg-accent/60': isSelectedMember(field.field, field.value, streamFieldSelectionIdentity(row.entry.id, fieldIndex)) }"
-                  @click="viewMember(field.field, field.value, { kind: 'stream', field: field.field, canEdit: false }, streamFieldSelectionIdentity(row.entry.id, fieldIndex))"
+                  :class="{ 'bg-accent/60': isSelectedMember(formatValue(field.field), field.value, streamFieldSelectionIdentity(row.entry.id, fieldIndex)) }"
+                  @click="viewMember(formatValue(field.field), field.value, { kind: 'stream', field: formatValue(field.field), canEdit: false }, streamFieldSelectionIdentity(row.entry.id, fieldIndex))"
                 >
-                  <span class="truncate text-blue-500">{{ field.field }}</span>
-                  <span class="truncate text-muted-foreground">{{ field.value }}</span>
+                  <span class="truncate text-blue-500">{{ formatValue(field.field) }}</span>
+                  <span class="truncate text-muted-foreground">{{ formatValue(field.value) }}</span>
                   <span class="flex justify-end gap-1">
-                    <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100" :title="t('redis.viewMember')" @click.stop="viewMember(field.field, field.value, { kind: 'stream', field: field.field, canEdit: false }, streamFieldSelectionIdentity(row.entry.id, fieldIndex))"
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      class="h-5 w-5 opacity-0 group-hover:opacity-100"
+                      :title="t('redis.viewMember')"
+                      @click.stop="viewMember(formatValue(field.field), field.value, { kind: 'stream', field: formatValue(field.field), canEdit: false }, streamFieldSelectionIdentity(row.entry.id, fieldIndex))"
                       ><Eye class="w-3 h-3"
                     /></Button>
                     <Button variant="ghost" size="icon" class="h-5 w-5 opacity-0 group-hover:opacity-100" :title="t('redis.copyMember')" @click.stop="copyMember(field.value)"><Copy class="w-3 h-3" /></Button>

@@ -107,8 +107,8 @@ pub struct RedisZsetItem {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RedisStreamField {
-    pub field: String,
-    pub value: String,
+    pub field: RedisBlob,
+    pub value: RedisBlob,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1927,7 +1927,11 @@ fn redis_search_value_text(value: &RedisValueData) -> String {
         RedisValueData::Stream { entries } => entries
             .iter()
             .flat_map(|entry| {
-                entry.fields.iter().flat_map(|field| [field.field.clone(), field.value.clone()]).collect::<Vec<_>>()
+                entry
+                    .fields
+                    .iter()
+                    .flat_map(|field| [redis_blob_display_text(&field.field), redis_blob_display_text(&field.value)])
+                    .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>()
             .join(" "),
@@ -2029,10 +2033,16 @@ fn parse_stream_entry(entry: RedisRawValue) -> Option<RedisStreamEntry> {
         let Some(value) = fields.next() else {
             break;
         };
-        if let Some(field_name) = redis_value_to_string(field) {
-            let value = redis_value_to_string(value).unwrap_or_default();
-            parsed_fields.push(RedisStreamField { field: field_name, value });
-        }
+        let Some(field_bytes) = redis_value_to_bytes(field) else {
+            continue;
+        };
+        let Some(value_bytes) = redis_value_to_bytes(value) else {
+            continue;
+        };
+        parsed_fields.push(RedisStreamField {
+            field: redis_blob_from_bytes(&field_bytes),
+            value: redis_blob_from_bytes(&value_bytes),
+        });
     }
 
     Some(RedisStreamEntry { id, fields: parsed_fields })
@@ -2664,11 +2674,39 @@ mod tests {
             vec![RedisStreamEntry {
                 id: "1714470000000-0".to_string(),
                 fields: vec![
-                    RedisStreamField { field: "event".to_string(), value: "login".to_string() },
-                    RedisStreamField { field: "user_id".to_string(), value: "42".to_string() },
+                    RedisStreamField { field: text_blob("event"), value: text_blob("login") },
+                    RedisStreamField { field: text_blob("user_id"), value: text_blob("42") },
                 ],
             }]
         );
+    }
+
+    #[test]
+    fn parses_stream_entries_with_binary_field_and_value_bytes() {
+        let field_bytes = vec![0xAC, 0xED, 0x00, 0x05];
+        let value_bytes = vec![0x80, 0x00, b'A', b'\\'];
+        let raw = RedisRawValue::Array(vec![RedisRawValue::Array(vec![
+            bulk("1714470000000-0"),
+            RedisRawValue::Array(vec![
+                RedisRawValue::BulkString(field_bytes.clone()),
+                RedisRawValue::BulkString(value_bytes.clone()),
+            ]),
+        ])]);
+
+        let parsed = parse_stream_entries(raw);
+
+        assert_eq!(
+            parsed,
+            vec![RedisStreamEntry {
+                id: "1714470000000-0".to_string(),
+                fields: vec![RedisStreamField {
+                    field: redis_blob_from_bytes(&field_bytes),
+                    value: redis_blob_from_bytes(&value_bytes),
+                }],
+            }]
+        );
+        assert_eq!(parsed[0].fields[0].field.encoding, RedisBlobEncoding::Binary);
+        assert_eq!(parsed[0].fields[0].value.encoding, RedisBlobEncoding::Binary);
     }
 
     #[test]
@@ -2687,7 +2725,7 @@ mod tests {
             parsed,
             vec![RedisStreamEntry {
                 id: "1714470000001-0".to_string(),
-                fields: vec![RedisStreamField { field: "event".to_string(), value: "logout".to_string() }],
+                fields: vec![RedisStreamField { field: text_blob("event"), value: text_blob("logout") }],
             }]
         );
     }

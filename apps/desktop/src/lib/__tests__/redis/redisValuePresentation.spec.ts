@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { canRenderRedisValueFormat, formatRedisMemberDetail, formatRedisStringValue, getRedisMemberSelectionKey, preferredRedisValueFormat, redisMemberCopyText, sanitizeRedisDisplayText } from "@/lib/redis/redisValuePresentation";
+import { canRenderRedisValueFormat, formatRedisMemberDetail, formatRedisStringValue, getRedisMemberSelectionKey, preferredRedisValueFormat, redisMemberCopyText, redisValueCopyText, redisValuePreview, sanitizeRedisDisplayText } from "@/lib/redis/redisValuePresentation";
 
 describe("redisValuePresentation", () => {
   it("strips control bytes from display without mutating raw member text", () => {
@@ -140,5 +140,47 @@ describe("redisValuePresentation", () => {
         encoding: "binary",
       }),
     ).toBe("\\xac\\xed\\x00\\x05");
+  });
+
+  it("preserves binary stream field and value bytes for preview and copy", () => {
+    const value = {
+      key_display: "events",
+      key_raw: Buffer.from("events", "utf8").toString("base64"),
+      ttl: -1,
+      redis_type: "stream",
+      data: {
+        kind: "stream" as const,
+        entries: [
+          {
+            id: "1714470000000-0",
+            fields: [
+              {
+                field: {
+                  raw_base64: "rO0ABQ==",
+                  encoding: "binary" as const,
+                },
+                value: {
+                  raw_base64: Buffer.from('{"id":1}', "utf8").toString("base64"),
+                  encoding: "utf8" as const,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    expect(redisValuePreview(value)).toBe('\\xac\\xed\\x00\\x05 {"id":1}');
+    expect(JSON.parse(redisValueCopyText(value))).toEqual([
+      {
+        id: "1714470000000-0",
+        fields: [
+          {
+            field: "\\xac\\xed\\x00\\x05",
+            value: '{"id":1}',
+          },
+        ],
+      },
+    ]);
   });
 });

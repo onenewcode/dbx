@@ -99,15 +99,11 @@ test("detects Java-serialized payloads as a dedicated view", () => {
   assert.equal(javaSerializedString.javaSerialized?.formattedText, '"sometext"');
 
   const javaSerializedMap = formatRedisMemberDetail({
-    raw_base64:
-      "rO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcAUHsMEzFmDRAwACRgAKbG9hZEZhY3RvckkACXRocmVzaG9sZHhwP0AAAAAAAAx3CAAAABAAAAACdAADYmFydAADYmF6dAADZm9vc3IAEWphdmEubGFuZy5JbnRlZ2VyEuKgpPeBhzgCAAFJAAV2YWx1ZXhyABBqYXZhLmxhbmcuTnVtYmVyhqyVHQuU4IsCAAB4cAAAAHt4",
+    raw_base64: "rO0ABXNyABFqYXZhLnV0aWwuSGFzaE1hcAUHsMEzFmDRAwACRgAKbG9hZEZhY3RvckkACXRocmVzaG9sZHhwP0AAAAAAAAx3CAAAABAAAAACdAADYmFydAADYmF6dAADZm9vc3IAEWphdmEubGFuZy5JbnRlZ2VyEuKgpPeBhzgCAAFJAAV2YWx1ZXhyABBqYXZhLmxhbmcuTnVtYmVyhqyVHQuU4IsCAAB4cAAAAHt4",
     encoding: "binary" as const,
   });
   assert.equal((javaSerializedMap.javaSerialized?.value as { $class?: string }).$class, "java.util.HashMap");
-  assert.equal(
-    ((javaSerializedMap.javaSerialized?.value as { obj?: { bar?: string } }).obj ?? {}).bar,
-    "baz",
-  );
+  assert.equal(((javaSerializedMap.javaSerialized?.value as { obj?: { bar?: string } }).obj ?? {}).bar, "baz");
 
   const plainText = formatRedisMemberDetail(blobFromText("Ada"));
   assert.equal(canRenderRedisValueFormat(plainText, "json"), false);
@@ -225,9 +221,9 @@ test("copies stream entries without collapsing repeated field names", () => {
         {
           id: "1728123456789-0",
           fields: [
-            { field: "event", value: "login" },
-            { field: "event", value: "logout" },
-            { field: "user_id", value: "42" },
+            { field: blobFromText("event"), value: blobFromText("login") },
+            { field: blobFromText("event"), value: blobFromText("logout") },
+            { field: blobFromText("user_id"), value: blobFromText("42") },
           ],
         },
       ],

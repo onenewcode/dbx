@@ -309,7 +309,7 @@ export function redisValuePreview(value: RedisValue): string {
     case "stream": {
       const first = value.data.entries[0];
       if (!first) return "";
-      const joined = first.fields.map(({ field, value: entryValue }) => `${field} ${entryValue}`).join(" ");
+      const joined = first.fields.map(({ field, value: entryValue }) => `${redisBlobDisplayText(field)} ${redisBlobDisplayText(entryValue)}`).join(" ");
       return previewText(joined);
     }
     default:
@@ -358,8 +358,8 @@ export function redisValueCopyText(value: RedisValue, collectionItems: RedisColl
         value.data.entries.map((entry) => ({
           id: entry.id,
           fields: entry.fields.map((field) => ({
-            field: field.field,
-            value: field.value,
+            field: redisBlobRawText(field.field),
+            value: redisBlobRawText(field.value),
           })),
         })),
         null,

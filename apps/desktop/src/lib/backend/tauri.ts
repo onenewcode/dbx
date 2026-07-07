@@ -1329,8 +1329,8 @@ export interface RedisZsetItem {
 }
 
 export interface RedisStreamField {
-  field: string;
-  value: string;
+  field: RedisBlob;
+  value: RedisBlob;
 }
 
 export interface RedisStreamEntry {
