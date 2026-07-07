@@ -496,6 +496,7 @@ fn create_pool(
     let tls_url = mysql_tls_url(url)?;
     let opts =
         mysql_async::Opts::from_url(&mysql_async_url(&tls_url.url)).map_err(|e| format!("Invalid MySQL URL: {e}"))?;
+    let tcp_host = mysql_async_tcp_host(opts.ip_or_hostname()).to_string();
     let base_ssl_opts = opts.ssl_opts().cloned();
     let max_connections = max_connections.max(1);
     // Single-connection pools (max_connections == 1) are client session pools that
@@ -512,6 +513,7 @@ fn create_pool(
         None => mysql_setup_queries(url, extra_setup_queries),
     };
     let mut builder = mysql_async::OptsBuilder::from_opts(opts)
+        .ip_or_hostname(tcp_host)
         .stmt_cache_size(0)
         .prefer_socket(false)
         .pool_opts(Some(pool_opts))
@@ -521,6 +523,17 @@ fn create_pool(
         builder = builder.ssl_opts(ssl_opts);
     }
     Ok(MySqlPool::new(builder))
+}
+
+fn mysql_async_tcp_host(host: &str) -> &str {
+    if let Some(inner) = host.strip_prefix('[').and_then(|value| value.strip_suffix(']')) {
+        // mysql_async preserves IPv6 brackets when converting URL opts into an
+        // OptsBuilder, but the builder TCP path resolves host strings directly.
+        if inner.parse::<std::net::Ipv6Addr>().is_ok() {
+            return inner;
+        }
+    }
+    host
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3709,6 +3722,27 @@ UNIQUE KEY(`tenant_id`, `name``part`)
     fn mysql_tcp_keepalive_uses_milliseconds_not_seconds() {
         assert_eq!(MYSQL_TCP_KEEPALIVE_MS, 30_000);
         assert!(MYSQL_TCP_KEEPALIVE_MS >= 1_000);
+    }
+
+    #[test]
+    fn mysql_async_builder_host_strips_ipv6_url_brackets() {
+        let opts = mysql_async::Opts::from_url("mysql://root:secret@[2001:db8::1]:3306/app").unwrap();
+
+        assert_eq!(opts.ip_or_hostname(), "[2001:db8::1]");
+        assert_eq!(mysql_async_tcp_host(opts.ip_or_hostname()), "2001:db8::1");
+
+        let builder_opts = mysql_async::Opts::from(
+            mysql_async::OptsBuilder::from_opts(opts).ip_or_hostname(mysql_async_tcp_host("[2001:db8::1]").to_string()),
+        );
+        assert_eq!(builder_opts.ip_or_hostname(), "2001:db8::1");
+        assert_eq!(builder_opts.tcp_port(), 3306);
+    }
+
+    #[test]
+    fn mysql_async_builder_host_only_strips_valid_ipv6_literals() {
+        assert_eq!(mysql_async_tcp_host("2001:db8::1"), "2001:db8::1");
+        assert_eq!(mysql_async_tcp_host("[mysql.example.com]"), "[mysql.example.com]");
+        assert_eq!(mysql_async_tcp_host("mysql.example.com"), "mysql.example.com");
     }
 
     #[test]

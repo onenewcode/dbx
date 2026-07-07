@@ -23,7 +23,7 @@ import {
   ArrowUp,
   ArrowDown,
   ArrowUpDown,
-  Download,
+  Upload,
   Plus,
   Trash2,
   Save,
@@ -49,7 +49,6 @@ import {
   RotateCcw,
   Pencil,
   Filter,
-  FileDown,
   SquareDashed,
   Check,
   CopyPlus,
@@ -431,14 +430,19 @@ function typeColorClass(t: string): string {
   // Strip precision/scale suffix like (20,6)
   const base = t.replace(/\(.*\)$/, "").toLowerCase();
   if (["int", "int2", "int4", "int8", "smallint", "bigint", "integer", "serial", "bigserial", "tinyint", "mediumint"].includes(base)) return "text-blue-500";
-  if (["float4", "float8", "double", "decimal", "numeric", "real", "float", "money"].includes(base)) return "text-cyan-500";
-  if (["varchar", "text", "char", "character varying", "character", "string", "nvarchar", "nchar", "ntext", "longtext", "mediumtext", "tinytext", "clob"].includes(base)) return "text-green-500";
+  // number: Oracle/Dameng NUMBER；binary_float/binary_double: Oracle IEEE 浮点
+  if (["float4", "float8", "double", "decimal", "numeric", "real", "float", "money", "number", "binary_float", "binary_double", "dec"].includes(base)) return "text-cyan-500";
+  // varchar2/nvarchar2/long: Oracle/Dameng 字符类型（LONG 在 Oracle 中是变长字符）
+  if (["varchar", "varchar2", "nvarchar2", "text", "char", "character varying", "character", "string", "nvarchar", "nchar", "ntext", "longtext", "mediumtext", "tinytext", "clob", "long"].includes(base)) return "text-green-500";
   if (["bool", "boolean", "bit"].includes(base)) return "text-orange-500";
   if (["timestamp", "timestamptz", "datetime", "date", "time", "timetz", "datetime2", "smalldatetime"].includes(base)) return "text-purple-500";
-  if (["json", "jsonb", "xml", "array"].includes(base)) return "text-pink-500";
+  // xmltype: Oracle XMLType
+  if (["json", "jsonb", "xml", "xmltype", "array"].includes(base)) return "text-pink-500";
   if (["uuid", "uniqueidentifier"].includes(base)) return "text-amber-500";
-  if (["bytea", "blob", "binary", "varbinary", "image"].includes(base)) return "text-red-400";
-  if (["geometry", "geography"].includes(base)) return "text-emerald-500";
+  // raw/long raw/bfile: Oracle 二进制
+  if (["bytea", "blob", "binary", "varbinary", "image", "raw", "long raw", "bfile"].includes(base)) return "text-red-400";
+  // sdo_geometry: Oracle Spatial
+  if (["geometry", "geography", "sdo_geometry"].includes(base)) return "text-emerald-500";
   return "text-muted-foreground";
 }
 const contextCell = ref<{ rowId: number; rowIndex: number; col: number } | null>(null);
@@ -1076,6 +1080,7 @@ const serverFilterValueByKey = ref<Map<string, CellValue>>(new Map());
 let serverFilterRequestId = 0;
 let serverFilterSearchTimer: ReturnType<typeof window.setTimeout> | undefined;
 const filterBuilderOpen = ref(false);
+const filterBuilderColumnSearch = ref("");
 const filterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
   { value: "equals", labelKey: "grid.filterBuilderEquals" },
   { value: "not-equals", labelKey: "grid.filterBuilderNotEquals" },
@@ -1088,6 +1093,12 @@ const filterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
 ];
 const filterBuilderColumns = computed(() => props.tableMeta?.columns ?? []);
 const filterBuilderColumnOptions = computed(() => filterBuilderColumns.value.map((column) => column.name));
+const filteredFilterBuilderColumnOptions = computed(() => {
+  const query = filterBuilderColumnSearch.value.trim().toLowerCase();
+  if (!query) return filterBuilderColumnOptions.value;
+  return filterBuilderColumnOptions.value.filter((columnName) => columnName.toLowerCase().includes(query));
+});
+const filterBuilderColumnSearchNavigationKeys = new Set(["Escape", "Tab", "ArrowUp", "ArrowDown", "Home", "End", "PageUp", "PageDown"]);
 const structuredFilterCacheKey = computed(() => props.cacheKey || [props.connectionId ?? "", props.database ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? ""].join("\u0001"));
 const structuredFilterScopeKey = computed(() => [props.connectionId ?? "", props.database ?? "", props.schema ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? "", filterBuilderColumnOptions.value.join("\0")].join("\u0001"));
 const structuredFilterRules = ref<StructuredFilterRule[]>([]);
@@ -1811,6 +1822,24 @@ function updateStructuredFilterRule(ruleId: string, patch: Partial<StructuredFil
   });
 }
 
+function updateStructuredFilterRuleColumn(ruleId: string, columnName: string) {
+  updateStructuredFilterRule(ruleId, { columnName });
+  filterBuilderColumnSearch.value = "";
+}
+
+function handleFilterBuilderColumnSearchKeydown(event: KeyboardEvent) {
+  if (event.isComposing || event.key === "Process") {
+    event.stopPropagation();
+    return;
+  }
+  if (filterBuilderColumnSearchNavigationKeys.has(event.key)) return;
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  if (event.key.length === 1 || event.key === "Backspace" || event.key === "Delete") {
+    // Let text editing stay in the search box without breaking Select navigation keys.
+    event.stopPropagation();
+  }
+}
+
 function resetStructuredFilters() {
   appliedStructuredWhereInput.value = "";
   structuredFilterRules.value = filterBuilderColumnOptions.value.length > 0 ? [defaultStructuredFilterRule()] : [];
@@ -1866,6 +1895,10 @@ async function applyStructuredFilters() {
 }
 
 watch([structuredFilterCacheKey, structuredFilterScopeKey], loadStructuredFilterStateForScope, { immediate: true });
+
+watch(filterBuilderOpen, (open) => {
+  if (!open) filterBuilderColumnSearch.value = "";
+});
 
 watch(
   [structuredFilterRules, appliedStructuredWhereInput],
@@ -2645,8 +2678,6 @@ const { initColumnWidths, onResizeStart, autoFitColumn, renderedColumnWidths, to
   columns: visibleColumns,
   sourceRows: computed(() => props.result.rows),
   columnIndexes: visibleColumnIndexes,
-  gridRef,
-  scrollbarGutter: gridScrollbarGutter,
 });
 const gridStyle = computed(() => ({
   ...columnVars.value,
@@ -6668,7 +6699,7 @@ function binaryDownloadSubmenu(detail: DataGridCellDetail | null): ContextMenuIt
   if (!canDownloadDetailBinaryValue(detail)) return null;
   return {
     label: t("grid.downloadBinaryValue"),
-    icon: Download,
+    icon: Upload,
     children: BINARY_CELL_DOWNLOAD_MODES.map((mode) => ({
       label: t(`grid.binaryDownload.${mode}`),
       action: () => {
@@ -7996,7 +8027,7 @@ function exportSubmenu(): ContextMenuItem {
       { label: t("grid.exportSelectedRowsSql"), action: exportSelectedRowsSql },
     );
   }
-  return { label: t("grid.export"), icon: FileDown, children: items };
+  return { label: t("grid.export"), icon: Upload, children: items };
 }
 
 const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
@@ -8241,14 +8272,32 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                               </Button>
                             </div>
                             <div class="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto] items-center gap-2">
-                              <Select :model-value="rule.columnName" :disabled="rule.disabled" :class="rule.disabled ? 'opacity-45' : ''" @update:model-value="(value: any) => updateStructuredFilterRule(rule.id, { columnName: String(value) })">
+                              <Select :model-value="rule.columnName" :disabled="rule.disabled" :class="rule.disabled ? 'opacity-45' : ''" @update:model-value="(value: any) => updateStructuredFilterRuleColumn(rule.id, String(value))">
                                 <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
                                   <SelectValue :placeholder="t('grid.filterBuilderColumn')" />
                                 </SelectTrigger>
-                                <SelectContent position="popper">
-                                  <SelectItem v-for="columnName in filterBuilderColumnOptions" :key="columnName" :value="columnName">
+                                <SelectContent position="popper" class="max-h-72" :hide-scroll-buttons="true">
+                                  <SelectItem v-for="columnName in filteredFilterBuilderColumnOptions" :key="columnName" :value="columnName">
                                     {{ columnName }}
                                   </SelectItem>
+                                  <div v-if="filteredFilterBuilderColumnOptions.length === 0" class="px-2 py-2 text-xs text-muted-foreground">
+                                    {{ t("grid.filterBuilderNoMatchingColumns") }}
+                                  </div>
+                                  <div class="sticky bottom-0 mt-1 flex items-center gap-1.5 border-t bg-popover px-2 py-1.5">
+                                    <Search class="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                                    <input
+                                      v-model="filterBuilderColumnSearch"
+                                      autocapitalize="off"
+                                      autocomplete="off"
+                                      autocorrect="off"
+                                      spellcheck="false"
+                                      class="h-7 min-w-0 flex-1 bg-transparent text-xs outline-none placeholder:text-muted-foreground"
+                                      :placeholder="t('grid.filterBuilderSearchColumns')"
+                                      @click.stop
+                                      @keydown="handleFilterBuilderColumnSearchKeydown"
+                                      @pointerdown.stop
+                                    />
+                                  </div>
                                 </SelectContent>
                               </Select>
 
@@ -8907,7 +8956,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           >
                             <template #trigger="{ open, toggle }">
                               <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
-                                <Download class="h-3 w-3" />
+                                <Upload class="h-3 w-3" />
                               </button>
                             </template>
                           </LightDropdownMenu>
@@ -9383,7 +9432,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       >
                         <template #trigger="{ open, toggle }">
                           <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
-                            <Download class="h-3 w-3" />
+                            <Upload class="h-3 w-3" />
                           </button>
                         </template>
                       </LightDropdownMenu>
@@ -9524,7 +9573,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                           >
                             <template #trigger="{ open, toggle }">
                               <button class="flex h-5 w-5 items-center justify-center rounded bg-background/90 text-muted-foreground shadow-sm ring-1 ring-border hover:text-foreground" :title="t('grid.downloadBinaryValue')" :aria-expanded="open" @mousedown.stop @click.stop="toggle">
-                                <Download class="h-3 w-3" />
+                                <Upload class="h-3 w-3" />
                               </button>
                             </template>
                           </LightDropdownMenu>
@@ -9865,7 +9914,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         <DropdownMenu v-if="!isEditingDetail && canDownloadDetailBinaryValue(activeCellDetail)">
                           <DropdownMenuTrigger as-child>
                             <Button variant="ghost" size="icon" class="h-5 w-5" :title="t('grid.downloadBinaryValue')">
-                              <Download class="h-3 w-3" />
+                              <Upload class="h-3 w-3" />
                             </Button>
                           </DropdownMenuTrigger>
                           <DropdownMenuContent align="end" class="w-44">
@@ -10103,7 +10152,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
           model-value=""
           :items="exportMenuItems"
           :aria-label="t('grid.export')"
-          :trigger-icon="Download"
+          :trigger-icon="Upload"
           :trigger-label="t('grid.export')"
           trigger-class="inline-flex h-6 shrink-0 items-center justify-center gap-1 whitespace-nowrap rounded-md px-2 text-foreground/80 hover:bg-accent hover:text-accent-foreground"
           trigger-icon-class="h-3.5 w-3.5"
@@ -10172,7 +10221,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                 <DropdownMenu v-if="canDownloadDetailBinaryValue(dialogCellDetail)">
                   <DropdownMenuTrigger as-child>
                     <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('grid.downloadBinaryValue')">
-                      <Download class="h-3 w-3" />
+                      <Upload class="h-3 w-3" />
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" class="w-44">
