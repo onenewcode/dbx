@@ -38,6 +38,7 @@ import {
   type RedisCollectionItem,
   type RedisValueFormat,
 } from "@/lib/redis/redisValuePresentation";
+import { safeJsonFormat } from "@/lib/common/safeJsonFormat";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -309,8 +310,7 @@ function readPreferredRedisValueFormat(): RedisValueFormat {
 
 function formatJsonText(raw: string): string | null {
   try {
-    const parsed = JSON.parse(raw);
-    return JSON.stringify(parsed, null, 2);
+    return safeJsonFormat(raw, 2);
   } catch {
     return null;
   }
@@ -318,8 +318,7 @@ function formatJsonText(raw: string): string | null {
 
 function compressJsonText(raw: string): string | null {
   try {
-    const parsed = JSON.parse(raw);
-    return JSON.stringify(parsed);
+    return safeJsonFormat(raw);
   } catch {
     return null;
   }
