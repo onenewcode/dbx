@@ -1945,7 +1945,11 @@ pub async fn list_completion_objects(pool: &MySqlPool, database: &str) -> Result
 fn columns_sql(database: &str, table: &str) -> String {
     format!(
         "SELECT c.COLUMN_NAME, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, \
-         c.COLUMN_COMMENT, c.COLUMN_KEY, c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH \
+         c.COLUMN_COMMENT, c.COLUMN_KEY, c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH, \
+         CASE WHEN LOWER(c.DATA_TYPE) = 'enum' THEN CONCAT('[\"', \
+           SUBSTRING(REPLACE(REPLACE(REPLACE(REPLACE(SUBSTRING(c.COLUMN_TYPE, 6, CHAR_LENGTH(c.COLUMN_TYPE) - 6), '\\\\', '\\\\\\\\'), '\"', '\\\\\"'), '''''', ''''), ''',''', '\",\"'), 2, \
+           CHAR_LENGTH(REPLACE(REPLACE(REPLACE(REPLACE(SUBSTRING(c.COLUMN_TYPE, 6, CHAR_LENGTH(c.COLUMN_TYPE) - 6), '\\\\', '\\\\\\\\'), '\"', '\\\\\"'), '''''', ''''), ''',''', '\",\"')) - 2), \
+           '\"]') ELSE NULL END AS ENUM_VALUES \
          FROM information_schema.COLUMNS c \
          WHERE c.TABLE_SCHEMA = {} AND c.TABLE_NAME = {} \
          ORDER BY c.ORDINAL_POSITION",
@@ -2018,6 +2022,11 @@ fn fix_potential_double_encoding(s: &str) -> String {
     }
 }
 
+fn decode_json_string_array_from_row(row: &mysql_async::Row, name: &str) -> Option<Vec<String>> {
+    let raw = get_opt_str(row, name)?;
+    serde_json::from_str::<Vec<String>>(&raw).ok()
+}
+
 pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
     let sql = columns_sql(database, table);
     let mut conn = get_conn_with_health_check(pool).await?;
@@ -2053,6 +2062,7 @@ pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Resul
                 numeric_precision: get_opt_i32(row, "NUMERIC_PRECISION"),
                 numeric_scale: get_opt_i32(row, "NUMERIC_SCALE"),
                 character_maximum_length: get_opt_i32(row, "CHARACTER_MAXIMUM_LENGTH"),
+                enum_values: decode_json_string_array_from_row(row, "ENUM_VALUES"),
             })
         })
         .collect();
@@ -2099,6 +2109,7 @@ pub async fn get_columns_show(pool: &MySqlPool, database: &str, table: &str) -> 
                 numeric_precision: None,
                 numeric_scale: None,
                 character_maximum_length: None,
+                enum_values: None,
             })
         })
         .collect())
@@ -3516,6 +3527,7 @@ mod tests {
         assert!(!sql.contains("CONSTRAINT_NAME = 'PRIMARY'"));
         assert!(sql.contains("c.COLUMN_KEY"));
         assert!(!sql.contains("COLLATE"));
+        assert!(sql.contains("AS ENUM_VALUES"));
     }
 
     #[test]

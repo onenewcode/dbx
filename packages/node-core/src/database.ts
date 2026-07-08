@@ -33,6 +33,7 @@ export interface ColumnInfo {
   numeric_precision?: number | null;
   numeric_scale?: number | null;
   character_maximum_length?: number | null;
+  enum_values?: string[] | null;
 }
 
 export interface QueryResult {
@@ -580,6 +581,54 @@ interface BridgeColumnInfo {
   numeric_precision?: number | null;
   numeric_scale?: number | null;
   character_maximum_length?: number | null;
+  enum_values?: string[] | null;
+}
+
+const POSTGRES_DESCRIBE_TABLE_SQL = `SELECT c.column_name AS name, CASE WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name ELSE c.data_type END AS data_type, c.is_nullable = 'YES' AS is_nullable, c.column_default, CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN true ELSE false END AS is_primary_key, col_description(cls.oid, c.ordinal_position) AS comment, CASE WHEN enum_t.oid IS NULL THEN NULL ELSE COALESCE((SELECT array_to_json(array_agg(e.enumlabel ORDER BY e.enumsortorder)) FROM pg_enum e WHERE e.enumtypid = enum_t.oid), '[]'::json) END AS enum_values FROM information_schema.columns c LEFT JOIN information_schema.key_column_usage kcu ON kcu.table_schema = c.table_schema AND kcu.table_name = c.table_name AND kcu.column_name = c.column_name LEFT JOIN information_schema.table_constraints tc ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema AND tc.constraint_type = 'PRIMARY KEY' LEFT JOIN pg_class cls ON cls.relname = c.table_name AND cls.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = c.table_schema) LEFT JOIN pg_namespace type_ns ON type_ns.nspname = c.udt_schema LEFT JOIN pg_type t ON t.typnamespace = type_ns.oid AND t.typname = c.udt_name LEFT JOIN pg_type enum_t ON enum_t.oid = CASE WHEN t.typtype = 'd' THEN t.typbasetype WHEN t.typtype = 'e' THEN t.oid ELSE NULL END AND enum_t.typtype = 'e' WHERE c.table_schema = $1 AND c.table_name = $2 ORDER BY c.ordinal_position`;
+const POSTGRES_DESCRIBE_TABLE_COMPAT_SQL = `SELECT c.column_name AS name, CASE WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name ELSE c.data_type END AS data_type, c.is_nullable = 'YES' AS is_nullable, c.column_default, CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN true ELSE false END AS is_primary_key, col_description(cls.oid, c.ordinal_position) AS comment, NULL AS enum_values FROM information_schema.columns c LEFT JOIN information_schema.key_column_usage kcu ON kcu.table_schema = c.table_schema AND kcu.table_name = c.table_name AND kcu.column_name = c.column_name LEFT JOIN information_schema.table_constraints tc ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema AND tc.constraint_type = 'PRIMARY KEY' LEFT JOIN pg_class cls ON cls.relname = c.table_name AND cls.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = c.table_schema) WHERE c.table_schema = $1 AND c.table_name = $2 ORDER BY c.ordinal_position`;
+const MYSQL_DESCRIBE_TABLE_SQL = `SELECT c.COLUMN_NAME AS name, c.DATA_TYPE AS data_type, c.IS_NULLABLE = 'YES' AS is_nullable, c.COLUMN_DEFAULT AS column_default, c.COLUMN_KEY = 'PRI' AS is_primary_key, c.COLUMN_COMMENT AS comment, CASE WHEN LOWER(c.DATA_TYPE) = 'enum' THEN CONCAT('["', SUBSTRING(REPLACE(REPLACE(REPLACE(REPLACE(SUBSTRING(c.COLUMN_TYPE, 6, CHAR_LENGTH(c.COLUMN_TYPE) - 6), '\\\\', '\\\\\\\\'), '"', '\\\\"'), '''''', ''''), ''',''', '","'), 2, CHAR_LENGTH(REPLACE(REPLACE(REPLACE(REPLACE(SUBSTRING(c.COLUMN_TYPE, 6, CHAR_LENGTH(c.COLUMN_TYPE) - 6), '\\\\', '\\\\\\\\'), '"', '\\\\"'), '''''', ''''), ''',''', '","')) - 2), '"]') ELSE NULL END AS enum_values FROM information_schema.COLUMNS c WHERE c.TABLE_SCHEMA = DATABASE() AND c.TABLE_NAME = ? ORDER BY c.ORDINAL_POSITION`;
+
+function normalizeEnumValues(value: unknown): string[] | null {
+  if (value == null) return null;
+  if (Array.isArray(value)) return value.map((item) => String(item));
+  if (typeof value === "string") {
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      return Array.isArray(parsed) ? parsed.map((item) => String(item)) : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+function mapDescribeTableColumn(
+  row: {
+    name?: unknown;
+    data_type?: unknown;
+    is_nullable?: unknown;
+    column_default?: unknown;
+    is_primary_key?: unknown;
+    comment?: unknown;
+    numeric_precision?: number | null;
+    numeric_scale?: number | null;
+    character_maximum_length?: number | null;
+  },
+  enumValues: string[] | null,
+): ColumnInfo {
+  const column: ColumnInfo = {
+    name: String(row.name || ""),
+    data_type: String(row.data_type || ""),
+    is_nullable: Boolean(row.is_nullable),
+    column_default: row.column_default != null ? String(row.column_default) : null,
+    is_primary_key: Boolean(row.is_primary_key),
+    comment: row.comment != null ? String(row.comment) : null,
+    enum_values: enumValues,
+  };
+  if ("numeric_precision" in row) column.numeric_precision = row.numeric_precision;
+  if ("numeric_scale" in row) column.numeric_scale = row.numeric_scale;
+  if ("character_maximum_length" in row) column.character_maximum_length = row.character_maximum_length;
+  return column;
 }
 
 export function collectionListToTableInfos(collections: CollectionListEntry[]): TableInfo[] {
@@ -994,40 +1043,22 @@ export async function describeTable(config: ConnectionConfig, table: string, sch
       schema: schema || "",
       table,
     });
-    return columns.map((c) => ({
-      name: c.name,
-      data_type: c.data_type,
-      is_nullable: c.is_nullable,
-      column_default: c.column_default,
-      is_primary_key: c.is_primary_key,
-      comment: c.comment,
-      numeric_precision: c.numeric_precision,
-      numeric_scale: c.numeric_scale,
-      character_maximum_length: c.character_maximum_length,
-    }));
+    return columns.map((column) => mapDescribeTableColumn(column, column.enum_values ?? null));
   }
   let result: QueryResult;
   if (isMysqlType(config.db_type)) {
-    result = await query(
-      config,
-      `SELECT c.COLUMN_NAME AS name, c.DATA_TYPE AS data_type, c.IS_NULLABLE = 'YES' AS is_nullable, c.COLUMN_DEFAULT AS column_default, c.COLUMN_KEY = 'PRI' AS is_primary_key, c.COLUMN_COMMENT AS comment FROM information_schema.COLUMNS c WHERE c.TABLE_SCHEMA = DATABASE() AND c.TABLE_NAME = ? ORDER BY c.ORDINAL_POSITION`,
-      [table],
-    );
+    result = await query(config, MYSQL_DESCRIBE_TABLE_SQL, [table]);
+    return result.rows.map((row) => mapDescribeTableColumn(row, normalizeEnumValues(row.enum_values)));
+  } else if (config.db_type === "postgres") {
+    try {
+      result = await query(config, POSTGRES_DESCRIBE_TABLE_SQL, [schema || "public", table]);
+    } catch {
+      result = await query(config, POSTGRES_DESCRIBE_TABLE_COMPAT_SQL, [schema || "public", table]);
+    }
   } else {
-    result = await query(
-      config,
-      `SELECT c.column_name AS name, c.data_type, c.is_nullable = 'YES' AS is_nullable, c.column_default, CASE WHEN tc.constraint_type = 'PRIMARY KEY' THEN true ELSE false END AS is_primary_key, col_description(cls.oid, c.ordinal_position) AS comment FROM information_schema.columns c LEFT JOIN information_schema.key_column_usage kcu ON kcu.table_schema = c.table_schema AND kcu.table_name = c.table_name AND kcu.column_name = c.column_name LEFT JOIN information_schema.table_constraints tc ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema AND tc.constraint_type = 'PRIMARY KEY' LEFT JOIN pg_class cls ON cls.relname = c.table_name AND cls.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = c.table_schema) WHERE c.table_schema = $1 AND c.table_name = $2 ORDER BY c.ordinal_position`,
-      [schema || "public", table],
-    );
+    result = await query(config, POSTGRES_DESCRIBE_TABLE_COMPAT_SQL, [schema || "public", table]);
   }
-  return result.rows.map((r) => ({
-    name: String(r.name || ""),
-    data_type: String(r.data_type || ""),
-    is_nullable: Boolean(r.is_nullable),
-    column_default: r.column_default != null ? String(r.column_default) : null,
-    is_primary_key: Boolean(r.is_primary_key),
-    comment: r.comment != null ? String(r.comment) : null,
-  }));
+  return result.rows.map((row) => mapDescribeTableColumn(row, normalizeEnumValues(row.enum_values)));
 }
 
 async function mongoFindDocuments(config: ConnectionConfig, collection: string, skip: number, limit: number, filter: string, projection?: string, sort?: string): Promise<MongoDocumentResult> {
