@@ -33,10 +33,7 @@ vi.mock("pg", () => ({
   },
 }));
 
-import {
-  closeDatabaseResources,
-  describeTable,
-} from "../src/database.js";
+import { closeDatabaseResources, describeTable } from "../src/database.js";
 
 function mysqlConfig(): ConnectionConfig {
   return {
@@ -103,11 +100,11 @@ test("describeTable maps mysql enum_values from metadata", async () => {
       {
         name: "state",
         data_type: "enum",
+        column_type: "enum('pending','active','archived')",
         is_nullable: 0,
         column_default: "pending",
         is_primary_key: 0,
         comment: "workflow state",
-        enum_values: "[\"pending\",\"active\",\"archived\"]",
       },
     ],
     [{ name: "name" }],
@@ -115,7 +112,7 @@ test("describeTable maps mysql enum_values from metadata", async () => {
 
   const columns = await describeTable(mysqlConfig(), "orders");
 
-  assert.match(String(fakeMysqlQuery.mock.calls[0]?.[0] ?? ""), /AS enum_values/);
+  assert.match(String(fakeMysqlQuery.mock.calls[0]?.[0] ?? ""), /COLUMN_TYPE AS column_type/);
   assert.deepEqual(fakeMysqlQuery.mock.calls[0]?.[1], ["orders"]);
   assert.deepEqual(columns, [
     {
@@ -128,6 +125,52 @@ test("describeTable maps mysql enum_values from metadata", async () => {
       enum_values: ["pending", "active", "archived"],
     },
   ]);
+});
+
+test("describeTable parses mysql enum literal edge cases", async () => {
+  fakeMysqlQuery.mockResolvedValue([
+    [
+      {
+        name: "empty_state",
+        data_type: "enum",
+        column_type: "enum('','a')",
+        is_nullable: 1,
+        column_default: null,
+        is_primary_key: 0,
+        comment: null,
+      },
+      {
+        name: "quoted_state",
+        data_type: "enum",
+        column_type: "enum('x'',''y','z')",
+        is_nullable: 1,
+        column_default: null,
+        is_primary_key: 0,
+        comment: null,
+      },
+      {
+        name: "escaped_state",
+        data_type: "enum",
+        column_type: String.raw`enum('it''s','quote\"d','back\\slash')`,
+        is_nullable: 1,
+        column_default: null,
+        is_primary_key: 0,
+        comment: null,
+      },
+    ],
+    [{ name: "name" }],
+  ]);
+
+  const columns = await describeTable(mysqlConfig(), "orders");
+
+  assert.deepEqual(
+    columns.map((column) => column.enum_values),
+    [
+      ["", "a"],
+      ["x','y", "z"],
+      ["it's", 'quote"d', "back\\slash"],
+    ],
+  );
 });
 
 test("describeTable preserves enum values from bridge metadata", async () => {
@@ -218,22 +261,20 @@ test("describeTable reads postgres enum_values from the primary metadata query",
 });
 
 test("describeTable falls back to compat postgres metadata query when enum joins fail", async () => {
-  fakePgQuery
-    .mockRejectedValueOnce(new Error("pg_enum catalog unavailable"))
-    .mockResolvedValueOnce({
-      rows: [
-        {
-          name: "state",
-          data_type: "status",
-          is_nullable: false,
-          column_default: null,
-          is_primary_key: false,
-          comment: "workflow state",
-          enum_values: null,
-        },
-      ],
-      fields: [{ name: "name" }],
-    });
+  fakePgQuery.mockRejectedValueOnce(new Error("pg_enum catalog unavailable")).mockResolvedValueOnce({
+    rows: [
+      {
+        name: "state",
+        data_type: "status",
+        is_nullable: false,
+        column_default: null,
+        is_primary_key: false,
+        comment: "workflow state",
+        enum_values: null,
+      },
+    ],
+    fields: [{ name: "name" }],
+  });
 
   const columns = await describeTable(postgresConfig(), "orders", "public");
 

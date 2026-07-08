@@ -1944,12 +1944,8 @@ pub async fn list_completion_objects(pool: &MySqlPool, database: &str) -> Result
 
 fn columns_sql(database: &str, table: &str) -> String {
     format!(
-        "SELECT c.COLUMN_NAME, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, \
+        "SELECT c.COLUMN_NAME, c.DATA_TYPE, c.COLUMN_TYPE, c.IS_NULLABLE, c.COLUMN_DEFAULT, c.EXTRA, \
          c.COLUMN_COMMENT, c.COLUMN_KEY, c.NUMERIC_PRECISION, c.NUMERIC_SCALE, c.CHARACTER_MAXIMUM_LENGTH, \
-         CASE WHEN LOWER(c.DATA_TYPE) = 'enum' THEN CONCAT('[\"', \
-           SUBSTRING(REPLACE(REPLACE(REPLACE(REPLACE(SUBSTRING(c.COLUMN_TYPE, 6, CHAR_LENGTH(c.COLUMN_TYPE) - 6), '\\\\', '\\\\\\\\'), '\"', '\\\\\"'), '''''', ''''), ''',''', '\",\"'), 2, \
-           CHAR_LENGTH(REPLACE(REPLACE(REPLACE(REPLACE(SUBSTRING(c.COLUMN_TYPE, 6, CHAR_LENGTH(c.COLUMN_TYPE) - 6), '\\\\', '\\\\\\\\'), '\"', '\\\\\"'), '''''', ''''), ''',''', '\",\"')) - 2), \
-           '\"]') ELSE NULL END AS ENUM_VALUES \
          FROM information_schema.COLUMNS c \
          WHERE c.TABLE_SCHEMA = {} AND c.TABLE_NAME = {} \
          ORDER BY c.ORDINAL_POSITION",
@@ -2022,9 +2018,63 @@ fn fix_potential_double_encoding(s: &str) -> String {
     }
 }
 
-fn decode_json_string_array_from_row(row: &mysql_async::Row, name: &str) -> Option<Vec<String>> {
-    let raw = get_opt_str(row, name)?;
-    serde_json::from_str::<Vec<String>>(&raw).ok()
+fn parse_mysql_enum_values(column_type: &str) -> Option<Vec<String>> {
+    let trimmed = column_type.trim();
+    if !trimmed.get(..5)?.eq_ignore_ascii_case("enum(") || !trimmed.ends_with(')') {
+        return None;
+    }
+
+    let inner = &trimmed[5..trimmed.len() - 1];
+    let mut chars = inner.chars().peekable();
+    let mut values = Vec::new();
+
+    loop {
+        while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+            chars.next();
+        }
+        match chars.next() {
+            Some('\'') => {}
+            None if values.is_empty() => return Some(values),
+            _ => return None,
+        }
+
+        let mut value = String::new();
+        loop {
+            match chars.next() {
+                Some('\'') => {
+                    if matches!(chars.peek(), Some('\'')) {
+                        chars.next();
+                        value.push('\'');
+                    } else {
+                        break;
+                    }
+                }
+                Some('\\') => match chars.next() {
+                    Some('0') => value.push('\0'),
+                    Some('b') => value.push('\u{0008}'),
+                    Some('n') => value.push('\n'),
+                    Some('r') => value.push('\r'),
+                    Some('t') => value.push('\t'),
+                    Some('Z') => value.push('\u{001A}'),
+                    Some(c @ ('\\' | '\'' | '"')) => value.push(c),
+                    Some(c) => value.push(c),
+                    None => return None,
+                },
+                Some(c) => value.push(c),
+                None => return None,
+            }
+        }
+        values.push(value);
+
+        while matches!(chars.peek(), Some(c) if c.is_whitespace()) {
+            chars.next();
+        }
+        match chars.next() {
+            Some(',') => continue,
+            None => return Some(values),
+            _ => return None,
+        }
+    }
 }
 
 pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Result<Vec<ColumnInfo>, String> {
@@ -2049,10 +2099,19 @@ pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Resul
                 return None;
             }
             let column_key = get_str_by_name(row, "COLUMN_KEY");
+            let data_type = get_str_by_name(row, "DATA_TYPE");
+            let column_type = get_str_by_name(row, "COLUMN_TYPE");
+            let enum_values = if data_type.eq_ignore_ascii_case("enum") {
+                // MySQL exposes enum literals only through COLUMN_TYPE. Parse the SQL literal
+                // syntax in Rust so empty values, quotes, and backslash escapes survive intact.
+                parse_mysql_enum_values(&column_type)
+            } else {
+                None
+            };
             Some(ColumnInfo {
                 is_primary_key: column_key.eq_ignore_ascii_case("PRI"),
                 name,
-                data_type: get_str_by_name(row, "COLUMN_TYPE"),
+                data_type: column_type,
                 is_nullable: get_str_by_name(row, "IS_NULLABLE") == "YES",
                 column_default: get_opt_str(row, "COLUMN_DEFAULT"),
                 extra: get_opt_str(row, "EXTRA"),
@@ -2062,7 +2121,7 @@ pub async fn get_columns(pool: &MySqlPool, database: &str, table: &str) -> Resul
                 numeric_precision: get_opt_i32(row, "NUMERIC_PRECISION"),
                 numeric_scale: get_opt_i32(row, "NUMERIC_SCALE"),
                 character_maximum_length: get_opt_i32(row, "CHARACTER_MAXIMUM_LENGTH"),
-                enum_values: decode_json_string_array_from_row(row, "ENUM_VALUES"),
+                enum_values,
             })
         })
         .collect();
@@ -3526,8 +3585,25 @@ mod tests {
         assert!(!sql.contains("KEY_COLUMN_USAGE"));
         assert!(!sql.contains("CONSTRAINT_NAME = 'PRIMARY'"));
         assert!(sql.contains("c.COLUMN_KEY"));
+        assert!(sql.contains("c.DATA_TYPE"));
+        assert!(sql.contains("c.COLUMN_TYPE"));
         assert!(!sql.contains("COLLATE"));
-        assert!(sql.contains("AS ENUM_VALUES"));
+        assert!(!sql.contains("AS ENUM_VALUES"));
+    }
+
+    #[test]
+    fn parse_mysql_enum_values_preserves_mysql_literal_edges() {
+        assert_eq!(
+            parse_mysql_enum_values("enum('pending','active','archived')"),
+            Some(vec!["pending".to_string(), "active".to_string(), "archived".to_string()])
+        );
+        assert_eq!(parse_mysql_enum_values("ENUM('','a')"), Some(vec!["".to_string(), "a".to_string()]));
+        assert_eq!(parse_mysql_enum_values("enum('x'',''y','z')"), Some(vec!["x','y".to_string(), "z".to_string()]));
+        assert_eq!(
+            parse_mysql_enum_values(r#"enum('it''s','quote\"d','back\\slash')"#),
+            Some(vec!["it's".to_string(), "quote\"d".to_string(), "back\\slash".to_string()])
+        );
+        assert_eq!(parse_mysql_enum_values("varchar(255)"), None);
     }
 
     #[test]
