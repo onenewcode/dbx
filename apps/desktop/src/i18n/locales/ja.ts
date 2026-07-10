@@ -1848,6 +1848,7 @@ export default withEnglishFallback({
     ready: "準備完了",
     saved: "テーブル構造を更新しました",
     copySql: "SQLをコピー",
+    sqliteRebuildNotice: "SQLite は制約が動作しないデータスナップショットをバックアップとして保持し、1 つのトランザクション内でテーブルを再構築して、変更された列を CAST で強制変換します。表現できない値は 0/0.0 になる場合があり、失敗時はすべてロールバックされます。",
     extendedProperties: "拡張",
     autoIncrement: "自動採番",
     onUpdateCurrentTimestamp: "自動更新時刻",

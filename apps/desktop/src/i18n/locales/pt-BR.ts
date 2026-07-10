@@ -1815,6 +1815,7 @@ export default withEnglishFallback({
     ready: "Pronto",
     saved: "Estrutura da tabela atualizada",
     copySql: "Copiar SQL",
+    sqliteRebuildNotice: "O SQLite mantém um snapshot de dados inerte como backup, reconstrói a tabela em uma única transação e força CAST nas colunas alteradas. Valores não representáveis podem se tornar 0/0.0; em caso de falha, todas as alterações são revertidas.",
     extendedProperties: "Estendidas",
     autoIncrement: "Auto incremento",
     onUpdateCurrentTimestamp: "Atualizar hora automaticamente",

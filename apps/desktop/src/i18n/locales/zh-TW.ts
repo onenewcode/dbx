@@ -1719,6 +1719,7 @@ export default withEnglishFallback({
     ready: "可執行",
     saved: "資料表結構已更新",
     copySql: "複製 SQL",
+    sqliteRebuildNotice: "SQLite 會保留一張不含作用中約束的資料快照作為備份表，再於同一交易內重建原表，並使用 CAST 強制轉換已修改型別的欄位；無法表示的值可能變成 0/0.0，執行失敗則整體回復。",
     extendedProperties: "擴充屬性",
     autoIncrement: "自動遞增",
     onUpdateCurrentTimestamp: "自動更新時間",
