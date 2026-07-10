@@ -213,6 +213,23 @@ pub struct BuildTableStructureSqlRequest {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct PreviewSqliteTableStructureChangeRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub options: dbx_core::table_structure_sql::TableStructureSqlOptions,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplySqliteTableStructureChangeRequest {
+    pub connection_id: String,
+    pub database: String,
+    pub options: dbx_core::table_structure_sql::TableStructureSqlOptions,
+    pub schema_revision: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BuildSingleColumnAlterSqlRequest {
     pub options: dbx_core::table_structure_sql::SingleColumnAlterSqlOptions,
 }
@@ -649,6 +666,37 @@ pub async fn build_table_structure_change_sql(
     Json(req): Json<BuildTableStructureSqlRequest>,
 ) -> Json<dbx_core::table_structure_sql::TableStructureSqlResult> {
     Json(dbx_core::table_structure_sql::build_table_structure_change_sql(req.options))
+}
+
+pub async fn preview_sqlite_table_structure_change(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<PreviewSqliteTableStructureChangeRequest>,
+) -> Result<Json<dbx_core::table_structure_sql::SqliteTableStructurePreview>, AppError> {
+    dbx_core::table_structure_sql::preview_sqlite_table_structure_change(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        req.options,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError)
+}
+
+pub async fn apply_sqlite_table_structure_change(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<ApplySqliteTableStructureChangeRequest>,
+) -> Result<Json<dbx_core::db::QueryResult>, AppError> {
+    dbx_core::table_structure_sql::apply_sqlite_table_structure_change(
+        &state.app,
+        &req.connection_id,
+        &req.database,
+        req.options,
+        &req.schema_revision,
+    )
+    .await
+    .map(Json)
+    .map_err(AppError)
 }
 
 pub async fn build_create_table_sql(

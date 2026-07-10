@@ -3,6 +3,8 @@ import {
   combineDataTypeForDatabase,
   createColumnDrafts,
   dataTypeLengthInputValue,
+  getDefaultLengthForType,
+  hasExistingColumnTypeChange,
   isDataTypeLengthDisabled,
   isMysqlCharacterDataType,
   isMysqlEnumDataType,
@@ -94,6 +96,40 @@ describe("tableStructureEditorState", () => {
     expect(combineDataTypeForDatabase("dameng", "integer", "11")).toBe("integer");
     expect(combineDataTypeForDatabase("oracle", "number", "10,0")).toBe("number(10,0)");
     expect(combineDataTypeForDatabase("mysql", "integer", "11")).toBe("integer(11)");
+  });
+
+  it("does not add MySQL display lengths when choosing SQLite-family types", () => {
+    for (const databaseType of ["sqlite", "rqlite", "turso"] as const) {
+      expect(getDefaultLengthForType(databaseType, "integer")).toBe("");
+      expect(getDefaultLengthForType(databaseType, "real")).toBe("");
+      expect(combineDataTypeForDatabase(databaseType, "integer", getDefaultLengthForType(databaseType, "integer"))).toBe("integer");
+    }
+
+    expect(getDefaultLengthForType("mysql", "integer")).toBe("11");
+  });
+
+  it("requires a SQLite rebuild only for a retained existing column type change", () => {
+    const [column] = createColumnDrafts(
+      [
+        {
+          name: "status",
+          data_type: "integer",
+          is_nullable: false,
+          column_default: null,
+          is_primary_key: false,
+          extra: null,
+        },
+      ],
+      "sqlite",
+    );
+
+    expect(hasExistingColumnTypeChange([column])).toBe(false);
+    column.name = "state";
+    expect(hasExistingColumnTypeChange([column])).toBe(false);
+    column.dataType = "text";
+    expect(hasExistingColumnTypeChange([column])).toBe(true);
+    column.markedForDrop = true;
+    expect(hasExistingColumnTypeChange([column])).toBe(false);
   });
 
   it("strips SQL Server metadata parentheses from editable defaults", () => {

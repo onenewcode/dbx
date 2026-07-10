@@ -1890,6 +1890,7 @@ export default {
     ready: "Ready",
     saved: "Table structure updated",
     copySql: "Copy SQL",
+    sqliteRebuildNotice: "SQLite retains an inert data snapshot as a backup, then rebuilds the table in one transaction and forcibly CASTs changed columns. Unrepresentable values may become 0/0.0; failures roll back.",
     extendedProperties: "Extended",
     autoIncrement: "Auto Increment",
     onUpdateCurrentTimestamp: "Auto Update Time",

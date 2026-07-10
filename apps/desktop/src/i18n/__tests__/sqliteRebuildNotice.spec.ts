@@ -1,0 +1,23 @@
+import { describe, expect, it } from "vitest";
+import en from "@/i18n/locales/en";
+import zhCN from "@/i18n/locales/zh-CN";
+
+function sqliteRebuildNotice(messages: Record<string, unknown>): string {
+  const structureEditor = messages.structureEditor as Record<string, unknown>;
+  return String(structureEditor.sqliteRebuildNotice);
+}
+
+describe("SQLite rebuild notice", () => {
+  it.each([
+    ["English", en],
+    ["Simplified Chinese", zhCN],
+  ])("warns about retained backup, forced CAST conversion, lossy values, and rollback in %s", (_locale, messages) => {
+    const notice = sqliteRebuildNotice(messages);
+
+    expect(notice).toMatch(/backup|backs? up|备份/i);
+    expect(notice).toMatch(/retains?|保留/i);
+    expect(notice).toContain("CAST");
+    expect(notice).toContain("0.0");
+    expect(notice).toMatch(/roll(?:s|ed)? back|回滚/i);
+  });
+});

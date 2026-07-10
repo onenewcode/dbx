@@ -1,6 +1,10 @@
 import type { ColumnInfo, DatabaseType, ForeignKeyInfo, IndexInfo, TriggerInfo } from "@/types/database.ts";
 import type { ColumnExtra, EditableStructureColumn, EditableStructureForeignKey, EditableStructureIndex, EditableStructureTrigger } from "@/lib/table/tableStructureEditorSql.ts";
 
+export function hasExistingColumnTypeChange(columns: readonly EditableStructureColumn[]): boolean {
+  return columns.some((column) => !!column.original && !column.markedForDrop && column.dataType !== column.original.data_type);
+}
+
 export const DATA_TYPE_OPTIONS: Record<string, string[]> = {
   mysql: [
     "tinyint",
@@ -938,7 +942,9 @@ function isValidTemporalPrecision(dbType: DatabaseType | undefined, params: stri
 
 export function getDefaultLengthForType(_dbType: DatabaseType | undefined, baseType: string): string {
   const key = baseType.trim().toLowerCase();
-  if (_dbType === "questdb") {
+  if (_dbType === "sqlite" || _dbType === "rqlite" || _dbType === "turso") {
+    return "";
+  } else if (_dbType === "questdb") {
     return QUESTDB_TYPE_LENGTHS[key] ?? "";
   } else if (_dbType === "sqlserver") {
     return SQLSERVER_TYPE_LENGTHS[key] ?? "";

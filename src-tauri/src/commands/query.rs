@@ -446,6 +446,35 @@ pub fn build_table_structure_change_sql(
 }
 
 #[tauri::command]
+pub async fn preview_sqlite_table_structure_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    options: dbx_core::table_structure_sql::TableStructureSqlOptions,
+) -> Result<dbx_core::table_structure_sql::SqliteTableStructurePreview, String> {
+    dbx_core::table_structure_sql::preview_sqlite_table_structure_change(&state, &connection_id, &database, options)
+        .await
+}
+
+#[tauri::command]
+pub async fn apply_sqlite_table_structure_change(
+    state: State<'_, Arc<AppState>>,
+    connection_id: String,
+    database: String,
+    options: dbx_core::table_structure_sql::TableStructureSqlOptions,
+    schema_revision: String,
+) -> Result<db::QueryResult, String> {
+    dbx_core::table_structure_sql::apply_sqlite_table_structure_change(
+        &state,
+        &connection_id,
+        &database,
+        options,
+        &schema_revision,
+    )
+    .await
+}
+
+#[tauri::command]
 pub fn build_create_table_sql(
     options: dbx_core::table_structure_sql::TableStructureSqlOptions,
 ) -> Result<dbx_core::table_structure_sql::TableStructureSqlResult, String> {

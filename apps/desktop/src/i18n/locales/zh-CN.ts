@@ -1889,6 +1889,7 @@ export default withEnglishFallback({
     ready: "可执行",
     saved: "表结构已更新",
     copySql: "复制 SQL",
+    sqliteRebuildNotice: "SQLite 会保留一张不带活动约束的数据快照作为备份表，再在同一事务内重建原表，使用 CAST 强制转换类型已修改的字段；无法表示的值可能变为 0/0.0，执行失败则整体回滚。",
     extendedProperties: "扩展属性",
     autoIncrement: "自增",
     onUpdateCurrentTimestamp: "自动更新时间",
