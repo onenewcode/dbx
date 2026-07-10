@@ -48,6 +48,14 @@ struct SqliteChangePlan {
     schema: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct SqliteForeignKeyViolation {
+    table: String,
+    rowid: Option<i64>,
+    parent: String,
+    foreign_key_id: i64,
+}
+
 pub async fn preview_sqlite_table_structure_change(
     state: &AppState,
     connection_id: &str,
@@ -282,14 +290,16 @@ fn build_change_plan(conn: &mut Connection, options: &TableStructureSqlOptions) 
         preview_statements.push("PRAGMA foreign_keys = OFF;".to_string());
         preview_statements.push("PRAGMA legacy_alter_table = ON;".to_string());
         preview_statements.push("BEGIN IMMEDIATE;".to_string());
-        preview_statements.extend(executable_statements.iter().cloned());
-        preview_statements
-            .push("-- DBX checks the next result and rolls back before COMMIT if any row is returned.".to_string());
-        preview_statements.push(format!("PRAGMA {}.foreign_key_check;", quote_ident(&snapshot.schema)));
         preview_statements.push(
-            "-- Manual execution: inspect foreign_key_check output and ROLLBACK instead of COMMIT if it returned rows."
+            "-- Record this baseline before the rebuild; existing rows do not block the change unless their count increases."
                 .to_string(),
         );
+        preview_statements.push(format!("PRAGMA {}.foreign_key_check;", quote_ident(&snapshot.schema)));
+        preview_statements.extend(executable_statements.iter().cloned());
+        preview_statements.push(
+            "-- Compare this result with the baseline and ROLLBACK only for new or additional violations.".to_string(),
+        );
+        preview_statements.push(format!("PRAGMA {}.foreign_key_check;", quote_ident(&snapshot.schema)));
         preview_statements.push("COMMIT;".to_string());
         preview_statements.push(format!(
             "PRAGMA legacy_alter_table = {};",
@@ -624,17 +634,19 @@ fn execute_change_transaction(
         if !plan.preview.warnings.is_empty() {
             return Err(format!("SQLite structure change cannot be applied: {}", plan.preview.warnings.join(" ")));
         }
+        // Compare the complete schema so inbound references are covered while unrelated historical violations remain tolerated.
+        let foreign_key_baseline = foreign_key_violations(conn, &plan.schema)?;
         for (index, statement) in plan.executable_statements.iter().enumerate() {
             if let Err(error) = conn.execute_batch(statement) {
                 return Err(format!("SQLite structure statement {} failed: {error}", index + 1));
             }
         }
-        match first_foreign_key_violation(conn, &plan.schema) {
-            Ok(Some(violation)) => {
-                return Err(format!("SQLite foreign key check failed after rebuilding the table: {violation}"));
-            }
-            Ok(None) => {}
-            Err(error) => return Err(error),
+        let foreign_key_after = foreign_key_violations(conn, &plan.schema)?;
+        if let Some(violation) = first_added_foreign_key_violation(&foreign_key_baseline, &foreign_key_after) {
+            return Err(format!(
+                "SQLite foreign key check found a new violation after rebuilding the table: {}",
+                format_foreign_key_violation(violation)
+            ));
         }
         conn.execute_batch("COMMIT").map_err(|error| format!("SQLite table rebuild COMMIT failed: {error}"))?;
         Ok(())
@@ -669,22 +681,48 @@ fn execute_change_transaction(
     }
 }
 
-fn first_foreign_key_violation(conn: &Connection, schema: &str) -> Result<Option<String>, String> {
+fn foreign_key_violations(conn: &Connection, schema: &str) -> Result<Vec<SqliteForeignKeyViolation>, String> {
     let mut statement = conn
         .prepare(&format!("PRAGMA {}.foreign_key_check", quote_ident(schema)))
         .map_err(|error| format!("Failed to prepare SQLite foreign_key_check: {error}"))?;
     let mut rows = statement.query([]).map_err(|error| format!("Failed to run SQLite foreign_key_check: {error}"))?;
-    let Some(row) = rows.next().map_err(|error| format!("Failed to read SQLite foreign_key_check: {error}"))? else {
-        return Ok(None);
-    };
-    let table: String = row.get(0).unwrap_or_else(|_| "<unknown>".to_string());
-    let rowid: Option<i64> = row.get(1).unwrap_or(None);
-    let parent: String = row.get(2).unwrap_or_else(|_| "<unknown>".to_string());
-    let foreign_key_id: i64 = row.get(3).unwrap_or(-1);
-    Ok(Some(format!(
+    let mut violations = Vec::new();
+    while let Some(row) = rows.next().map_err(|error| format!("Failed to read SQLite foreign_key_check: {error}"))? {
+        violations.push(SqliteForeignKeyViolation {
+            table: row.get(0).unwrap_or_else(|_| "<unknown>".to_string()),
+            rowid: row.get(1).unwrap_or(None),
+            parent: row.get(2).unwrap_or_else(|_| "<unknown>".to_string()),
+            foreign_key_id: row.get(3).unwrap_or(-1),
+        });
+    }
+    Ok(violations)
+}
+
+fn first_added_foreign_key_violation<'a>(
+    baseline: &[SqliteForeignKeyViolation],
+    after: &'a [SqliteForeignKeyViolation],
+) -> Option<&'a SqliteForeignKeyViolation> {
+    let mut remaining = baseline.iter().cloned().fold(BTreeMap::new(), |mut counts, violation| {
+        *counts.entry(violation).or_insert(0usize) += 1;
+        counts
+    });
+    after.iter().find(|violation| match remaining.get_mut(*violation) {
+        Some(count) if *count > 0 => {
+            *count -= 1;
+            false
+        }
+        _ => true,
+    })
+}
+
+fn format_foreign_key_violation(violation: &SqliteForeignKeyViolation) -> String {
+    format!(
         "table={table}, rowid={}, parent={parent}, foreignKeyId={foreign_key_id}",
-        rowid.map_or_else(|| "null".to_string(), |rowid| rowid.to_string())
-    )))
+        violation.rowid.map_or_else(|| "null".to_string(), |rowid| rowid.to_string()),
+        table = violation.table,
+        parent = violation.parent,
+        foreign_key_id = violation.foreign_key_id,
+    )
 }
 
 fn rewrite_declared_column_types(create_sql: &str, type_changes: &BTreeMap<String, String>) -> Result<String, String> {
@@ -1375,6 +1413,13 @@ mod tests {
         assert!(preview.warnings.is_empty(), "{:?}", preview.warnings);
         assert!(preview.statements.iter().any(|sql| sql.contains("BEGIN IMMEDIATE")));
         assert!(preview.statements.iter().any(|sql| sql.contains("legacy_alter_table = ON")));
+        let foreign_key_checks = preview
+            .statements
+            .iter()
+            .enumerate()
+            .filter(|(_, sql)| sql.starts_with("PRAGMA") && sql.contains("foreign_key_check"))
+            .map(|(index, _)| index)
+            .collect::<Vec<_>>();
         let rename_position = preview.statements.iter().position(|sql| sql.starts_with("ALTER TABLE")).unwrap();
         let create_position = preview
             .statements
@@ -1385,6 +1430,9 @@ mod tests {
             .map(|(index, _)| index)
             .unwrap();
         let copy_position = preview.statements.iter().position(|sql| sql.contains("CAST(")).unwrap();
+        assert_eq!(foreign_key_checks.len(), 2);
+        assert!(foreign_key_checks[0] < rename_position);
+        assert!(foreign_key_checks[1] > copy_position);
         assert!(rename_position < create_position && create_position < copy_position);
         assert!(preview.statements.iter().any(|sql| sql.starts_with("DROP TABLE") && sql.contains("__dbx_source_")));
         assert!(!preview.statements.iter().any(|sql| sql.starts_with("DROP TABLE") && sql.contains("\"items_")));
@@ -1429,6 +1477,62 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(backup_data.rows[0], serde_json::json!(["text", "42"]).as_array().unwrap().clone());
+    }
+
+    #[tokio::test]
+    async fn unrelated_existing_foreign_key_violation_does_not_block_rebuild() {
+        let pool = db::sqlite::connect_path(":memory:").await.unwrap();
+        pool.with_connection(|conn| {
+            conn.execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 CREATE TABLE unrelated_parent(id INTEGER PRIMARY KEY);
+                 CREATE TABLE unrelated_child(parent_id INTEGER REFERENCES unrelated_parent(id));
+                 INSERT INTO unrelated_child VALUES (999);
+                 CREATE TABLE healthy(id INTEGER PRIMARY KEY, value TEXT NOT NULL);
+                 INSERT INTO healthy VALUES (1, '42');
+                 PRAGMA foreign_keys=ON;",
+            )
+            .map_err(|error| error.to_string())
+        })
+        .unwrap();
+        let options = type_change_options("healthy", "value", "TEXT", "INTEGER");
+        let preview = preview_sqlite_table_structure_change_with_pool(pool.clone(), options.clone()).await.unwrap();
+
+        apply_sqlite_table_structure_change_with_pool(pool.clone(), options, &preview.schema_revision).await.unwrap();
+
+        let value = db::sqlite::execute_query(&pool, "SELECT typeof(value), value FROM healthy;").await.unwrap();
+        assert_eq!(value.rows[0], serde_json::json!(["integer", 42]).as_array().unwrap().clone());
+        let violations = db::sqlite::execute_query(&pool, "PRAGMA foreign_key_check;").await.unwrap();
+        assert_eq!(violations.rows.len(), 1);
+        assert_eq!(violations.rows[0][0], serde_json::json!("unrelated_child"));
+    }
+
+    #[tokio::test]
+    async fn newly_introduced_inbound_foreign_key_violation_rolls_back_rebuild() {
+        let pool = db::sqlite::connect_path(":memory:").await.unwrap();
+        pool.with_connection(|conn| {
+            conn.execute_batch(
+                "PRAGMA foreign_keys=ON;
+                 CREATE TABLE parent(value TEXT NOT NULL UNIQUE);
+                 CREATE TABLE child(parent_value TEXT REFERENCES parent(value));
+                 INSERT INTO parent VALUES ('abc');
+                 INSERT INTO child VALUES ('abc');",
+            )
+            .map_err(|error| error.to_string())
+        })
+        .unwrap();
+        let options = type_change_options("parent", "value", "TEXT", "INTEGER");
+        let preview = preview_sqlite_table_structure_change_with_pool(pool.clone(), options.clone()).await.unwrap();
+
+        let error = apply_sqlite_table_structure_change_with_pool(pool.clone(), options, &preview.schema_revision)
+            .await
+            .unwrap_err();
+
+        assert!(error.contains("new violation") && error.contains("table=child"), "{error}");
+        let parent = db::sqlite::execute_query(&pool, "SELECT typeof(value), value FROM parent;").await.unwrap();
+        assert_eq!(parent.rows[0], serde_json::json!(["text", "abc"]).as_array().unwrap().clone());
+        let violations = db::sqlite::execute_query(&pool, "PRAGMA foreign_key_check;").await.unwrap();
+        assert!(violations.rows.is_empty());
     }
 
     #[tokio::test]
