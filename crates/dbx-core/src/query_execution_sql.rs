@@ -61,7 +61,8 @@ pub fn build_explain_sql(options: ExplainSqlOptions) -> ExplainSqlBuildResult {
         }
         Some(DatabaseType::Oracle) => format!("EXPLAIN PLAN FOR {source}"),
         Some(DatabaseType::Mysql) if options.format == Some(ExplainFormat::Standard) => {
-            format!("EXPLAIN {source}")
+            // MySQL 8.0.32+ may otherwise inherit TREE or JSON from the session-level explain_format.
+            format!("EXPLAIN FORMAT=TRADITIONAL {source}")
         }
         _ => format!("EXPLAIN FORMAT=JSON {source}"),
     };
@@ -518,7 +519,11 @@ mod tests {
                 format: Some(ExplainFormat::Standard),
                 sql: "SELECT * FROM users;".to_string(),
             }),
-            ExplainSqlBuildResult { ok: true, sql: Some("EXPLAIN SELECT * FROM users".to_string()), reason: None }
+            ExplainSqlBuildResult {
+                ok: true,
+                sql: Some("EXPLAIN FORMAT=TRADITIONAL SELECT * FROM users".to_string()),
+                reason: None,
+            }
         );
     }
 
