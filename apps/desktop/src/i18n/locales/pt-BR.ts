@@ -639,6 +639,7 @@ export default withEnglishFallback({
     copy: "Copiar",
     mongoJsonPreview: "Visualização JSON",
     mongoJsonPreviewEmpty: "Selecione um documento MongoDB para visualizar.",
+    elasticsearchJsonResponse: "JSON do Elasticsearch",
     copyJson: "Copiar JSON",
     copyDdl: "Copiar DDL",
     copyCell: "Copiar Célula",

@@ -638,6 +638,7 @@ export default withEnglishFallback({
     copy: "複製",
     mongoJsonPreview: "JSON 預覽",
     mongoJsonPreviewEmpty: "選擇一筆 MongoDB 文件以預覽。",
+    elasticsearchJsonResponse: "Elasticsearch JSON",
     copyJson: "複製 JSON",
     copyDdl: "複製 DDL",
     copyCell: "複製儲存格",

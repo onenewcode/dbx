@@ -690,6 +690,7 @@ export default {
     copy: "Copy",
     mongoJsonPreview: "JSON Preview",
     mongoJsonPreviewEmpty: "Select a MongoDB document to preview.",
+    elasticsearchJsonResponse: "Elasticsearch JSON",
     copyJson: "Copy JSON",
     copyDdl: "Copy DDL",
     copyCell: "Copy Cell",

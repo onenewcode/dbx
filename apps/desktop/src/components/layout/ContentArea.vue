@@ -48,6 +48,7 @@ const DocumentBrowser = defineAsyncComponent(() => import("@/components/document
 const MongoGridFsBrowser = defineAsyncComponent(() => import("@/components/document/MongoGridFsBrowser.vue"));
 const MongoBucketBrowser = defineAsyncComponent(() => import("@/components/document/MongoBucketBrowser.vue"));
 const VectorBrowser = defineAsyncComponent(() => import("@/components/vector/VectorBrowser.vue"));
+const ElasticsearchJsonResponsePanel = defineAsyncComponent(() => import("@/components/common/ElasticsearchJsonResponsePanel.vue"));
 const MqAdminConsole = defineAsyncComponent(() => import("@/components/mq/MqAdminConsole.vue"));
 const NacosAdminConsole = defineAsyncComponent(() => import("@/components/nacos/NacosAdminConsole.vue"));
 const ObjectBrowser = defineAsyncComponent(() => import("@/components/objects/ObjectBrowser.vue"));
@@ -313,6 +314,17 @@ const resultRuns = computed(() => resultRunItems(props.activeTab));
 const activeResultRunItem = computed(() => resultRuns.value.find((run) => run.active));
 const activeResultGridCacheKey = computed(() => resultGridCacheKey(props.activeTab));
 const activeResultSql = computed(() => resultSqlForGrid(props.activeTab));
+const activeElasticsearchJsonResponse = computed(() => {
+  const result = props.activeTab.result;
+  if (activeEffectiveDatabaseType.value !== "elasticsearch" || !result) return undefined;
+  if (!/^(GET|POST|PUT|DELETE)\s+\S+/i.test(activeResultSql.value.trim())) return undefined;
+  if (result.columns.length !== 2 || result.columns[0] !== "status" || result.columns[1] !== "response" || result.rows.length !== 1) return undefined;
+
+  const status = result.rows[0]?.[0];
+  const body = result.rows[0]?.[1];
+  if (typeof status !== "number" || !Number.isInteger(status) || status < 100 || status > 599 || typeof body !== "string") return undefined;
+  return { status, body };
+});
 const resultArchiveExporting = ref(false);
 const canExportResultArchive = computed(() => props.activeTab.mode === "query" && (!!props.activeTab.result || !!props.activeTab.results?.length || !!props.activeTab.resultRuns?.length));
 const resultAutoSave = computed(() => props.activeTab.resultAutoSave === true);
@@ -331,7 +343,7 @@ const hasTabularResult = computed(() => {
 });
 const canShowResultOutput = computed(() => hasTabularResult.value || props.activeTab.isExecuting);
 const canShowExplainOutput = computed(() => !!props.activeTab.explainPlan || !!props.activeTab.explainError || !!props.activeTab.explainTableResult || !!props.activeTab.explainTableError || props.activeTab.isExplaining === true);
-const showStandaloneResultToolbar = computed(() => props.activeOutputView !== "result" || !props.activeTab.result || !hasTabularResult.value);
+const showStandaloneResultToolbar = computed(() => activeElasticsearchJsonResponse.value || props.activeOutputView !== "result" || !props.activeTab.result || !hasTabularResult.value);
 const standaloneResultToolbarCompact = computed(() => standaloneResultToolbarWidth.value > 0 && standaloneResultToolbarWidth.value < DATA_GRID_COMPACT_TOPBAR_WIDTH);
 let standaloneResultToolbarResizeObserver: ResizeObserver | undefined;
 
@@ -664,6 +676,10 @@ function refreshData(): boolean {
     emit("reload");
     return true;
   }
+  if (activeElasticsearchJsonResponse.value) {
+    emit("reload", activeResultSql.value);
+    return true;
+  }
   if (!dataGridRef.value) return false;
   void dataGridRef.value.onToolbarRefresh();
   return true;
@@ -715,7 +731,7 @@ function toggleResultAutoSave() {
 function handleModRTarget(target: Element): boolean {
   if (target.closest("[data-query-editor-root]")) return queryEditorRef.value?.openReplace() ?? false;
   if (target.closest("[data-cell-detail-editor-root]")) return dataGridRef.value?.openCellDetailSearch() ?? false;
-  if (target.closest("[data-grid-root]")) return refreshData();
+  if (target.closest("[data-grid-root], [data-elasticsearch-json-response-root]")) return refreshData();
   if (canReloadUnavailableDataTab(props.activeTab)) return refreshData();
   return false;
 }
@@ -844,7 +860,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 </div>
               </template>
               <div class="ml-auto flex shrink-0 items-center gap-1">
-                <Popover v-if="activeOutputView === 'result' && activeTab.result && hasTabularResult">
+                <Popover v-if="activeOutputView === 'result' && activeTab.result && hasTabularResult && !activeElasticsearchJsonResponse">
                   <PopoverTrigger as-child>
                     <Button variant="ghost" size="icon" class="h-6 w-7 shrink-0 text-foreground hover:bg-accent" :title="t('grid.viewOptions')" :aria-label="t('grid.viewOptions')">
                       <Wrench class="h-4 w-4" />
@@ -996,7 +1012,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
             </div>
 
             <div v-if="hasQueryOutput && showStandaloneResultToolbar" ref="standaloneResultToolbarRef" class="flex min-h-7 shrink-0 items-center border-b bg-muted/20">
-              <QueryResultViewSwitcher :active-view="activeOutputView" :can-show-result="canShowResultOutput" :can-show-summary="hasExecutionSummary" :can-show-chart="hasNumericData" :compact="standaloneResultToolbarCompact" @select-view="emit('update:activeOutputView', $event)" />
+              <QueryResultViewSwitcher :active-view="activeOutputView" :can-show-result="canShowResultOutput" :can-show-summary="hasExecutionSummary" :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse" :compact="standaloneResultToolbarCompact" @select-view="emit('update:activeOutputView', $event)" />
               <QueryResultToolbarActions
                 class="ml-auto"
                 :active-view="activeOutputView"
@@ -1021,7 +1037,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
               :table-error="activeTab.explainTableError"
             />
 
-            <QueryChart v-else-if="activeOutputView === 'chart' && activeTab.result" class="flex-1 min-h-0" :result="activeTab.result" />
+            <QueryChart v-else-if="activeOutputView === 'chart' && activeTab.result && !activeElasticsearchJsonResponse" class="flex-1 min-h-0" :result="activeTab.result" />
 
             <div v-else-if="activeOutputView === 'summary'" class="flex-1 min-h-0 overflow-auto bg-background">
               <div v-if="activeTab.isExecuting" class="flex h-full items-center justify-center text-sm text-muted-foreground">
@@ -1059,8 +1075,9 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
             </div>
 
             <template v-else>
+              <ElasticsearchJsonResponsePanel v-if="activeElasticsearchJsonResponse" class="flex-1 min-h-0" :status="activeElasticsearchJsonResponse.status" :body="activeElasticsearchJsonResponse.body" />
               <DataGrid
-                v-if="activeTab.result && hasTabularResult"
+                v-else-if="activeTab.result && hasTabularResult"
                 ref="dataGridRef"
                 :key="activeResultGridCacheKey"
                 :cache-key="activeResultGridCacheKey"
@@ -1102,7 +1119,7 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
                 @sort="(column: string, columnIndex: number, direction: 'asc' | 'desc' | null, whereInput?: string, mode?: DataGridSortMode) => emit('sort', column, columnIndex, direction, whereInput, mode)"
               >
                 <template #result-toolbar-leading="{ compact }">
-                  <QueryResultViewSwitcher :active-view="activeOutputView" :can-show-result="canShowResultOutput" :can-show-summary="hasExecutionSummary" :can-show-chart="hasNumericData" :compact="compact" @select-view="emit('update:activeOutputView', $event)" />
+                  <QueryResultViewSwitcher :active-view="activeOutputView" :can-show-result="canShowResultOutput" :can-show-summary="hasExecutionSummary" :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse" :compact="compact" @select-view="emit('update:activeOutputView', $event)" />
                 </template>
                 <template #result-toolbar-actions="{ compact }">
                   <QueryResultToolbarActions

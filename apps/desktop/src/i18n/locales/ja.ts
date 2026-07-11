@@ -636,6 +636,7 @@ export default withEnglishFallback({
     copy: "コピー",
     mongoJsonPreview: "JSON プレビュー",
     mongoJsonPreviewEmpty: "プレビューする MongoDB ドキュメントを選択してください。",
+    elasticsearchJsonResponse: "Elasticsearch JSON",
     copyJson: "JSON をコピー",
     copyDdl: "DDLをコピー",
     copyCell: "セルをコピー",
