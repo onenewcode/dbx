@@ -71,6 +71,7 @@ import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
 import { formatShortcut } from "@/lib/editor/shortcutRegistry";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { chartableColumnIndexes } from "@/lib/dataGrid/chartData";
+import { elasticsearchJsonResponseForResult } from "@/lib/elasticsearch/elasticsearchJsonResponse";
 import * as api from "@/lib/backend/api";
 import { applyMongoGridChangesToDocument, buildMongoUpdateDocument, formatMongoShellLiteral, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import type { SqlExecutionOverride } from "@/lib/sql/sqlExecutionTarget";
@@ -314,17 +315,7 @@ const resultRuns = computed(() => resultRunItems(props.activeTab));
 const activeResultRunItem = computed(() => resultRuns.value.find((run) => run.active));
 const activeResultGridCacheKey = computed(() => resultGridCacheKey(props.activeTab));
 const activeResultSql = computed(() => resultSqlForGrid(props.activeTab));
-const activeElasticsearchJsonResponse = computed(() => {
-  const result = props.activeTab.result;
-  if (activeEffectiveDatabaseType.value !== "elasticsearch" || !result) return undefined;
-  if (!/^(GET|POST|PUT|DELETE)\s+\S+/i.test(activeResultSql.value.trim())) return undefined;
-  if (result.columns.length !== 2 || result.columns[0] !== "status" || result.columns[1] !== "response" || result.rows.length !== 1) return undefined;
-
-  const status = result.rows[0]?.[0];
-  const body = result.rows[0]?.[1];
-  if (typeof status !== "number" || !Number.isInteger(status) || status < 100 || status > 599 || typeof body !== "string") return undefined;
-  return { status, body };
-});
+const activeElasticsearchJsonResponse = computed(() => elasticsearchJsonResponseForResult(activeEffectiveDatabaseType.value, activeResultSql.value, props.activeTab.result));
 const resultArchiveExporting = ref(false);
 const canExportResultArchive = computed(() => props.activeTab.mode === "query" && (!!props.activeTab.result || !!props.activeTab.results?.length || !!props.activeTab.resultRuns?.length));
 const resultAutoSave = computed(() => props.activeTab.resultAutoSave === true);
@@ -677,7 +668,9 @@ function refreshData(): boolean {
     return true;
   }
   if (activeElasticsearchJsonResponse.value) {
-    emit("reload", activeResultSql.value);
+    // Match DataGrid's toolbar refresh intent so multi-result runs are
+    // refreshed as a group instead of replacing them with the active result.
+    emit("reload", activeResultSql.value, undefined, undefined, undefined, undefined, undefined, "refresh");
     return true;
   }
   if (!dataGridRef.value) return false;
@@ -1012,7 +1005,14 @@ defineExpose({ focusSearch, refreshData, handleModRTarget, requestQueryEditorExe
             </div>
 
             <div v-if="hasQueryOutput && showStandaloneResultToolbar" ref="standaloneResultToolbarRef" class="flex min-h-7 shrink-0 items-center border-b bg-muted/20">
-              <QueryResultViewSwitcher :active-view="activeOutputView" :can-show-result="canShowResultOutput" :can-show-summary="hasExecutionSummary" :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse" :compact="standaloneResultToolbarCompact" @select-view="emit('update:activeOutputView', $event)" />
+              <QueryResultViewSwitcher
+                :active-view="activeOutputView"
+                :can-show-result="canShowResultOutput"
+                :can-show-summary="hasExecutionSummary"
+                :can-show-chart="hasNumericData && !activeElasticsearchJsonResponse"
+                :compact="standaloneResultToolbarCompact"
+                @select-view="emit('update:activeOutputView', $event)"
+              />
               <QueryResultToolbarActions
                 class="ml-auto"
                 :active-view="activeOutputView"
