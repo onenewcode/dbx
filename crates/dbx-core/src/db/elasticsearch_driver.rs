@@ -943,14 +943,20 @@ fn parse_elasticsearch_response(
 }
 
 fn json_response_result(status: u16, body: &serde_json::Value, start: std::time::Instant) -> crate::types::QueryResult {
+    let body_text = serde_json::to_string_pretty(body).unwrap_or_else(|_| body.to_string());
+    raw_json_response_result(status, body_text, start)
+}
+
+fn raw_json_response_result(
+    status: u16,
+    body_text: impl Into<String>,
+    start: std::time::Instant,
+) -> crate::types::QueryResult {
     crate::types::QueryResult {
         columns: vec!["status".to_string(), "response".to_string()],
         column_types: Vec::new(),
         column_sortables: vec![],
-        rows: vec![vec![
-            serde_json::Value::Number(status.into()),
-            serde_json::Value::String(serde_json::to_string_pretty(body).unwrap_or_else(|_| body.to_string())),
-        ]],
+        rows: vec![vec![serde_json::Value::Number(status.into()), serde_json::Value::String(body_text.into())]],
         affected_rows: 0,
         execution_time_ms: start.elapsed().as_millis(),
         truncated: false,
@@ -968,10 +974,10 @@ fn parse_elasticsearch_rest_response(
         return Ok(json_response_result(status, &serde_json::Value::Null, start));
     }
 
-    if let Ok(body) = serde_json::from_str::<serde_json::Value>(body_text) {
-        // Explicit REST requests preserve their response shape. SQL input is
-        // routed above and remains a table result.
-        return Ok(json_response_result(status, &body, start));
+    if serde_json::from_str::<serde_json::Value>(body_text).is_ok() {
+        // Validate the payload as JSON, but retain the HTTP body verbatim so
+        // numeric literals are not changed by a parse/serialize round trip.
+        return Ok(raw_json_response_result(status, body_text, start));
     }
 
     // CAT APIs default to text/plain for human-readable output. Keep those
@@ -1823,25 +1829,24 @@ mod tests {
     }
 
     #[test]
-    fn keeps_mapping_rest_response_pretty_and_lossless() {
-        let body = json!({
-            "products": {
-                "mappings": {
-                    "_meta": { "largest_id": 9_007_199_254_740_993_u64 },
-                    "properties": { "name": { "type": "keyword" } }
-                }
-            }
-        });
-        let result =
-            super::parse_elasticsearch_rest_response(200, &body.to_string(), std::time::Instant::now()).unwrap();
+    fn keeps_mapping_rest_response_numeric_literals_lossless() {
+        let body = r#"{
+  "products": {
+    "mappings": {
+      "_meta": {
+        "largest_id": 123456789012345678901234567890,
+        "ratio": 0.123456789012345678901234567890,
+        "estimate": 1e400
+      },
+      "properties": { "name": { "type": "keyword" } }
+    }
+  }
+}"#;
+        let result = super::parse_elasticsearch_rest_response(200, body, std::time::Instant::now()).unwrap();
 
         assert_eq!(result.columns, vec!["status", "response"]);
         assert_eq!(result.rows[0][0], json!(200));
-        let formatted = result.rows[0][1].as_str().unwrap();
-        assert!(formatted.contains('\n'));
-        let parsed: serde_json::Value = serde_json::from_str(formatted).unwrap();
-        assert_eq!(parsed, body);
-        assert_eq!(parsed["products"]["mappings"]["_meta"]["largest_id"].as_u64(), Some(9_007_199_254_740_993));
+        assert_eq!(result.rows[0][1].as_str(), Some(body));
     }
 
     #[tokio::test]
@@ -1873,6 +1878,34 @@ mod tests {
         assert_eq!(result.columns, vec!["response"]);
         assert_eq!(result.rows.len(), 2);
         assert_eq!(result.rows[1][0], json!("green  open   app-log-2026-07 42         10mb"));
+    }
+
+    #[tokio::test]
+    async fn execute_rest_query_preserves_numeric_literals_from_http_body() {
+        use tokio::io::AsyncWriteExt;
+
+        let response_body = r#"{"largest_id":123456789012345678901234567890,"ratio":0.123456789012345678901234567890,"estimate":1e400}"#;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.starts_with("GET /products/_mapping "));
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+        });
+
+        let client = EsClient::new(&format!("http://{addr}"), None, None, false, Duration::from_secs(1));
+        let result = super::execute_rest_query(&client, "GET /products/_mapping").await.unwrap();
+        server.await.unwrap();
+
+        assert_eq!(result.columns, vec!["status", "response"]);
+        assert_eq!(result.rows[0][0], json!(200));
+        assert_eq!(result.rows[0][1].as_str(), Some(response_body));
     }
 
     #[tokio::test]
@@ -1993,6 +2026,7 @@ mod tests {
             }
         });
         let response_body = body.to_string();
+        let server_response_body = response_body.clone();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -2003,8 +2037,8 @@ mod tests {
             assert!(request.starts_with("POST /products/_search "));
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                response_body.len(),
-                response_body
+                server_response_body.len(),
+                server_response_body
             );
             socket.write_all(response.as_bytes()).await.unwrap();
         });
@@ -2016,9 +2050,9 @@ mod tests {
 
         assert_eq!(result.columns, vec!["status", "response"]);
         assert_eq!(result.rows[0][0], json!(200));
-        let formatted = result.rows[0][1].as_str().unwrap();
-        assert!(formatted.contains("\n  \"hits\":"));
-        assert_eq!(serde_json::from_str::<serde_json::Value>(formatted).unwrap(), body);
+        let response = result.rows[0][1].as_str().unwrap();
+        assert_eq!(response, response_body);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(response).unwrap(), body);
     }
 
     #[test]
