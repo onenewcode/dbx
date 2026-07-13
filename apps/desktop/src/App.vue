@@ -1117,7 +1117,7 @@ async function newQuery() {
     targetDatabase: target.database,
     databaseType: effectiveDatabaseTypeForConnection(conn),
   });
-  const tabId = queryStore.createTab(conn.id, target.database, undefined, "query", target.schema, initialSql);
+  const tabId = queryStore.createTab(conn.id, target.database, undefined, "query", target.schema, initialSql, target.catalog);
   try {
     await connectionStore.ensureConnected(target.connectionId);
     if (target.shouldRefreshDefaultDatabase) {

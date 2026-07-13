@@ -49,6 +49,21 @@ describe("editable query hidden primary keys", () => {
     ).toBe('SELECT /*+ INDEX(t IDX_USERS_NAME) */ t.NAME, "ID" AS "__DBX_PK_0"\nFROM USERS t');
   });
 
+  it("supports an Oracle ROWID expression for keyless base tables", () => {
+    expect(
+      buildQueryWithHiddenPrimaryKeys({
+        sql: "SELECT * FROM APP.USERS t WHERE t.ACTIVE = 1",
+        databaseType: "oracle",
+        primaryKeys: ["__DBX_ROWID"],
+        existingResultNames: ["ID", "NAME"],
+        sourceExpressions: { __DBX_ROWID: "ROWIDTOCHAR(ROWID)" },
+      }),
+    ).toEqual({
+      sql: 'SELECT *, ROWIDTOCHAR(ROWID) AS "__DBX_PK_0" FROM APP.USERS t WHERE t.ACTIVE = 1',
+      projections: [{ sourceName: "__DBX_ROWID", alias: "__DBX_PK_0" }],
+    });
+  });
+
   it("inserts hidden keys before a trailing line comment", () => {
     expect(
       buildQueryWithHiddenPrimaryKeys({

@@ -280,6 +280,7 @@ interface DataGridProps {
   sortMode?: DataGridSortMode;
   tableMeta?: {
     catalog?: string;
+    database?: string;
     schema?: string;
     tableName: string;
     tableType?: string;
@@ -1420,6 +1421,7 @@ async function loadServerFilterValues(columnIndex: number, searchValue: string) 
     const sql = await buildDataGridColumnDistinctValuesSql({
       databaseType: resolvedDatabaseType.value,
       catalog: tableMeta.catalog,
+      database: tableMeta.database,
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,
       columnName,
@@ -3961,6 +3963,7 @@ async function buildCurrentCountTarget(): Promise<{ sql: string; schema?: string
       databaseType: props.databaseType,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
       catalog: props.tableMeta.catalog,
+      database: props.tableMeta.database,
       schema: props.tableMeta.schema,
       tableName: props.tableMeta.tableName,
       whereInput: currentWhereInput(),
@@ -5622,6 +5625,7 @@ async function applyOrderBySearch() {
       databaseType: resolvedDatabaseType.value,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
       catalog: tableMeta.catalog,
+      database: tableMeta.database,
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,
       tableType: tableMeta.tableType,
@@ -5655,6 +5659,7 @@ async function applyWhereFilter() {
       databaseType: resolvedDatabaseType.value,
       identifierQuote: connectionStore.connectionIdentifierQuote?.(props.connectionId),
       catalog: tableMeta.catalog,
+      database: tableMeta.database,
       schema: tableMeta.schema,
       tableName: tableMeta.tableName,
       tableType: tableMeta.tableType,
