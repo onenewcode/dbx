@@ -1924,6 +1924,8 @@ export default withEnglishFallback({
     typePlaceholder: "選択または入力...",
     noMatchingType: "一致する型がありません",
     length: "長さ",
+    lengthUnit: "長さの単位",
+    unitPlaceholder: "単位",
     nullable: "NULL許容",
     primaryKey: "主キー",
     defaultValue: "デフォルト",

@@ -1961,6 +1961,8 @@ export default {
       numeric: "NUMERIC affinity attempts to convert well-formed numeric text to INTEGER first, then REAL; it is not a separate SQLite storage class. DATE, DATETIME, and TIME declarations also have NUMERIC affinity; store ISO-8601 TEXT, Julian-day REAL, or Unix-time INTEGER consistently.",
     },
     length: "Length",
+    lengthUnit: "Length unit",
+    unitPlaceholder: "Unit",
     enumValues: "Enum values",
     enumValueCount: "{count} values",
     addEnumValue: "Add value",

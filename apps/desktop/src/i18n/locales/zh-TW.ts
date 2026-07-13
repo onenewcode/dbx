@@ -1797,6 +1797,8 @@ export default withEnglishFallback({
     columnName: "欄位",
     dataType: "類型",
     length: "長度",
+    lengthUnit: "長度單位",
+    unitPlaceholder: "單位",
     typePlaceholder: "選擇或輸入……",
     noMatchingType: "沒有相符類型",
     nullable: "可為空",

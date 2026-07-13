@@ -41,16 +41,19 @@ import {
   buildStructureTargetLabel,
   canEditManticoreColumnProperties,
   combineDataTypeForDatabase,
+  combineDataTypeForDatabaseWithLengthUnit,
   createColumnDrafts,
   createForeignKeyDrafts,
   createIndexDrafts,
   createTriggerDrafts,
   dataTypeLengthInputValue,
+  dataTypeLengthUnitValue,
   defaultNewColumnDataType,
   generateIndexName,
   generateUniqueIndexName,
   getColumnEditorControls,
   getDataTypeOptions,
+  getDataTypeLengthUnitOptions,
   getDefaultLengthForType,
   hasExistingColumnTypeChange,
   isDataTypeLengthDisabled,
@@ -62,6 +65,7 @@ import {
   mysqlEnumDataType,
   parseExtraToColumnExtra,
   rehydrateColumnDraftsFromMetadata,
+  restoreDamengLengthUnitsAfterSave,
   splitDataType,
   toColumnNames,
 } from "@/lib/table/tableStructureEditorState";
@@ -273,6 +277,7 @@ const structureDensityMetrics: Record<
     columns: number[];
     indexes: number[];
     minColumnWidth: number;
+    minLengthColumnWidth: number;
     minIndexColumnWidth: number;
     actionButtonWidth: number;
     fontSize: number;
@@ -291,6 +296,7 @@ const structureDensityMetrics: Record<
     columns: [28, 168, 136, 82, 60, 52, 108, 220, 80, 120, 144, 108],
     indexes: [120, 180, 60, 88, 124, 144, 120, 70],
     minColumnWidth: 24,
+    minLengthColumnWidth: 140,
     minIndexColumnWidth: 48,
     actionButtonWidth: 24,
     fontSize: 11,
@@ -308,6 +314,7 @@ const structureDensityMetrics: Record<
     columns: [32, 200, 160, 104, 72, 64, 128, 260, 90, 140, 160, 136],
     indexes: [148, 224, 72, 108, 148, 180, 148, 84],
     minColumnWidth: 28,
+    minLengthColumnWidth: 156,
     minIndexColumnWidth: 60,
     actionButtonWidth: 28,
     fontSize: 12,
@@ -325,6 +332,7 @@ const structureDensityMetrics: Record<
     columns: [36, 232, 188, 116, 84, 76, 152, 300, 100, 160, 188, 148],
     indexes: [176, 260, 84, 124, 176, 216, 176, 104],
     minColumnWidth: 32,
+    minLengthColumnWidth: 176,
     minIndexColumnWidth: 64,
     actionButtonWidth: 32,
     fontSize: 13,
@@ -565,11 +573,12 @@ watch(localStructureDensity, (density, previousDensity) => {
 function onColResize(e: MouseEvent, col: number) {
   e.preventDefault();
   const widthIndex = columnWidthIndex(col);
-  colResizing.value = { col: widthIndex, startX: e.clientX, startW: colWidths.value[widthIndex] };
+  const minimumWidth = widthIndex === 3 && databaseType.value === "dameng" ? structureDensityMetric.value.minLengthColumnWidth : structureDensityMetric.value.minColumnWidth;
+  colResizing.value = { col: widthIndex, startX: e.clientX, startW: Math.max(colWidths.value[widthIndex] ?? minimumWidth, minimumWidth) };
   const onMove = (ev: MouseEvent) => {
     if (!colResizing.value) return;
     const delta = ev.clientX - colResizing.value.startX;
-    colWidths.value[widthIndex] = Math.max(structureDensityMetric.value.minColumnWidth, colResizing.value.startW + delta);
+    colWidths.value[widthIndex] = Math.max(minimumWidth, colResizing.value.startW + delta);
   };
   const onUp = () => {
     colResizing.value = null;
@@ -749,7 +758,13 @@ const columnActionsWidth = computed(() => {
   return metric.actionButtonWidth * count + actionButtonGap * Math.max(0, count - 1) + metric.cellPaddingX * 2;
 });
 const visibleColumnIndexes = computed(() => colLabels.value.map((column) => column.widthIndex));
-const visibleColWidths = computed(() => colLabels.value.map((column) => (column.key === "actions" ? columnActionsWidth.value : (colWidths.value[column.widthIndex] ?? structureDensityMetric.value.minColumnWidth))));
+const visibleColWidths = computed(() =>
+  colLabels.value.map((column) => {
+    if (column.key === "actions") return columnActionsWidth.value;
+    const width = colWidths.value[column.widthIndex] ?? structureDensityMetric.value.minColumnWidth;
+    return column.key === "length" && databaseType.value === "dameng" ? Math.max(width, structureDensityMetric.value.minLengthColumnWidth) : width;
+  }),
+);
 
 function columnWidthIndex(visibleIndex: number) {
   return visibleColumnIndexes.value[visibleIndex] ?? visibleIndex;
@@ -1214,7 +1229,7 @@ async function fetchTableCommentValue(connectionId: string, database: string, sc
   }
 }
 
-async function loadStructure(silent = false, scope: StructureRefreshScope = FULL_STRUCTURE_REFRESH_SCOPE, showErrors = true, options: { blockSecondaryMetadata?: boolean; preserveDraft?: boolean } = {}) {
+async function loadStructure(silent = false, scope: StructureRefreshScope = FULL_STRUCTURE_REFRESH_SCOPE, showErrors = true, options: { blockSecondaryMetadata?: boolean; preserveDraft?: boolean; damengLengthUnitsAfterSave?: ReadonlyMap<string, string> } = {}) {
   const connectionId = props.connectionId;
   const database = props.database;
   const schema = metadataSchema.value;
@@ -1250,7 +1265,9 @@ async function loadStructure(silent = false, scope: StructureRefreshScope = FULL
       // Load live charset/collation metadata from the MySQL server so the column
       // editor shows the correct options for the server version.
       void loadCharsetMetadata();
-      columns.value = applyStoredLocalColumnOrder(createColumnDrafts(nextColumns, databaseType.value));
+      const nextColumnDrafts = createColumnDrafts(nextColumns, databaseType.value);
+      const hydratedColumnDrafts = databaseType.value === "dameng" && options.damengLengthUnitsAfterSave ? restoreDamengLengthUnitsAfterSave(nextColumnDrafts, options.damengLengthUnitsAfterSave) : nextColumnDrafts;
+      columns.value = applyStoredLocalColumnOrder(hydratedColumnDrafts);
     }
 
     const nextTableComment = await tableCommentPromise;
@@ -1295,9 +1312,9 @@ async function loadStructure(silent = false, scope: StructureRefreshScope = FULL
   }
 }
 
-async function refreshStructureAfterSave(scope: StructureRefreshScope) {
+async function refreshStructureAfterSave(scope: StructureRefreshScope, damengLengthUnitsAfterSave: ReadonlyMap<string, string>) {
   try {
-    await loadStructure(true, scope, false, { blockSecondaryMetadata: true });
+    await loadStructure(true, scope, false, { blockSecondaryMetadata: true, damengLengthUnitsAfterSave });
   } catch (e) {
     console.warn("[DBX][structure-editor:post-save-refresh-failed]", e);
   } finally {
@@ -1578,7 +1595,16 @@ function removeMysqlEnumValue(column: EditableStructureColumn, index: number) {
 }
 
 function updateColumnDataTypeLength(column: EditableStructureColumn, value: string | number) {
-  column.dataType = combineDataTypeForDatabase(databaseType.value, splitDataType(column.dataType).baseType, String(value));
+  const baseType = splitDataType(column.dataType).baseType;
+  column.dataType = combineDataTypeForDatabaseWithLengthUnit(databaseType.value, baseType, String(value), dataTypeLengthUnitValue(databaseType.value, column.dataType));
+  syncSqlServerIdentityForDataType(column);
+  syncDamengIdentityForDataType(column);
+}
+
+function updateColumnDataTypeLengthUnit(column: EditableStructureColumn, value: unknown) {
+  const baseType = splitDataType(column.dataType).baseType;
+  const unit = value === "__default" ? "" : String(value ?? "");
+  column.dataType = combineDataTypeForDatabaseWithLengthUnit(databaseType.value, baseType, dataTypeLengthInputValue(databaseType.value, column.dataType), unit);
   syncSqlServerIdentityForDataType(column);
   syncDamengIdentityForDataType(column);
 }
@@ -1884,6 +1910,14 @@ function isColumnLengthDisabled(column: EditableStructureColumn): boolean {
   return isDataTypeLengthDisabled(databaseType.value, baseType);
 }
 
+function columnLengthUnitOptions(column: EditableStructureColumn) {
+  return getDataTypeLengthUnitOptions(databaseType.value, column.dataType);
+}
+
+function isColumnLengthUnitDisabled(column: EditableStructureColumn): boolean {
+  return isColumnLengthDisabled(column) || !dataTypeLengthInputValue(databaseType.value, column.dataType).trim();
+}
+
 function isColumnNullableDisabled(column: EditableStructureColumn): boolean {
   return column.markedForDrop || column.isPrimaryKey || (!!column.original && !structureCapabilities.value.alterNullability);
 }
@@ -2162,6 +2196,14 @@ async function applyChanges() {
   saving.value = true;
   errorMessage.value = "";
   const refreshScope = captureStructureRefreshScope();
+  const damengLengthUnitsAfterSave = new Map<string, string>();
+  if (databaseType.value === "dameng") {
+    for (const column of columns.value) {
+      if (!column.markedForDrop && dataTypeLengthUnitValue("dameng", column.dataType)) {
+        damengLengthUnitsAfterSave.set(column.name.trim().toLowerCase(), column.dataType);
+      }
+    }
+  }
   const startedAt = Date.now();
   try {
     const result = hasSqliteTypeChange.value
@@ -2185,7 +2227,7 @@ async function applyChanges() {
       postSaveRefreshing.value = true;
       skipNextRefreshVersion = true;
       emit("saved", tableComment.value !== originalTableComment.value);
-      void refreshStructureAfterSave(refreshScope);
+      void refreshStructureAfterSave(refreshScope, damengLengthUnitsAfterSave);
     }
   } catch (e: any) {
     errorMessage.value = e?.message || String(e);
@@ -2630,7 +2672,22 @@ watch([activeTab, ddlLoading], ([tab, loading]) => {
                         </div>
                       </PopoverContent>
                     </Popover>
-                    <Input v-else :model-value="dataTypeLengthInputValue(databaseType, column.dataType)" :class="structureMonoControlClass" :disabled="isColumnLengthDisabled(column)" @update:model-value="updateColumnDataTypeLength(column, $event)" />
+                    <div v-else class="flex min-w-0 items-center gap-1">
+                      <Input :model-value="dataTypeLengthInputValue(databaseType, column.dataType)" :class="[structureMonoControlClass, 'min-w-0 flex-1']" :disabled="isColumnLengthDisabled(column)" @update:model-value="updateColumnDataTypeLength(column, $event)" />
+                      <Select v-if="columnLengthUnitOptions(column).length" :model-value="dataTypeLengthUnitValue(databaseType, column.dataType) || '__default'" :disabled="isColumnLengthUnitDisabled(column)" @update:model-value="updateColumnDataTypeLengthUnit(column, $event)">
+                        <SelectTrigger
+                          :aria-label="t('structureEditor.lengthUnit')"
+                          :title="t('structureEditor.lengthUnit')"
+                          class="h-[var(--structure-control-height)] w-16 shrink-0 rounded-[6px] px-[var(--structure-control-px)] font-mono text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25"
+                        >
+                          <SelectValue :placeholder="t('structureEditor.unitPlaceholder')" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="__default">{{ t("structureEditor.defaultAction") }}</SelectItem>
+                          <SelectItem v-for="unit in columnLengthUnitOptions(column)" :key="unit" :value="unit">{{ unit }}</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
                   </td>
                   <td v-if="columnEditorControls.nullable" :class="structureCellClass">
                     <label class="flex items-center gap-1.5">

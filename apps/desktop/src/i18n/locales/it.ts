@@ -1889,6 +1889,8 @@ export default withEnglishFallback({
     typePlaceholder: "Seleziona o digita...",
     noMatchingType: "Nessun tipo corrispondente",
     length: "Lunghezza",
+    lengthUnit: "Unità di lunghezza",
+    unitPlaceholder: "Unità",
     nullable: "Nullabile",
     primaryKey: "Chiave Primaria",
     defaultValue: "Valore Predefinito",

@@ -1891,6 +1891,8 @@ export default withEnglishFallback({
     typePlaceholder: "Selecione ou digite...",
     noMatchingType: "Nenhum tipo correspondente",
     length: "Comprimento",
+    lengthUnit: "Unidade de comprimento",
+    unitPlaceholder: "Unidade",
     nullable: "Permite nulo",
     primaryKey: "Chave primária",
     defaultValue: "Padrão",

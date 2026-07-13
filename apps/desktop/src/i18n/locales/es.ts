@@ -1891,6 +1891,8 @@ export default withEnglishFallback({
     typePlaceholder: "Seleccionar o escribir...",
     noMatchingType: "Sin coincidencias",
     length: "Longitud",
+    lengthUnit: "Unidad de longitud",
+    unitPlaceholder: "Unidad",
     nullable: "Admite nulos",
     primaryKey: "Clave primaria",
     defaultValue: "Valor por defecto",

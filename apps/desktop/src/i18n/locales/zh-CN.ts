@@ -1857,6 +1857,8 @@ export default withEnglishFallback({
     columnName: "字段名",
     dataType: "类型",
     length: "长度",
+    lengthUnit: "长度单位",
+    unitPlaceholder: "单位",
     enumValues: "枚举值",
     enumValueCount: "{count} 个值",
     addEnumValue: "添加值",

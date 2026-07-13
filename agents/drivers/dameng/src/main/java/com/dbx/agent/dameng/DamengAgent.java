@@ -662,6 +662,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
                     c.DATA_SCALE,
                     c.DATA_LENGTH,
                     c.CHAR_LENGTH,
+                    c.CHAR_USED,
                     cc.COMMENTS
                 FROM ALL_TAB_COLUMNS c
                 LEFT JOIN ALL_COL_COMMENTS cc
@@ -684,7 +685,8 @@ public final class DamengAgent extends BaseDatabaseAgent {
                         Integer numScale = intObject(rs, "DATA_SCALE");
                         Integer dataLen = intObject(rs, "DATA_LENGTH");
                         Integer charLen = intObject(rs, "CHAR_LENGTH");
-                        String dataType = formatDataType(baseType, numPrec, numScale, dataLen, charLen);
+                        String charUsed = rs.getString("CHAR_USED");
+                        String dataType = formatDataType(baseType, numPrec, numScale, dataLen, charLen, charUsed);
 
                         result.add(new ColumnInfo(
                             name,
@@ -961,9 +963,20 @@ public final class DamengAgent extends BaseDatabaseAgent {
         return "jdbc:dm://" + params.getHost() + ":" + params.getPort() + suffix;
     }
 
-    private static String formatDataType(String base, Integer numPrec, Integer numScale, Integer dataLen, Integer charLen) {
+    private static String formatDataType(
+        String base,
+        Integer numPrec,
+        Integer numScale,
+        Integer dataLen,
+        Integer charLen,
+        String charUsed
+    ) {
         return switch (base.toUpperCase(Locale.ROOT)) {
-            case "VARCHAR2", "NVARCHAR2", "VARCHAR", "CHAR", "NCHAR" -> {
+            case "VARCHAR2", "VARCHAR", "CHAR" -> {
+                Integer length = characterLength(dataLen, charLen, charUsed);
+                yield length != null ? base + "(" + length + characterLengthUnit(charUsed) + ")" : base;
+            }
+            case "NVARCHAR2", "NCHAR" -> {
                 Integer length = charLen != null ? charLen : dataLen;
                 yield length != null ? base + "(" + length + ")" : base;
             }
@@ -975,6 +988,25 @@ public final class DamengAgent extends BaseDatabaseAgent {
             }
             case "RAW" -> dataLen != null ? "RAW(" + dataLen + ")" : "RAW";
             default -> base;
+        };
+    }
+
+    private static Integer characterLength(Integer dataLen, Integer charLen, String charUsed) {
+        String normalized = charUsed == null ? "" : charUsed.trim().toUpperCase(Locale.ROOT);
+        if ("B".equals(normalized) || "BYTE".equals(normalized)) {
+            return dataLen != null ? dataLen : charLen;
+        }
+        return charLen != null ? charLen : dataLen;
+    }
+
+    private static String characterLengthUnit(String charUsed) {
+        if (charUsed == null) {
+            return "";
+        }
+        return switch (charUsed.trim().toUpperCase(Locale.ROOT)) {
+            case "B", "BYTE" -> " BYTE";
+            case "C", "CHAR" -> " CHAR";
+            default -> "";
         };
     }
 
