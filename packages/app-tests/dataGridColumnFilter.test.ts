@@ -1,14 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "vitest";
-import {
-  appendColumnValueFilterCondition,
-  buildColumnValueFilterCondition,
-  buildColumnValuesFilterCondition,
-  filterModeHasCompleteValue,
-  filterModeIsSupportedForDatabase,
-  parseFilterValue,
-  parseFilterValues,
-} from "../../apps/desktop/src/lib/dataGrid/dataGridColumnFilter.ts";
+import { appendColumnValueFilterCondition, buildColumnValueFilterCondition, buildColumnValuesFilterCondition, filterModeHasCompleteValue, filterModeIsSupportedForDatabase, parseFilterValue, parseFilterValues } from "../../apps/desktop/src/lib/dataGrid/dataGridColumnFilter.ts";
 import { buildDataGridContextFilterCondition } from "../../apps/desktop/src/lib/dataGrid/dataGridSql.ts";
 
 let lastContextFilterOptions: Record<string, unknown> | undefined;
@@ -103,6 +95,9 @@ test("parses typed structured IN values without losing large integers", () => {
   assert.deepEqual(parseFilterValues("9007199254740993", { data_type: "bigint" }), ["9007199254740993"]);
   assert.deepEqual(parseFilterValues("0.123456789012345678", { data_type: "decimal(38,18)" }), ["0.123456789012345678"]);
   assert.equal(parseFilterValue("0.123456789012345678", { data_type: "decimal(38,18)" }), "0.123456789012345678");
+  assert.deepEqual(parseFilterValues("true, false", { data_type: "bit(1)" }, "postgres"), ["true", "false"]);
+  assert.equal(parseFilterValue("true", { data_type: "bit varying" }, "postgres"), "true");
+  assert.equal(parseFilterValue("true", { data_type: "bit" }, "sqlserver"), true);
 });
 
 test("hides list and range modes for unsupported dialects", () => {

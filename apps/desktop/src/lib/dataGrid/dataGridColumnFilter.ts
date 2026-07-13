@@ -71,12 +71,12 @@ export function filterModeHasCompleteValue(mode: DataGridContextFilterMode, rawV
   return rawValue.trim().length > 0;
 }
 
-export function parseFilterValue(rawValue: string, columnInfo?: Pick<DataGridColumnInfo, "data_type">): GridCellValue {
+export function parseFilterValue(rawValue: string, columnInfo?: Pick<DataGridColumnInfo, "data_type">, databaseType?: DatabaseType): GridCellValue {
   const unquoted = unwrapMatchingQuotes(rawValue.trim());
   const dataType = (columnInfo?.data_type ?? "").toLowerCase();
 
-  if (isBooleanType(dataType) && unquoted.toLowerCase() === "true") return true;
-  if (isBooleanType(dataType) && unquoted.toLowerCase() === "false") return false;
+  if (isBooleanType(dataType, databaseType) && unquoted.toLowerCase() === "true") return true;
+  if (isBooleanType(dataType, databaseType) && unquoted.toLowerCase() === "false") return false;
 
   if (isNumericType(dataType) && isNumericLiteral(unquoted)) {
     // Preserve the original decimal/integer spelling so the backend can emit it exactly.
@@ -97,10 +97,10 @@ export function parseFilterValue(rawValue: string, columnInfo?: Pick<DataGridCol
   return unquoted;
 }
 
-export function parseFilterValues(rawValue: string, columnInfo?: Pick<DataGridColumnInfo, "data_type">): GridCellValue[] {
+export function parseFilterValues(rawValue: string, columnInfo?: Pick<DataGridColumnInfo, "data_type">, databaseType?: DatabaseType): GridCellValue[] {
   return splitFilterValues(rawValue).map(({ value, quoted }) => {
     if (!quoted && value.toLowerCase() === "null") return null;
-    return parseFilterValue(value, columnInfo);
+    return parseFilterValue(value, columnInfo, databaseType);
   });
 }
 
@@ -179,8 +179,8 @@ function isNumericType(dataType: string): boolean {
   return ["int", "integer", "bigint", "smallint", "tinyint", "mediumint", "serial", "number", "numeric", "decimal", "float", "double", "real", "money"].some((part) => dataType.split(/[^a-z0-9]+/).includes(part));
 }
 
-function isBooleanType(dataType: string): boolean {
-  return dataType.split(/[^a-z0-9]+/).some((part) => part === "bool" || part === "boolean" || part === "bit");
+function isBooleanType(dataType: string, databaseType?: DatabaseType): boolean {
+  return dataType.split(/[^a-z0-9]+/).some((part) => part === "bool" || part === "boolean" || (part === "bit" && databaseType !== "postgres"));
 }
 
 function isNumericLiteral(text: string): boolean {

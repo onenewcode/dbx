@@ -1,6 +1,7 @@
 use chrono::{Local, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashSet;
 
 #[path = "data_grid_neo4j_sql.rs"]
 mod data_grid_neo4j_sql;
@@ -530,31 +531,19 @@ fn build_data_grid_context_membership_filter_condition(
 
     let mut has_null = false;
     let mut literals = Vec::new();
+    let mut seen_literals = HashSet::new();
     for value in values {
         if value.is_null() {
             has_null = true;
             continue;
         }
         let literal = format_grid_sql_literal(value, database_type, column_info);
-        if !literals.contains(&literal) {
+        if seen_literals.insert(literal.clone()) {
             literals.push(literal);
         }
     }
 
-    let membership = (!literals.is_empty()).then(|| {
-        let list = literals.join(", ");
-        if database_type == Some(DatabaseType::Neo4j) {
-            let predicate = format!("{column} IN [{list}]");
-            if negated {
-                format!("NOT ({predicate})")
-            } else {
-                predicate
-            }
-        } else {
-            let operator = if negated { "NOT IN" } else { "IN" };
-            format!("{column} {operator} ({list})")
-        }
-    });
+    let membership = build_membership_predicate(column, &literals, database_type, negated);
 
     if negated {
         return match membership {
@@ -570,6 +559,33 @@ fn build_data_grid_context_membership_filter_condition(
         None if has_null => Some(format!("{column} IS NULL")),
         None => None,
     }
+}
+
+fn build_membership_predicate(
+    column: &str,
+    literals: &[String],
+    database_type: Option<DatabaseType>,
+    negated: bool,
+) -> Option<String> {
+    if literals.is_empty() {
+        return None;
+    }
+    if database_type == Some(DatabaseType::Neo4j) {
+        let predicate = format!("{column} IN [{}]", literals.join(", "));
+        return Some(if negated { format!("NOT ({predicate})") } else { predicate });
+    }
+
+    let operator = if negated { "NOT IN" } else { "IN" };
+    if database_type != Some(DatabaseType::Oracle) || literals.len() <= 1000 {
+        return Some(format!("{column} {operator} ({})", literals.join(", ")));
+    }
+
+    // Oracle limits each IN expression to 1000 values; preserve NOT IN semantics
+    // by joining its chunks with AND instead of OR.
+    let joiner = if negated { " AND " } else { " OR " };
+    let chunks =
+        literals.chunks(1000).map(|chunk| format!("{column} {operator} ({})", chunk.join(", "))).collect::<Vec<_>>();
+    Some(format!("({})", chunks.join(joiner)))
 }
 
 fn build_data_grid_context_range_filter_condition(
@@ -608,7 +624,7 @@ pub fn build_data_grid_column_value_filter_condition(
     if text.eq_ignore_ascii_case("null") {
         return Some(format!("{column} IS NULL"));
     }
-    let value = parse_typed_filter_value(text, options.column_info.as_ref());
+    let value = parse_typed_filter_value(text, options.database_type, options.column_info.as_ref());
     Some(format!("{column} = {}", format_grid_sql_literal(&value, options.database_type, options.column_info.as_ref())))
 }
 
@@ -622,13 +638,14 @@ pub fn build_data_grid_column_values_filter_condition(
     let column = column_filter_ref(options.database_type, &options.column_name);
     let mut has_null = false;
     let mut literals = Vec::new();
+    let mut seen_literals = HashSet::new();
     for value in &options.values {
         if value.is_null() {
             has_null = true;
             continue;
         }
         let literal = format_grid_sql_literal(value, options.database_type, options.column_info.as_ref());
-        if !literals.contains(&literal) {
+        if seen_literals.insert(literal.clone()) {
             literals.push(literal);
         }
     }
@@ -637,15 +654,10 @@ pub fn build_data_grid_column_values_filter_condition(
     if has_null {
         predicates.push(format!("{column} IS NULL"));
     }
-    if !literals.is_empty() {
-        let list = literals.join(", ");
-        if literals.len() == 1 {
-            predicates.push(format!("{column} = {list}"));
-        } else if options.database_type == Some(DatabaseType::Neo4j) {
-            predicates.push(format!("{column} IN [{list}]"));
-        } else {
-            predicates.push(format!("{column} IN ({list})"));
-        }
+    if literals.len() == 1 {
+        predicates.push(format!("{column} = {}", literals[0]));
+    } else if let Some(membership) = build_membership_predicate(&column, &literals, options.database_type, false) {
+        predicates.push(membership);
     }
 
     match predicates.len() {
@@ -744,7 +756,7 @@ fn data_grid_column_distinct_values_search_predicate(
         && !is_postgres_like_pattern_database(options.database_type)
     {
         let column = column_filter_ref(options.database_type, &options.column_name);
-        let value = parse_typed_filter_value(search, options.column_info.as_ref());
+        let value = parse_typed_filter_value(search, options.database_type, options.column_info.as_ref());
         return Some(format!(
             "{column} = {}",
             format_grid_sql_literal(&value, options.database_type, options.column_info.as_ref())
@@ -1260,7 +1272,7 @@ pub fn format_grid_sql_literal(
     // is a numeric/boolean type rather than a bit-string type like
     // PostgreSQL's bit(n).
     if let Some(value) = value.as_bool() {
-        if is_bit_literal_column(column_info) {
+        if is_bit_literal_column(database_type, column_info) {
             return if value { "1" } else { "0" }.to_string();
         }
         return if value { "TRUE" } else { "FALSE" }.to_string();
@@ -1331,7 +1343,12 @@ pub fn format_grid_sql_literal(
     } else {
         text
     };
-    let escaped = format!("'{}'", literal_text.replace('\\', "\\\\").replace('\'', "''"));
+    let escaped_text = if database_type == Some(DatabaseType::Neo4j) {
+        literal_text.replace('\\', "\\\\").replace('\'', "\\'")
+    } else {
+        literal_text.replace('\\', "\\\\").replace('\'', "''")
+    };
+    let escaped = format!("'{escaped_text}'");
     if database_type == Some(DatabaseType::SqlServer) {
         format!("N{escaped}")
     } else {
@@ -1480,8 +1497,9 @@ fn is_mysql_bit_literal_column(database_type: Option<DatabaseType>, column_info:
         && column_info.map(|column| is_bit_column_type(&column.data_type)).unwrap_or(false)
 }
 
-fn is_bit_literal_column(column_info: Option<&DataGridColumnInfo>) -> bool {
-    column_info.map(|column| is_bit_column_type(&column.data_type)).unwrap_or(false)
+fn is_bit_literal_column(database_type: Option<DatabaseType>, column_info: Option<&DataGridColumnInfo>) -> bool {
+    database_type != Some(DatabaseType::Postgres)
+        && column_info.map(|column| is_bit_column_type(&column.data_type)).unwrap_or(false)
 }
 
 fn is_bit_column_type(data_type: &str) -> bool {
@@ -1548,10 +1566,10 @@ fn is_geometry_column_type(data_type: &str) -> bool {
 
 fn manticore_typed_attribute_value(text: &str, column_info: Option<&DataGridColumnInfo>) -> Option<Value> {
     let data_type = column_info?.data_type.to_ascii_lowercase();
-    if is_boolean_type(&data_type) && text.eq_ignore_ascii_case("true") {
+    if is_boolean_type(&data_type, None) && text.eq_ignore_ascii_case("true") {
         return Some(Value::Bool(true));
     }
-    if is_boolean_type(&data_type) && text.eq_ignore_ascii_case("false") {
+    if is_boolean_type(&data_type, None) && text.eq_ignore_ascii_case("false") {
         return Some(Value::Bool(false));
     }
     if is_numeric_type(&data_type) && is_numeric_literal(text) {
@@ -2146,13 +2164,17 @@ fn value_to_filter_text(value: &Value) -> String {
     }
 }
 
-fn parse_typed_filter_value(text: &str, column_info: Option<&DataGridColumnInfo>) -> Value {
+fn parse_typed_filter_value(
+    text: &str,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+) -> Value {
     let unquoted = unwrap_matching_quotes(text);
     let data_type = column_info.map(|column| column.data_type.to_ascii_lowercase()).unwrap_or_default();
-    if is_boolean_type(&data_type) && unquoted.eq_ignore_ascii_case("true") {
+    if is_boolean_type(&data_type, database_type) && unquoted.eq_ignore_ascii_case("true") {
         return Value::Bool(true);
     }
-    if is_boolean_type(&data_type) && unquoted.eq_ignore_ascii_case("false") {
+    if is_boolean_type(&data_type, database_type) && unquoted.eq_ignore_ascii_case("false") {
         return Value::Bool(false);
     }
     if (is_numeric_type(&data_type) || data_type.is_empty()) && is_numeric_literal(&unquoted) {
@@ -2200,11 +2222,12 @@ fn is_numeric_type(data_type: &str) -> bool {
     .any(|part| lower.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|token| token == *part))
 }
 
-fn is_boolean_type(data_type: &str) -> bool {
+fn is_boolean_type(data_type: &str, database_type: Option<DatabaseType>) -> bool {
     let lower = data_type.to_ascii_lowercase();
-    lower
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .any(|token| matches!(token, "bool" | "boolean" | "bit" | "bitn"))
+    lower.split(|ch: char| !ch.is_ascii_alphanumeric()).any(|token| {
+        matches!(token, "bool" | "boolean")
+            || (matches!(token, "bit" | "bitn") && database_type != Some(DatabaseType::Postgres))
+    })
 }
 
 fn is_numeric_literal(text: &str) -> bool {
@@ -2605,6 +2628,19 @@ mod tests {
         );
         assert_eq!(
             build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Neo4j),
+                column_name: "name".to_string(),
+                mode: DataGridContextFilterMode::In,
+                value: Value::Null,
+                values: vec![json!("O'Reilly"), json!(r"C:\temp")],
+                end_value: None,
+                column_info: Some(column("name", "string", false, None)),
+            })
+            .as_deref(),
+            Some(r#"n.`name` IN ['O\'Reilly', 'C:\\temp']"#)
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
                 database_type: Some(DatabaseType::SqlServer),
                 column_name: "score".to_string(),
                 mode: DataGridContextFilterMode::Between,
@@ -2811,6 +2847,63 @@ mod tests {
             })
             .as_deref(),
             Some("`id` = 42")
+        );
+    }
+
+    #[test]
+    fn chunks_large_oracle_membership_filters_with_correct_boolean_operator() {
+        let values = (0..=1000).map(|value| json!(value)).collect::<Vec<_>>();
+        let in_condition = build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+            database_type: Some(DatabaseType::Oracle),
+            column_name: "id".to_string(),
+            mode: DataGridContextFilterMode::In,
+            value: Value::Null,
+            values: values.clone(),
+            end_value: None,
+            column_info: Some(column("id", "number", false, None)),
+        })
+        .unwrap();
+        assert_eq!(in_condition.matches("\"id\" IN (").count(), 2);
+        assert!(in_condition.contains(") OR \"id\" IN ("));
+
+        let not_in_condition = build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+            database_type: Some(DatabaseType::Oracle),
+            column_name: "id".to_string(),
+            mode: DataGridContextFilterMode::NotIn,
+            value: Value::Null,
+            values,
+            end_value: None,
+            column_info: Some(column("id", "number", false, None)),
+        })
+        .unwrap();
+        assert_eq!(not_in_condition.matches("\"id\" NOT IN (").count(), 2);
+        assert!(not_in_condition.contains(") AND \"id\" NOT IN ("));
+    }
+
+    #[test]
+    fn keeps_postgres_bit_strings_out_of_boolean_literal_handling() {
+        let bit = column("flags", "bit(3)", false, None);
+        let varying = column("flags", "bit varying", false, None);
+
+        assert_eq!(parse_typed_filter_value("true", Some(DatabaseType::Postgres), Some(&bit)), json!("true"));
+        assert_eq!(parse_typed_filter_value("false", Some(DatabaseType::Postgres), Some(&varying)), json!("false"));
+        assert_eq!(
+            build_data_grid_column_value_filter_condition(DataGridColumnValueFilterConditionOptions {
+                database_type: Some(DatabaseType::Postgres),
+                column_name: "flags".to_string(),
+                column_info: Some(bit),
+                raw_value: "true".to_string(),
+            })
+            .as_deref(),
+            Some("\"flags\" = 'true'")
+        );
+        assert_eq!(
+            format_grid_sql_literal(
+                &json!(true),
+                Some(DatabaseType::SqlServer),
+                Some(&column("flag", "bit", false, None))
+            ),
+            "1"
         );
     }
 

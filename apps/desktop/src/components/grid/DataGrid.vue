@@ -1841,9 +1841,9 @@ async function buildStructuredWhereFromRules(rules: StructuredFilterRule[]): Pro
               columnName: rule.columnName,
               columnInfo,
               mode: rule.mode,
-              value: !usesList && filterModeNeedsValue(rule.mode) ? parseFilterValue(rule.rawValue, columnInfo) : null,
-              values: usesList ? parseFilterValues(rule.rawValue, columnInfo) : undefined,
-              endValue: usesRange ? parseFilterValue(rule.rawEndValue, columnInfo) : undefined,
+              value: !usesList && filterModeNeedsValue(rule.mode) ? parseFilterValue(rule.rawValue, columnInfo, resolvedDatabaseType.value) : null,
+              values: usesList ? parseFilterValues(rule.rawValue, columnInfo, resolvedDatabaseType.value) : undefined,
+              endValue: usesRange ? parseFilterValue(rule.rawEndValue, columnInfo, resolvedDatabaseType.value) : undefined,
             })) ?? null,
         };
       }),
