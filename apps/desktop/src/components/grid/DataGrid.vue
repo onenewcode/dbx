@@ -2,8 +2,9 @@
 type CachedStructuredFilterRule = {
   id: string;
   columnName: string;
-  mode: "equals" | "not-equals" | "is-null" | "is-not-null" | "like" | "not-like" | "less-than" | "greater-than";
+  mode: "equals" | "not-equals" | "is-null" | "is-not-null" | "like" | "not-like" | "less-than" | "greater-than" | "in" | "not-in" | "between" | "not-between";
   rawValue: string;
+  rawEndValue: string;
   conjunction: "AND" | "OR";
   disabled?: boolean;
 };
@@ -153,7 +154,19 @@ import { dataGridSaveActionMode, dataGridSaveToolbarState } from "@/lib/dataGrid
 import type { QueryEditabilityReason } from "@/lib/sql/sqlAnalysis";
 import { EDITOR_FONT_FAMILY_CSS_VAR } from "@/lib/editor/editorThemes";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
-import { appendColumnValueFilterCondition, buildColumnValueFilterCondition, buildColumnValuesFilterCondition, combineWhereInputs, filterModeNeedsValue, parseFilterValue } from "@/lib/dataGrid/dataGridColumnFilter";
+import {
+  appendColumnValueFilterCondition,
+  buildColumnValueFilterCondition,
+  buildColumnValuesFilterCondition,
+  combineWhereInputs,
+  filterModeHasCompleteValue,
+  filterModeIsSupportedForDatabase,
+  filterModeNeedsValue,
+  filterModeUsesList,
+  filterModeUsesRange,
+  parseFilterValue,
+  parseFilterValues,
+} from "@/lib/dataGrid/dataGridColumnFilter";
 import { clampSearchSplitWidth } from "@/lib/dataGrid/dataGridSearchSplit";
 import { MAX_RESULT_PAGE_SIZE, MIN_RESULT_PAGE_SIZE, normalizeResultPageSize, resultPageSizeMenuOptions } from "@/lib/dataGrid/paginationPageSize";
 import { allNullColumnIndexes, filterColumnVisibilityOptions, hiddenColumnIndexesWithAllNullColumns, invertedHiddenColumnIndexes, nextHiddenColumnIndexes, removeAutoHiddenColumnIndexes, visibleColumnIndexesForFilter } from "@/lib/dataGrid/dataGridColumnVisibility";
@@ -1125,6 +1138,7 @@ type StructuredFilterRule = {
   columnName: string;
   mode: FilterMode;
   rawValue: string;
+  rawEndValue: string;
   conjunction: "AND" | "OR";
   disabled?: boolean;
 };
@@ -1147,16 +1161,21 @@ let serverFilterRequestId = 0;
 let serverFilterSearchTimer: ReturnType<typeof window.setTimeout> | undefined;
 const filterBuilderOpen = ref(false);
 const filterBuilderColumnSearch = ref("");
-const filterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
+const allFilterModeOptions: Array<{ value: FilterMode; labelKey: string }> = [
   { value: "equals", labelKey: "grid.filterBuilderEquals" },
   { value: "not-equals", labelKey: "grid.filterBuilderNotEquals" },
   { value: "like", labelKey: "grid.filterBuilderContains" },
   { value: "not-like", labelKey: "grid.filterBuilderNotContains" },
   { value: "greater-than", labelKey: "grid.filterBuilderGreaterThan" },
   { value: "less-than", labelKey: "grid.filterBuilderLessThan" },
+  { value: "in", labelKey: "grid.filterBuilderIn" },
+  { value: "not-in", labelKey: "grid.filterBuilderNotIn" },
+  { value: "between", labelKey: "grid.filterBuilderBetween" },
+  { value: "not-between", labelKey: "grid.filterBuilderNotBetween" },
   { value: "is-null", labelKey: "grid.filterBuilderIsNull" },
   { value: "is-not-null", labelKey: "grid.filterBuilderIsNotNull" },
 ];
+const filterModeOptions = computed(() => allFilterModeOptions.filter((option) => filterModeIsSupportedForDatabase(option.value, resolvedDatabaseType.value)));
 const filterBuilderColumns = computed(() => props.tableMeta?.columns ?? []);
 const filterBuilderColumnOptions = computed(() => filterBuilderColumns.value.map((column) => column.name));
 const filteredFilterBuilderColumnOptions = computed(() => {
@@ -1169,7 +1188,7 @@ const structuredFilterCacheKey = computed(() => props.cacheKey || [props.connect
 const structuredFilterScopeKey = computed(() => [props.connectionId ?? "", props.database ?? "", props.schema ?? "", props.context ?? "", props.tableMeta?.schema ?? "", props.tableMeta?.tableName ?? "", filterBuilderColumnOptions.value.join("\0")].join("\u0001"));
 const structuredFilterRules = ref<StructuredFilterRule[]>([]);
 const appliedStructuredWhereInput = ref("");
-const structuredFilterCount = computed(() => structuredFilterRules.value.filter((rule) => !rule.disabled && !!rule.columnName && (!filterModeNeedsValue(rule.mode) || rule.rawValue.trim().length > 0)).length);
+const structuredFilterCount = computed(() => structuredFilterRules.value.filter((rule) => !rule.disabled && !!rule.columnName && filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue)).length);
 const hasStructuredFilters = computed(() => !!combineWhereInputs(undefined, appliedStructuredWhereInput.value));
 const formatterOpenColumn = ref<number | null>(null);
 type FormatterDraftKind = Exclude<ColumnFormatterConfig["kind"], "custom-ref">;
@@ -1785,8 +1804,13 @@ function defaultStructuredFilterRule(): StructuredFilterRule {
     columnName: filterBuilderColumnOptions.value[0] ?? "",
     mode: "equals",
     rawValue: "",
+    rawEndValue: "",
     conjunction: "AND",
   };
+}
+
+function filterModeUsesExpandedLayout(mode: FilterMode): boolean {
+  return filterModeUsesList(mode) || filterModeUsesRange(mode);
 }
 
 function cloneStructuredFilterRules(rules: StructuredFilterRule[]): StructuredFilterRule[] {
@@ -1804,8 +1828,11 @@ async function buildStructuredWhereFromRules(rules: StructuredFilterRule[]): Pro
       rules.map(async (rule) => {
         if (rule.disabled) return { rule, condition: null };
         if (!rule.columnName) return { rule, condition: null };
-        if (filterModeNeedsValue(rule.mode) && !rule.rawValue.trim()) return { rule, condition: null };
+        if (!filterModeIsSupportedForDatabase(rule.mode, resolvedDatabaseType.value)) return { rule, condition: null };
+        if (!filterModeHasCompleteValue(rule.mode, rule.rawValue, rule.rawEndValue)) return { rule, condition: null };
         const columnInfo = filterBuilderColumns.value.find((column) => column.name === rule.columnName);
+        const usesList = filterModeUsesList(rule.mode);
+        const usesRange = filterModeUsesRange(rule.mode);
         return {
           rule,
           condition:
@@ -1814,7 +1841,9 @@ async function buildStructuredWhereFromRules(rules: StructuredFilterRule[]): Pro
               columnName: rule.columnName,
               columnInfo,
               mode: rule.mode,
-              value: filterModeNeedsValue(rule.mode) ? parseFilterValue(rule.rawValue, columnInfo) : null,
+              value: !usesList && filterModeNeedsValue(rule.mode) ? parseFilterValue(rule.rawValue, columnInfo) : null,
+              values: usesList ? parseFilterValues(rule.rawValue, columnInfo) : undefined,
+              endValue: usesRange ? parseFilterValue(rule.rawEndValue, columnInfo) : undefined,
             })) ?? null,
         };
       }),
@@ -1884,7 +1913,12 @@ function updateStructuredFilterRule(ruleId: string, patch: Partial<StructuredFil
   structuredFilterRules.value = structuredFilterRules.value.map((rule) => {
     if (rule.id !== ruleId) return rule;
     const next = { ...rule, ...patch };
-    if (!filterModeNeedsValue(next.mode)) next.rawValue = "";
+    if (!filterModeNeedsValue(next.mode)) {
+      next.rawValue = "";
+      next.rawEndValue = "";
+    } else if (!filterModeUsesRange(next.mode)) {
+      next.rawEndValue = "";
+    }
     return next;
   });
 }
@@ -8984,7 +9018,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                 {{ rule.conjunction }}
                               </Button>
                             </div>
-                            <div class="grid grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto] items-center gap-2">
+                            <div class="grid items-center gap-2" :class="filterModeUsesExpandedLayout(rule.mode) ? 'grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_auto]' : 'grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_minmax(0,1.2fr)_auto]'">
                               <Select :model-value="rule.columnName" :disabled="rule.disabled" :class="rule.disabled ? 'opacity-45' : ''" @update:model-value="(value: any) => updateStructuredFilterRuleColumn(rule.id, String(value))">
                                 <SelectTrigger class="h-8 w-full min-w-0 overflow-hidden text-xs [&_[data-slot=select-value]]:min-w-0 [&_[data-slot=select-value]]:truncate">
                                   <SelectValue :placeholder="t('grid.filterBuilderColumn')" />
@@ -9025,8 +9059,47 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                 </SelectContent>
                               </Select>
 
+                              <div v-if="filterModeUsesRange(rule.mode)" class="col-span-2 flex min-w-0 gap-2">
+                                <Input
+                                  :model-value="rule.rawValue"
+                                  class="h-8 min-w-0 flex-1 text-xs"
+                                  :class="rule.disabled ? 'opacity-45' : ''"
+                                  :disabled="rule.disabled"
+                                  :aria-label="t('grid.filterBuilderRangeStart')"
+                                  :placeholder="t('grid.filterBuilderRangeStart')"
+                                  @update:model-value="(value) => updateStructuredFilterRule(rule.id, { rawValue: String(value ?? '') })"
+                                  @keydown.enter.prevent="applyStructuredFilters"
+                                />
+                                <Input
+                                  :model-value="rule.rawEndValue"
+                                  class="h-8 min-w-0 flex-1 text-xs"
+                                  :class="rule.disabled ? 'opacity-45' : ''"
+                                  :disabled="rule.disabled"
+                                  :aria-label="t('grid.filterBuilderRangeEnd')"
+                                  :placeholder="t('grid.filterBuilderRangeEnd')"
+                                  @update:model-value="(value) => updateStructuredFilterRule(rule.id, { rawEndValue: String(value ?? '') })"
+                                  @keydown.enter.prevent="applyStructuredFilters"
+                                />
+                              </div>
+                              <textarea
+                                v-else-if="filterModeUsesList(rule.mode)"
+                                rows="2"
+                                autocapitalize="off"
+                                autocomplete="off"
+                                autocorrect="off"
+                                spellcheck="false"
+                                class="col-span-2 min-h-14 w-full min-w-0 resize-y rounded-[6px] border border-input bg-transparent px-2.5 py-1 text-xs outline-none placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring"
+                                :class="rule.disabled ? 'opacity-45' : ''"
+                                :disabled="rule.disabled"
+                                :aria-label="t('grid.filterBuilderValues')"
+                                :placeholder="t('grid.filterBuilderValues')"
+                                :value="rule.rawValue"
+                                @input="updateStructuredFilterRule(rule.id, { rawValue: ($event.target as HTMLTextAreaElement).value })"
+                                @keydown.ctrl.enter.prevent="applyStructuredFilters"
+                                @keydown.meta.enter.prevent="applyStructuredFilters"
+                              ></textarea>
                               <Input
-                                v-if="filterModeNeedsValue(rule.mode)"
+                                v-else-if="filterModeNeedsValue(rule.mode)"
                                 :model-value="rule.rawValue"
                                 class="h-8 min-w-0 text-xs"
                                 :class="rule.disabled ? 'opacity-45' : ''"
@@ -9039,7 +9112,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                                 <span class="truncate">{{ t("grid.filterBuilderNoValue") }}</span>
                               </div>
 
-                              <div class="flex items-center gap-1">
+                              <div class="flex items-center gap-1" :class="filterModeUsesExpandedLayout(rule.mode) ? 'col-start-3 row-start-1 row-span-2 self-center' : ''">
                                 <Button variant="ghost" size="icon" class="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground" @click="updateStructuredFilterRule(rule.id, { disabled: !rule.disabled })">
                                   <EyeOff v-if="rule.disabled" class="h-3.5 w-3.5" />
                                   <Eye v-else class="h-3.5 w-3.5" />

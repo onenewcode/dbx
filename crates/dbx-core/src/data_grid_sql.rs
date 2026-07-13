@@ -126,6 +126,26 @@ pub enum DataGridContextFilterMode {
     NotLike,
     LessThan,
     GreaterThan,
+    In,
+    NotIn,
+    Between,
+    NotBetween,
+}
+
+fn supports_data_grid_context_filter_mode(
+    database_type: Option<DatabaseType>,
+    mode: DataGridContextFilterMode,
+) -> bool {
+    !matches!(
+        (database_type, mode),
+        (
+            Some(DatabaseType::InfluxDb | DatabaseType::Cassandra | DatabaseType::Jdbc),
+            DataGridContextFilterMode::In
+                | DataGridContextFilterMode::NotIn
+                | DataGridContextFilterMode::Between
+                | DataGridContextFilterMode::NotBetween
+        )
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +156,10 @@ pub struct DataGridContextFilterConditionOptions {
     pub column_name: String,
     pub mode: DataGridContextFilterMode,
     pub value: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_value: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub column_info: Option<DataGridColumnInfo>,
 }
@@ -416,6 +440,10 @@ pub fn build_data_grid_copy_insert_statement(options: DataGridCopyInsertStatemen
 }
 
 pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterConditionOptions) -> Option<String> {
+    if !supports_data_grid_context_filter_mode(options.database_type, options.mode) {
+        return None;
+    }
+
     let column = column_filter_ref(options.database_type, &options.column_name);
     let like_column = column_like_filter_ref(options.database_type, &options.column_name, options.column_info.as_ref());
     let value = &options.value;
@@ -448,6 +476,36 @@ pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterCo
             "{column} > {}",
             format_grid_sql_literal(value, options.database_type, options.column_info.as_ref())
         )),
+        DataGridContextFilterMode::In => build_data_grid_context_membership_filter_condition(
+            &column,
+            &options.values,
+            options.database_type,
+            options.column_info.as_ref(),
+            false,
+        ),
+        DataGridContextFilterMode::NotIn => build_data_grid_context_membership_filter_condition(
+            &column,
+            &options.values,
+            options.database_type,
+            options.column_info.as_ref(),
+            true,
+        ),
+        DataGridContextFilterMode::Between => build_data_grid_context_range_filter_condition(
+            &column,
+            value,
+            options.end_value.as_ref(),
+            options.database_type,
+            options.column_info.as_ref(),
+            false,
+        ),
+        DataGridContextFilterMode::NotBetween => build_data_grid_context_range_filter_condition(
+            &column,
+            value,
+            options.end_value.as_ref(),
+            options.database_type,
+            options.column_info.as_ref(),
+            true,
+        ),
         DataGridContextFilterMode::Equals => Some(format!(
             "{column} = {}",
             format_grid_sql_literal(value, options.database_type, options.column_info.as_ref())
@@ -457,6 +515,86 @@ pub fn build_data_grid_context_filter_condition(options: DataGridContextFilterCo
             format_grid_sql_literal(value, options.database_type, options.column_info.as_ref())
         )),
     }
+}
+
+fn build_data_grid_context_membership_filter_condition(
+    column: &str,
+    values: &[Value],
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    negated: bool,
+) -> Option<String> {
+    if values.is_empty() {
+        return None;
+    }
+
+    let mut has_null = false;
+    let mut literals = Vec::new();
+    for value in values {
+        if value.is_null() {
+            has_null = true;
+            continue;
+        }
+        let literal = format_grid_sql_literal(value, database_type, column_info);
+        if !literals.contains(&literal) {
+            literals.push(literal);
+        }
+    }
+
+    let membership = (!literals.is_empty()).then(|| {
+        let list = literals.join(", ");
+        if database_type == Some(DatabaseType::Neo4j) {
+            let predicate = format!("{column} IN [{list}]");
+            if negated {
+                format!("NOT ({predicate})")
+            } else {
+                predicate
+            }
+        } else {
+            let operator = if negated { "NOT IN" } else { "IN" };
+            format!("{column} {operator} ({list})")
+        }
+    });
+
+    if negated {
+        return match membership {
+            Some(membership) => Some(format!("({column} IS NOT NULL AND {membership})")),
+            None if has_null => Some(format!("{column} IS NOT NULL")),
+            None => None,
+        };
+    }
+
+    match membership {
+        Some(membership) if has_null => Some(format!("({column} IS NULL OR {membership})")),
+        Some(membership) => Some(membership),
+        None if has_null => Some(format!("{column} IS NULL")),
+        None => None,
+    }
+}
+
+fn build_data_grid_context_range_filter_condition(
+    column: &str,
+    start_value: &Value,
+    end_value: Option<&Value>,
+    database_type: Option<DatabaseType>,
+    column_info: Option<&DataGridColumnInfo>,
+    negated: bool,
+) -> Option<String> {
+    let end_value = end_value?;
+    if start_value.is_null() || end_value.is_null() {
+        return None;
+    }
+    let start = format_grid_sql_literal(start_value, database_type, column_info);
+    let end = format_grid_sql_literal(end_value, database_type, column_info);
+    if database_type == Some(DatabaseType::Neo4j) {
+        return if negated {
+            Some(format!("({column} < {start} OR {column} > {end})"))
+        } else {
+            Some(format!("({column} >= {start} AND {column} <= {end})"))
+        };
+    }
+    let operator = if negated { "NOT BETWEEN" } else { "BETWEEN" };
+    Some(format!("{column} {operator} {start} AND {end}"))
 }
 
 pub fn build_data_grid_column_value_filter_condition(
@@ -2379,6 +2517,8 @@ mod tests {
                 column_name: "status".to_string(),
                 mode: DataGridContextFilterMode::Like,
                 value: json!("active"),
+                values: Vec::new(),
+                end_value: None,
                 column_info: Some(column("status", "varchar", true, None)),
             })
             .as_deref(),
@@ -2390,6 +2530,8 @@ mod tests {
                 column_name: "update_date".to_string(),
                 mode: DataGridContextFilterMode::Like,
                 value: json!("128"),
+                values: Vec::new(),
+                end_value: None,
                 column_info: Some(column("update_date", "bigint", false, None)),
             })
             .as_deref(),
@@ -2401,6 +2543,8 @@ mod tests {
                 column_name: "created_at".to_string(),
                 mode: DataGridContextFilterMode::NotLike,
                 value: json!("2026"),
+                values: Vec::new(),
+                end_value: None,
                 column_info: Some(column("created_at", "timestamp without time zone", false, None)),
             })
             .as_deref(),
@@ -2416,6 +2560,234 @@ mod tests {
             .as_deref(),
             Some("[active] = 0")
         );
+    }
+
+    #[test]
+    fn builds_membership_and_range_context_filter_conditions() {
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                column_name: "id".to_string(),
+                mode: DataGridContextFilterMode::In,
+                value: Value::Null,
+                values: vec![json!(42), json!(99)],
+                end_value: None,
+                column_info: Some(column("id", "int", false, None)),
+            })
+            .as_deref(),
+            Some("`id` IN (42, 99)")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Postgres),
+                column_name: "status".to_string(),
+                mode: DataGridContextFilterMode::In,
+                value: Value::Null,
+                values: vec![Value::Null, json!("active"), json!("pending"), json!("active")],
+                end_value: None,
+                column_info: Some(column("status", "varchar", true, None)),
+            })
+            .as_deref(),
+            Some("(\"status\" IS NULL OR \"status\" IN ('active', 'pending'))")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Postgres),
+                column_name: "status".to_string(),
+                mode: DataGridContextFilterMode::NotIn,
+                value: Value::Null,
+                values: vec![Value::Null, json!("active"), json!("pending")],
+                end_value: None,
+                column_info: Some(column("status", "varchar", true, None)),
+            })
+            .as_deref(),
+            Some("(\"status\" IS NOT NULL AND \"status\" NOT IN ('active', 'pending'))")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::Between,
+                value: json!(10),
+                values: Vec::new(),
+                end_value: Some(json!(20)),
+                column_info: Some(column("score", "int", false, None)),
+            })
+            .as_deref(),
+            Some("[score] BETWEEN 10 AND 20")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::SqlServer),
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::NotBetween,
+                value: json!(10),
+                values: Vec::new(),
+                end_value: Some(json!(20)),
+                column_info: Some(column("score", "int", false, None)),
+            })
+            .as_deref(),
+            Some("[score] NOT BETWEEN 10 AND 20")
+        );
+    }
+
+    #[test]
+    fn builds_neo4j_membership_and_range_context_filter_conditions() {
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Neo4j),
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::In,
+                value: Value::Null,
+                values: vec![json!(10), json!(20)],
+                end_value: None,
+                column_info: Some(column("score", "integer", false, None)),
+            })
+            .as_deref(),
+            Some("n.`score` IN [10, 20]")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Neo4j),
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::NotIn,
+                value: Value::Null,
+                values: vec![json!(10), json!(20)],
+                end_value: None,
+                column_info: Some(column("score", "integer", false, None)),
+            })
+            .as_deref(),
+            Some("(n.`score` IS NOT NULL AND NOT (n.`score` IN [10, 20]))")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Neo4j),
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::Between,
+                value: json!(10),
+                values: Vec::new(),
+                end_value: Some(json!(20)),
+                column_info: Some(column("score", "integer", false, None)),
+            })
+            .as_deref(),
+            Some("(n.`score` >= 10 AND n.`score` <= 20)")
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Neo4j),
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::NotBetween,
+                value: json!(10),
+                values: Vec::new(),
+                end_value: Some(json!(20)),
+                column_info: Some(column("score", "integer", false, None)),
+            })
+            .as_deref(),
+            Some("(n.`score` < 10 OR n.`score` > 20)")
+        );
+    }
+
+    #[test]
+    fn does_not_emit_membership_or_range_filters_for_unsupported_dialects() {
+        for database_type in [DatabaseType::InfluxDb, DatabaseType::Cassandra, DatabaseType::Jdbc] {
+            for mode in [
+                DataGridContextFilterMode::In,
+                DataGridContextFilterMode::NotIn,
+                DataGridContextFilterMode::Between,
+                DataGridContextFilterMode::NotBetween,
+            ] {
+                let (value, values, end_value) = match mode {
+                    DataGridContextFilterMode::In | DataGridContextFilterMode::NotIn => {
+                        (Value::Null, vec![json!(10), json!(20)], None)
+                    }
+                    DataGridContextFilterMode::Between | DataGridContextFilterMode::NotBetween => {
+                        (json!(10), Vec::new(), Some(json!(20)))
+                    }
+                    _ => unreachable!("only membership and range modes are tested"),
+                };
+
+                assert_eq!(
+                    build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                        database_type: Some(database_type),
+                        column_name: "score".to_string(),
+                        mode,
+                        value,
+                        values,
+                        end_value,
+                        column_info: Some(column("score", "int", false, None)),
+                    }),
+                    None,
+                    "{database_type:?} must not emit {mode:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn context_membership_and_range_filters_require_complete_values() {
+        let column_info = Some(column("score", "int", false, None));
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::In,
+                value: Value::Null,
+                values: Vec::new(),
+                end_value: None,
+                column_info: column_info.clone(),
+            }),
+            None
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::Between,
+                value: json!(10),
+                values: Vec::new(),
+                end_value: None,
+                column_info: column_info.clone(),
+            }),
+            None
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::Between,
+                value: Value::Null,
+                values: Vec::new(),
+                end_value: Some(json!(20)),
+                column_info: column_info.clone(),
+            }),
+            None
+        );
+        assert_eq!(
+            build_data_grid_context_filter_condition(DataGridContextFilterConditionOptions {
+                database_type: Some(DatabaseType::Mysql),
+                column_name: "score".to_string(),
+                mode: DataGridContextFilterMode::NotBetween,
+                value: json!(10),
+                values: Vec::new(),
+                end_value: Some(Value::Null),
+                column_info,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn context_filter_options_default_new_fields_when_deserializing_old_requests() {
+        let options: DataGridContextFilterConditionOptions = serde_json::from_value(json!({
+            "databaseType": "mysql",
+            "columnName": "id",
+            "mode": "equals",
+            "value": 42,
+        }))
+        .unwrap();
+
+        assert!(options.values.is_empty());
+        assert_eq!(options.end_value, None);
     }
 
     #[test]
