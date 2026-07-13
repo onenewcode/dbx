@@ -128,6 +128,7 @@ export interface ConnectionConfig {
   visible_databases?: string[];
   visible_schemas?: Record<string, string[]>;
   attached_databases?: AttachedDatabaseConfig[];
+  init_script?: string;
   color?: string;
   transport_layers?: TransportLayerConfig[];
   connect_timeout_secs?: number;
@@ -496,6 +497,9 @@ export interface QueryResult {
   has_more?: boolean;
   sourceLabel?: string;
   sourceStatement?: string;
+  /** Absolute offsets in the editor document at execution time. */
+  sourceFrom?: number;
+  sourceTo?: number;
 }
 
 export interface QueryResultRun {
@@ -688,6 +692,7 @@ export interface TableStructureEditorTarget {
 }
 
 export interface TableStructureEditorDraft {
+  dirty?: boolean;
   activeTab: TableInfoTab;
   newTableName: string;
   tableComment: string;
@@ -774,7 +779,7 @@ export interface QueryTab {
   explainExecutionId?: string;
   /** Per-run connection session for sequential MySQL explain formats. */
   explainClientSessionId?: string;
-  mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "mongo-gridfs" | "mongo-bucket" | "vector" | "etcd" | "zookeeper" | "mq" | "nacos" | "objects" | "structure" | "users" | "dameng-jobs";
+  mode: "data" | "query" | "redis" | "redis-dashboard" | "mongo" | "mongo-gridfs" | "mongo-bucket" | "vector" | "etcd" | "zookeeper" | "mq" | "nacos" | "objects" | "structure" | "users" | "dameng-jobs" | "processlist";
   mqTenant?: string;
   mqInitialTab?: "topics";
   nacosNamespace?: string;

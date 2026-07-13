@@ -5,6 +5,7 @@ import { parseSqlServerLinkedSchema, sqlServerLinkedTableName } from "@/lib/data
 
 export interface BuildTableSelectSqlOptions {
   databaseType?: DatabaseType;
+  identifierQuote?: string;
   schema?: string;
   tableName: string;
   tableType?: string;
@@ -30,6 +31,14 @@ export function quoteTableIdentifier(databaseType: DatabaseType | undefined, nam
   if (databaseType === "neo4j") return quoteCypherIdentifier(name);
   if (databaseType === "sqlserver") return `[${name.replace(/\]/g, "]]")}]`;
   return `"${name.replace(/"/g, '""')}"`;
+}
+
+export function quoteTableDataIdentifier(databaseType: DatabaseType | undefined, name: string, identifierQuote?: string): string {
+  if (databaseType === "kingbase" && identifierQuote != null) {
+    if (!identifierQuote) return name;
+    return `${identifierQuote}${name.replaceAll(identifierQuote, identifierQuote + identifierQuote)}${identifierQuote}`;
+  }
+  return quoteTableIdentifier(databaseType, name);
 }
 
 function quoteCypherIdentifier(name: string): string {

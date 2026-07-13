@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, watch, onMounted, onBeforeUnmount, inject, type Component } from "vue";
+import { ref, computed, nextTick, watch, onBeforeUnmount, inject, type Component } from "vue";
 import { useSqlHighlighter } from "@/composables/useSqlHighlighter";
 import { useI18n } from "vue-i18n";
 import { translateBackendError } from "@/i18n/backend-errors";
@@ -50,6 +50,7 @@ import {
   Clipboard,
   Check,
   UsersRound,
+  Activity,
   CalendarClock,
   Lock,
   HardDriveDownload,
@@ -72,7 +73,7 @@ import type { ColumnInfo, ConnectionConfig, DatabaseType, ObjectSourceKind, Tree
 import * as api from "@/lib/backend/api";
 import { uuid } from "@/lib/common/utils";
 import { resolveDefaultDatabase } from "@/lib/database/defaultDatabase";
-import { canTreeNodePin, canTreeNodeShowExpander, treeItemPaddingLeft, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
+import { canTreeNodePin, canTreeNodeShowExpander, treeItemPaddingLeft, treeLabelWidthClass, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
 import { buildTableSelectSql } from "@/lib/table/tableSelectSql";
 import { buildTableDeleteTemplate, buildTableInsertTemplate, buildTableSelectTemplate, buildTableUpdateTemplate } from "@/lib/table/tableSqlTemplates";
 import { connectionFilePath, defaultSqliteBackupFileName, isMemorySqlitePath, sqliteBackupSourcePath } from "@/lib/connection/connectionFile";
@@ -144,6 +145,7 @@ import { shouldMeasureSidebarLabelOverflow } from "@/lib/sidebar/sidebarLabelToo
 import { selectedTreeNodesInVisibleOrder as orderSelectedTreeNodes, treeSelectionRangeIdsByIndex, treeSelectionRangeIds } from "@/lib/sidebar/sidebarTreeSelection";
 import { connectionPasteTargetGroupId, selectedConnectionClipboardTargets, selectedConnectionDeleteTargets, selectedConnectionDuplicateTargets, selectedConnectionEditTarget } from "@/lib/sidebar/sidebarConnectionSelection";
 import { supportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
+import { supportsProcessList } from "@/lib/database/mysqlProcessList";
 import { canCloseSidebarDatabaseConnection, isSidebarDatabaseOpened } from "@/lib/sidebar/sidebarDatabaseOpenState";
 import { sidebarTreeContextKey } from "@/lib/sidebar/sidebarTreeContext";
 import { batchTableEmptyFeedback, runBatchTableEmpty } from "@/lib/sidebar/batchTableEmpty";
@@ -227,18 +229,22 @@ function scheduleLabelOverflowMeasure() {
   });
 }
 
-function observeLabelOverflow() {
-  labelResizeObserver?.disconnect();
-  labelResizeObserver = null;
+function handleMouseEnter() {
   if (!shouldMeasureLabelOverflow()) {
     labelOverflowing.value = false;
     return;
   }
-  if (typeof ResizeObserver !== "undefined" && labelRef.value) {
+  updateLabelOverflow();
+  if (typeof ResizeObserver !== "undefined" && labelRef.value && !labelResizeObserver) {
     labelResizeObserver = new ResizeObserver(scheduleLabelOverflowMeasure);
     labelResizeObserver.observe(labelRef.value);
   }
-  scheduleLabelOverflowMeasure();
+}
+
+function handleMouseLeave() {
+  labelResizeObserver?.disconnect();
+  labelResizeObserver = null;
+  cancelLabelOverflowMeasure();
 }
 const connectionStore = useConnectionStore();
 const queryStore = useQueryStore();
@@ -274,7 +280,6 @@ const emit = defineEmits<{
 const usesFullWidthLabel = computed(() => usesFullWidthTreeLabel(props.node.type, settingsStore.editorSettings.sidebarAllowHorizontalScroll));
 const sidebarTreeContext = inject(sidebarTreeContextKey, null);
 const rowWidthClass = computed(() => (usesFullWidthLabel.value ? "w-max min-w-full" : "w-full min-w-0"));
-const labelWidthClass = computed(() => (usesFullWidthLabel.value ? "shrink-0 whitespace-nowrap" : "min-w-0 truncate"));
 const nodeProductionContext = computed(() => {
   const connectionId = props.node.connectionId;
   return productionContextForDatabase(connectionId ? connectionStore.getConfig(connectionId) : undefined, props.node.database);
@@ -574,12 +579,14 @@ async function toggle() {
   const databaseObjectGroup = node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views" || node.type === "group-procedures" || node.type === "group-functions" || node.type === "group-sequences" || node.type === "group-packages";
   if (databaseObjectGroup && connectionStore.isTreeNodeChildrenLoaded(node.id)) {
     node.isExpanded = !node.isExpanded;
+    if (wasExpanded) connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emit("node-toggled", node, wasExpanded);
     return;
   }
 
   if (node.isExpanded) {
     node.isExpanded = false;
+    connectionStore.releaseCollapsedTreeNodeChildren(node.id);
     emit("node-toggled", node, wasExpanded);
     return;
   }
@@ -992,12 +999,6 @@ function requestPasteTreeClipboard(): boolean {
   return true;
 }
 
-function onSidebarRequestPasteTable(event: Event) {
-  const nodeId = (event as CustomEvent<{ nodeId?: string }>).detail?.nodeId;
-  if (nodeId !== props.node.id) return;
-  requestPasteTreeClipboard();
-}
-
 function requestRefreshSelectedNode(): boolean {
   if (!canRefreshTreeNodeShortcut()) return false;
   void refresh();
@@ -1154,6 +1155,18 @@ async function openUserAdmin() {
   }
 }
 
+async function openProcessList() {
+  const node = props.node;
+  if (!node.connectionId) return;
+  try {
+    await connectionStore.ensureConnected(node.connectionId);
+    connectionStore.activeConnectionId = node.connectionId;
+    queryStore.openProcessList(node.connectionId);
+  } catch (e: any) {
+    toast(t("connection.connectFailed", { message: translateBackendError(t, e?.message || String(e)) }), 5000);
+  }
+}
+
 async function openDamengJobAdmin() {
   const node = props.node;
   if (!node.connectionId) return;
@@ -1299,6 +1312,12 @@ async function openData() {
   queryStore.setExecutingWithId(tabId, openDataId);
   logPhase("state-prepared", { tabId });
 
+  // Yield to Vue's scheduler so the new tab becomes visible in the UI (tab
+  // bar activates, content area switches) before the first blocking network
+  // call. Without this the entire openData flow runs synchronously before the
+  // browser paints, making the UI feel frozen on each table click.
+  await nextTick();
+
   // Helper to check if this openData call is still active (not superseded by a newer click)
   const isActive = () => queryStore.tabs.find((t) => t.id === tabId)?.executionId === openDataId;
   const isCurrentDataTab = () => {
@@ -1390,6 +1409,7 @@ async function openData() {
     const includeRowId = usesSyntheticRowIdKey(effectiveDbType, primaryKeys, tableType);
     const sql = await buildTableSelectSql({
       databaseType: effectiveDbType,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(node.connectionId),
       schema: tableSchema,
       tableName: node.label,
       tableType,
@@ -1804,13 +1824,15 @@ const pasteTableDataCopySupported = computed(() => supportsWholeRowTableDataCopy
 
 const ddlTarget = ref<TreeNode | null>(null);
 const showDdlDialog = ref(false);
+const ddlDatabaseType = computed(() => {
+  if (!ddlTarget.value?.connectionId) return undefined;
+  return effectiveDatabaseTypeForConnection(connectionStore.getConfig(ddlTarget.value.connectionId));
+});
 const ddlDialect = computed(() => {
-  if (!ddlTarget.value?.connectionId) return "mysql";
-  return codeMirrorSqlDialect(effectiveDatabaseTypeForConnection(connectionStore.getConfig(ddlTarget.value.connectionId)));
+  return codeMirrorSqlDialect(ddlDatabaseType.value);
 });
 const ddlFormatDialect = computed(() => {
-  if (!ddlTarget.value?.connectionId) return "generic";
-  return sqlFormatDialectForDbType(effectiveDatabaseTypeForConnection(connectionStore.getConfig(ddlTarget.value.connectionId)));
+  return sqlFormatDialectForDbType(ddlDatabaseType.value);
 });
 const objectSourceTarget = ref<{ node: TreeNode; initialEditing: boolean } | null>(null);
 const showObjectSourceDialog = ref(false);
@@ -3762,6 +3784,7 @@ async function exportDataLegacy(format: "csv" | "json" | "sql") {
     const effectiveDbType = effectiveDatabaseTypeForConnection(config);
     const result = await fetchTableDataForExport({
       databaseType: effectiveDbType,
+      identifierQuote: connectionStore.connectionIdentifierQuote?.(connectionId),
       schema: node.schema,
       tableName: node.label,
       tableType: node.tableType,
@@ -4170,6 +4193,7 @@ const tableComment = computed(() =>
     ? props.node.comment
     : null,
 );
+const labelWidthClass = computed(() => treeLabelWidthClass({ fullWidth: usesFullWidthLabel.value, hasTrailingComment: !!columnComment.value || !!tableComment.value }));
 const paddingLeft = computed(() => treeItemPaddingLeft(props.depth));
 const tableSearchParentId = computed(() => props.node.tableSearchParentId || "");
 const tableSearchValue = computed(() => {
@@ -4180,7 +4204,7 @@ const isConnected = computed(() => props.node.type === "connection" && !!props.n
 const isConnecting = computed(() => props.node.type === "connection" && !!props.node.connectionId && connectionStore.connectingIds.has(props.node.connectionId));
 const isConnectionReadonly = computed(() => props.node.type === "connection" && !!props.node.connectionId && (connectionStore.getConfig(props.node.connectionId)?.read_only ?? false));
 const isOpenedDatabase = computed(() => isSidebarDatabaseOpened(props.node, connectionStore.isTreeNodeChildrenLoaded));
-const showsDatabaseOpenIndicator = computed(() => props.node.type === "database" && (isOpenedDatabase.value || (!!props.node.connectionId && props.node.database != null && queryStore.isDatabaseOpen(props.node.connectionId, props.node.database))));
+const showsDatabaseOpenIndicator = computed(() => props.node.type === "database" && (isOpenedDatabase.value || (!!props.node.connectionId && props.node.database != null && queryStore.openDatabaseKeys.has(`${props.node.connectionId}\x00${props.node.database}`))));
 const canCloseDatabaseConnection = computed(() => canCloseSidebarDatabaseConnection(props.node, connectionStore.isTreeNodeChildrenLoaded));
 const nodeIconClass = computed(() => {
   const infoClass = getIconInfo(props.node)?.colorClass;
@@ -4222,7 +4246,7 @@ const connectionColor = computed(() => {
 });
 const isActiveConnectionScope = computed(() => !!props.node.connectionId && connectionStore.activeConnectionId === props.node.connectionId);
 const isSelected = computed(() => connectionStore.selectedTreeNodeId === props.node.id);
-const isMultiSelected = computed(() => connectionStore.selectedTreeNodeIds.includes(props.node.id));
+const isMultiSelected = computed(() => connectionStore.selectedTreeNodeIdsSet.has(props.node.id));
 const isTreeRowSelected = computed(() => isSelected.value || isMultiSelected.value);
 const usesSelectionSetHighlight = computed(() => connectionStore.connectionMultiSelectActive || connectionStore.selectedTreeNodeIds.length > 1);
 const rowStyle = computed(() => {
@@ -4305,14 +4329,6 @@ watch(
     }
   },
   { immediate: true },
-);
-
-watch(
-  [() => props.node.id, () => visibleLabel(props.node), () => usesFullWidthLabel.value, () => detailTooltip.value?.rows.length ?? 0, isRenamingGroup],
-  () => {
-    nextTick(observeLabelOverflow);
-  },
-  { flush: "post", immediate: true },
 );
 
 function finishRenameGroup() {
@@ -4545,20 +4561,22 @@ function onRowMouseDown(event: MouseEvent) {
   }
 }
 
-onMounted(() => {
-  observeLabelOverflow();
-  window.addEventListener("dbx:sidebar-request-paste-table", onSidebarRequestPasteTable);
-});
+// RecycleScroller reuses mounted TreeItem instances for different nodes, so the
+// handler must follow the reactive node id rather than component mount lifetime.
+const stopPasteHandlerRegistration = watch(
+  () => props.node.id,
+  (nodeId, _previousNodeId, onCleanup) => {
+    const unregister = sidebarTreeContext?.registerPasteHandler?.(nodeId, requestPasteTreeClipboard);
+    if (unregister) onCleanup(unregister);
+  },
+  { immediate: true },
+);
 
 onBeforeUnmount(() => {
-  labelResizeObserver?.disconnect();
-  labelResizeObserver = null;
-  cancelLabelOverflowMeasure();
-  window.removeEventListener("dbx:sidebar-request-paste-table", onSidebarRequestPasteTable);
+  handleMouseLeave();
+  stopPasteHandlerRegistration();
   finishTableReferenceDrag();
 });
-
-// ---- CustomContextMenu ----
 
 const shortcutCopyName = computed(() => settingsStore.editorSettings.shortcuts.copySidebarSelection);
 const shortcutEditConnection = computed(() => settingsStore.editorSettings.shortcuts.editSidebarConnection);
@@ -4692,6 +4710,9 @@ function treeItemMenuItems(): ContextMenuItem[] {
     if (sqlHistoryMenu) items.push(sqlHistoryMenu);
     if (supportsDatabaseUserAdmin(currentDatabaseType())) {
       items.push({ label: t("contextMenu.userAdmin"), action: openUserAdmin, icon: UsersRound });
+    }
+    if (supportsProcessList(currentDatabaseType())) {
+      items.push({ label: t("contextMenu.processList"), action: openProcessList, icon: Activity });
     }
     if (currentDatabaseType() === "dameng") {
       items.push({ label: t("contextMenu.damengJobAdmin"), action: openDamengJobAdmin, icon: CalendarClock });
@@ -5322,7 +5343,11 @@ function treeItemMenuItems(): ContextMenuItem[] {
           @keydown="onKeydown"
           @mousedown="onRowMouseDown"
           @mousemove="isDropTarget ? updateTarget($event, node.id, node.type) : undefined"
-          @mouseleave="clearTarget(node.id)"
+          @mouseenter="handleMouseEnter"
+          @mouseleave="
+            clearTarget(node.id);
+            handleMouseLeave();
+          "
         >
           <div v-if="showDropBefore" class="absolute right-2 top-0 h-0.5 bg-primary rounded-full pointer-events-none" :style="{ left: paddingLeft }" />
           <div v-if="showDropAfter" class="absolute right-2 bottom-0 h-0.5 bg-primary rounded-full pointer-events-none" :style="{ left: paddingLeft }" />
@@ -5928,6 +5953,7 @@ function treeItemMenuItems(): ContextMenuItem[] {
     :schema="ddlTarget.schema"
     :table-name="ddlTarget.label"
     :object-type="tableDdlObjectTypeForNode(ddlTarget.type)"
+    :database-type="ddlDatabaseType"
     :dialect="ddlDialect"
     :format-dialect="ddlFormatDialect"
     v-model:open="showDdlDialog"

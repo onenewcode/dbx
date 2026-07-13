@@ -9,7 +9,7 @@ import com.dbx.agent.ForeignKeyInfo;
 import com.dbx.agent.IndexInfo;
 import com.dbx.agent.JdbcExecutor;
 import com.dbx.agent.JdbcIdentifiers;
-import com.dbx.agent.JsonRpcServer;
+import com.dbx.agent.MultiSessionJsonRpcServer;
 import com.dbx.agent.MetadataListConstraints;
 import com.dbx.agent.ObjectInfo;
 import com.dbx.agent.ObjectSource;
@@ -830,7 +830,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryResult executeQuery(String sql, String schema, ExecuteQueryOptions options) {
-        return JdbcExecutor.INSTANCE.execute(
+        return JdbcExecutor.current().execute(
             requireConnected(),
             sql,
             schema,
@@ -844,7 +844,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryPageResult executeQueryPage(String sql, String schema, QueryPageOptions options) {
-        return JdbcExecutor.INSTANCE.executePage(
+        return JdbcExecutor.current().executePage(
             requireConnected(),
             sql,
             schema,
@@ -856,7 +856,7 @@ public final class DamengAgent extends BaseDatabaseAgent {
 
     @Override
     public QueryPageResult startTableRead(String sql, String schema, QueryPageOptions options) {
-        return JdbcExecutor.INSTANCE.startTableRead(
+        return JdbcExecutor.current().startTableRead(
             requireConnected(),
             sql,
             schema,
@@ -1354,6 +1354,6 @@ public final class DamengAgent extends BaseDatabaseAgent {
     }
 
     public static void main(String[] args) {
-        new JsonRpcServer(new DamengAgent()).run();
+        new MultiSessionJsonRpcServer(DamengAgent::new).run();
     }
 }

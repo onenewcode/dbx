@@ -34,13 +34,13 @@ import { tableMetaForDataTab } from "@/lib/table/tableDataTabMeta";
 import { dataTabExecutionDatabase } from "@/lib/table/dataTabExecutionDatabase";
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { loadTableMetadata } from "@/lib/metadata/tableMetadataCache";
-import { buildTableSelectSql, quoteTableIdentifier } from "@/lib/table/tableSelectSql";
+import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/tableSelectSql";
 import { connectionQueryExecutionSchema, effectiveDatabaseTypeForConnection, metadataSchemaForConnection } from "@/lib/database/jdbcDialect";
 import { frontendQueryTimeoutSecsForSql, queryTimeoutSecsForConnection } from "@/lib/sql/queryTimeout";
 import { queryResultSourceLabel } from "@/lib/sql/queryResultSource";
 import { sortDataGridRowIndexes, type DataGridSortDirection } from "@/lib/dataGrid/dataGridSort";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
-import { splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
+import { executableStatementRanges, splitSqlStatementRanges } from "@/lib/sql/sqlStatementRanges";
 import { externalSqlFileDisplayTitles, normalizeExternalSqlPath } from "@/lib/sql/sqlFileOpen";
 import { clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabs/tabResultCache";
@@ -71,7 +71,7 @@ function cloneTabDraft<T>(value: T): T {
 interface BuildQueryResultExportRequestOptions {
   exportId: string;
   filePath: string;
-  format: "csv" | "xlsx";
+  format: "csv" | "xlsx" | "txt";
 }
 
 type DroppedTableObjectType = "TABLE" | "VIEW" | "MATERIALIZED_VIEW";
@@ -137,19 +137,23 @@ function preservedResultIndex(results: QueryResult[], currentIndex: number | und
   return currentIndex;
 }
 
-function annotateQueryResultSources(results: QueryResult[], sql: string, database: string | undefined, databaseType?: DatabaseType): QueryResult[] {
+function annotateQueryResultSources(results: QueryResult[], sql: string, database: string | undefined, databaseType?: DatabaseType, sourceOffset?: number): QueryResult[] {
   const statements = splitSqlStatementRanges(sql, databaseType);
   let statementIndex = 0;
   for (const result of results) {
     const statement = statements[statementIndex++];
     if (!statement) continue;
-    annotateQueryResultSource(result, statement.sql, database, databaseType);
+    annotateQueryResultSource(result, statement.sql, database, databaseType, sourceOffset === undefined ? undefined : { from: sourceOffset + statement.from, to: sourceOffset + statement.to });
   }
   return results;
 }
 
-function annotateQueryResultSource(result: QueryResult, sourceStatement: string, database?: string, databaseType?: DatabaseType): QueryResult {
+function annotateQueryResultSource(result: QueryResult, sourceStatement: string, database?: string, databaseType?: DatabaseType, sourceRange?: { from: number; to: number }): QueryResult {
   result.sourceStatement = sourceStatement;
+  if (sourceRange) {
+    result.sourceFrom = sourceRange.from;
+    result.sourceTo = sourceRange.to;
+  }
   const label = databaseType ? queryResultSourceLabel(sourceStatement, { database, databaseType }) : undefined;
   if (label) result.sourceLabel = label;
   return result;
@@ -326,6 +330,21 @@ export const useQueryStore = defineStore("query", () => {
   const t = getI18nT();
   const settingsStore = useSettingsStore();
   const tabs = ref<QueryTab[]>([]);
+  // A stable Set of "connectionId\x00database" keys. Computed only from the
+  // minimal tab identity fields so that it does NOT invalidate when other
+  // properties change (isExecuting, result, sql, tableMeta...). Previously
+  // isDatabaseOpen() called tabs.value.some() which tracked the full reactive
+  // array — every mutation during openData() forced all database-type sidebar
+  // TreeItems to recompute showsDatabaseOpenIndicator.
+  const openDatabaseKeys = computed(() => {
+    const keys = new Set<string>();
+    for (const tab of tabs.value) {
+      if (tab.connectionId && tab.database != null) {
+        keys.add(`${tab.connectionId}\x00${tab.database}`);
+      }
+    }
+    return keys;
+  });
   const activeTabId = ref<string | null>(null);
   const isOpenTabsLoaded = ref(false);
   const activeTabHistory = ref<string[]>([]);
@@ -851,7 +870,7 @@ export const useQueryStore = defineStore("query", () => {
     return tabs.value.find((tab) => tab.connectionId === connectionId && tab.database === database && tab.title === title && tab.mode === mode && (tab.schema || "") === (schema || ""));
   }
 
-  function createTab(connectionId: string, database: string, title?: string, mode: QueryTab["mode"] = "query", schema?: string) {
+  function createTab(connectionId: string, database: string, title?: string, mode: QueryTab["mode"] = "query", schema?: string, initialSql?: string) {
     if (title) {
       const existing = findTabByIdentity(connectionId, database, title, mode, schema);
       if (existing) {
@@ -868,13 +887,13 @@ export const useQueryStore = defineStore("query", () => {
       connectionId,
       database,
       schema,
-      sql: "",
+      sql: initialSql ?? "",
       isExecuting: false,
       isCancelling: false,
       isExplaining: false,
       mode,
     };
-    if (mode === "query") tab.originalSql = "";
+    if (mode === "query") tab.originalSql = initialSql ?? "";
     tabs.value.push(tab);
     activeTabId.value = id;
     return id;
@@ -975,6 +994,31 @@ export const useQueryStore = defineStore("query", () => {
       isCancelling: false,
       isExplaining: false,
       mode: "users",
+    };
+    tabs.value.push(tab);
+    activeTabId.value = id;
+    return id;
+  }
+
+  function openProcessList(connectionId: string) {
+    const existing = tabs.value.find((tab) => tab.mode === "processlist" && tab.connectionId === connectionId);
+    if (existing) {
+      switchTab(existing.id);
+      return existing.id;
+    }
+
+    const conn = useConnectionStore().getConfig(connectionId);
+    const id = uuid();
+    const tab: QueryTab = {
+      id,
+      title: t("processList.title"),
+      connectionId,
+      database: conn?.database || "",
+      sql: "",
+      isExecuting: false,
+      isCancelling: false,
+      isExplaining: false,
+      mode: "processlist",
     };
     tabs.value.push(tab);
     activeTabId.value = id;
@@ -1160,6 +1204,10 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function isTabDirty(tab: QueryTab): boolean {
+    if (tab.mode === "structure") {
+      // Legacy persisted structure drafts predate the dirty flag; treat them as dirty until the editor rehydrates them.
+      return !!tab.structureDraft && tab.structureDraft.dirty !== false;
+    }
     if (tab.mode !== "query") return false;
     if (!tab.externalSqlPath && !tab.sql.trim()) return false;
     const original = tab.originalSql;
@@ -1225,7 +1273,12 @@ export const useQueryStore = defineStore("query", () => {
 
   function discardTabChanges(id: string) {
     const tab = tabs.value.find((item) => item.id === id);
-    if (!tab || tab.mode !== "query") return false;
+    if (!tab) return false;
+    if (tab.mode === "structure") {
+      tab.structureDraft = undefined;
+      return true;
+    }
+    if (tab.mode !== "query") return false;
     if (tab.originalSql !== undefined) {
       tab.sql = tab.originalSql;
       return true;
@@ -1259,9 +1312,9 @@ export const useQueryStore = defineStore("query", () => {
       return;
     }
 
-    const dirtyTab = shouldConfirmUnsavedSqlClose.value ? remainingIds.map((id) => tabs.value.find((tab) => tab.id === id)).find((tab): tab is QueryTab => !!tab && isTabDirty(tab)) : undefined;
+    const dirtyTab = remainingIds.map((id) => tabs.value.find((tab) => tab.id === id)).find((tab): tab is QueryTab => !!tab && shouldConfirmTabClose(tab));
     if (dirtyTab) {
-      // Batch close must pause before dropping dirty query tabs so the existing save/discard dialog can protect unsaved SQL.
+      // Batch close must pause before dropping dirty tabs so the shared save/discard dialog protects every editable surface.
       showDirtyTabCloseConfirm(dirtyTab, "batch");
       return;
     }
@@ -1288,7 +1341,7 @@ export const useQueryStore = defineStore("query", () => {
   function closeTab(id: string, { force = false }: { force?: boolean } = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
-    if (!force && shouldConfirmUnsavedSqlClose.value && isTabDirty(tab)) {
+    if (!force && shouldConfirmTabClose(tab)) {
       showDirtyTabCloseConfirm(tab, "tab");
       return;
     }
@@ -1309,6 +1362,11 @@ export const useQueryStore = defineStore("query", () => {
       activeTabId.value = fallbackActiveTabAfterClose(id, idx);
     }
     if (force) resumePendingBatchCloseAfter(id);
+  }
+
+  function shouldConfirmTabClose(tab: QueryTab): boolean {
+    if (tab.mode === "structure") return isTabDirty(tab);
+    return shouldConfirmUnsavedSqlClose.value && isTabDirty(tab);
   }
 
   function forceClosePendingTab() {
@@ -1456,8 +1514,7 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function requestAppCloseConfirmation() {
-    if (!shouldConfirmUnsavedSqlClose.value) return false;
-    const dirtyTab = tabs.value.find((tab) => isTabDirty(tab));
+    const dirtyTab = tabs.value.find((tab) => shouldConfirmTabClose(tab));
     if (!dirtyTab) return false;
     isConfirmingAppClose.value = true;
     showDirtyTabCloseConfirm(dirtyTab, "app");
@@ -1610,15 +1667,18 @@ export const useQueryStore = defineStore("query", () => {
     for (const tab of matchingTabs) {
       const tableMeta = tableMetaForDataTab(tab);
       if (!tableMeta?.tableName) continue;
-      const conn = useConnectionStore().getConfig(tab.connectionId);
+      const connStore = useConnectionStore();
+      const conn = connStore.getConfig(tab.connectionId);
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
+      const identifierQuote = connStore.connectionIdentifierQuote?.(tab.connectionId);
       const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
-      const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableIdentifier(effectiveDbType, tab.resultSortColumn)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
+      const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
       const orderBy = tab.orderByInput?.trim() || sortOrder;
       const limit = tab.resultPageLimit ?? settingsStore.editorSettings.pageSize ?? tableOpenPageLimit();
       const offset = tab.resultPageOffset ?? 0;
       const sql = await buildTableSelectSql({
         databaseType: effectiveDbType,
+        identifierQuote,
         schema: tableMeta.schema,
         tableName: tableMeta.tableName,
         tableType: tableMeta.tableType,
@@ -1665,7 +1725,7 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function isDatabaseOpen(connectionId: string, database: string) {
-    return tabs.value.some((tab) => tab.connectionId === connectionId && tab.database === database);
+    return openDatabaseKeys.value.has(`${connectionId}\x00${database}`);
   }
 
   function rollbackTabsWhere(predicate: (tab: QueryTab) => boolean, options?: { resetAutoCommit?: boolean }) {
@@ -2026,7 +2086,7 @@ export const useQueryStore = defineStore("query", () => {
     await executeCurrentSql(tab.sql);
   }
 
-  async function executeCurrentSql(sql: string, options?: { skipRedisSafetyCheck?: boolean }) {
+  async function executeCurrentSql(sql: string, options?: { skipRedisSafetyCheck?: boolean; sourceOffset?: number }) {
     if (!activeTabId.value) return;
     await executeTabSql(activeTabId.value, sql, { resultBaseSql: sql, resultSortedSql: undefined, ...options });
   }
@@ -2442,6 +2502,7 @@ export const useQueryStore = defineStore("query", () => {
       preserveActiveResultIndex?: boolean;
       replaceActiveResultInGroup?: boolean;
       skipRedisSafetyCheck?: boolean;
+      sourceOffset?: number;
       sourceTraceId?: string;
       skipEnsureConnected?: boolean;
     },
@@ -2535,12 +2596,15 @@ export const useQueryStore = defineStore("query", () => {
         console.info("[DBX][executeTabSql:redis:start]", { traceId, db: currentDb, commandCount: commands.length, sql });
 
         const allResults: QueryResult[] = [];
+        const commandRanges = executableStatementRanges(sql, "redis");
         const skipSafety = options?.skipRedisSafetyCheck;
         let hadMutatingCommand = false;
-        for (const command of commands) {
+        for (const [commandIndex, command] of commands.entries()) {
+          const commandRange = commandRanges[commandIndex];
+          const sourceRange = commandRange && options?.sourceOffset !== undefined ? { from: options.sourceOffset + commandRange.from, to: options.sourceOffset + commandRange.to } : undefined;
           try {
             const result = await api.redisExecuteCommand(tab.connectionId, currentDb, command, skipSafety);
-            allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(redisCommandResultToQueryResult(result.value, performance.now() - startedAt, result.command), command)));
+            allResults.push(markQueryResultRowsRaw(annotateQueryResultSource(redisCommandResultToQueryResult(result.value, performance.now() - startedAt, result.command), command, undefined, undefined, sourceRange)));
             // Track db switches from SELECT N so later commands in the same batch run on the right db.
             currentDb = nextRedisCommandDb(currentDb, command, result.value);
             // Write commands (SET/DEL/...) mutate the key set — drop the cached key-name completion
@@ -2550,7 +2614,7 @@ export const useQueryStore = defineStore("query", () => {
               connStore.invalidateCompletionCache(tab.connectionId, String(currentDb));
             }
           } catch (e: any) {
-            allResults.push(annotateQueryResultSource({ columns: ["Error"], rows: [[e?.message ?? String(e)]], affected_rows: 0, execution_time_ms: 0 }, command));
+            allResults.push(annotateQueryResultSource({ columns: ["Error"], rows: [[e?.message ?? String(e)]], affected_rows: 0, execution_time_ms: 0 }, command, undefined, undefined, sourceRange));
           }
         }
         console.info("[DBX][executeTabSql:redis:done]", { traceId, commandCount: commands.length, elapsed: elapsed() });
@@ -2604,9 +2668,10 @@ export const useQueryStore = defineStore("query", () => {
         for (const parsedCommand of mongoCommands) {
           const mongoCommand = parsedCommand.command;
           const sourceStatement = parsedCommand.text;
+          const sourceRange = options?.sourceOffset === undefined ? undefined : { from: options.sourceOffset + parsedCommand.from, to: options.sourceOffset + parsedCommand.to };
           const commandStartedAt = performance.now();
           const annotateMongoResult = (result: QueryResult): QueryResult => {
-            const annotated = annotateQueryResultSource(result, sourceStatement);
+            const annotated = annotateQueryResultSource(result, sourceStatement, undefined, undefined, sourceRange);
             if ("collection" in mongoCommand) {
               annotated.sourceLabel = currentDatabase ? `${currentDatabase}.${mongoCommand.collection}` : mongoCommand.collection;
             }
@@ -2897,7 +2962,7 @@ export const useQueryStore = defineStore("query", () => {
         });
         executionPromise = api.executeMulti(tab.connectionId, executionDatabase, sqlToExecute, executionSchema, executionId, executionOptions);
       }
-      const results = annotateQueryResultSources(markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }))), queryBaseSql, sourceLabelDatabase, effectiveDbType);
+      const results = annotateQueryResultSources(markQueryResultsRowsRaw(await withFrontendQueryTimeout(executionPromise, frontendTimeoutSecs, t("editor.queryTimeoutError", { seconds: frontendTimeoutSecs }))), queryBaseSql, sourceLabelDatabase, effectiveDbType, options?.sourceOffset);
       if (hiddenPrimaryKeys.length > 0 && results.length === 1) {
         const hiddenIndexes = hiddenResultColumnIndexes(results[0]!.columns, hiddenPrimaryKeys);
         if (hiddenIndexes.length > 0) results[0]!.hidden_column_indexes = hiddenIndexes;
@@ -2952,6 +3017,7 @@ export const useQueryStore = defineStore("query", () => {
                 if (!tableMeta?.tableName) return undefined;
                 return {
                   databaseType: effectiveDbType,
+                  identifierQuote: useConnectionStore().connectionIdentifierQuote?.(current.connectionId),
                   catalog: tableMeta.catalog,
                   schema: tableMeta.schema,
                   tableName: tableMeta.tableName,
@@ -3563,8 +3629,9 @@ export const useQueryStore = defineStore("query", () => {
       const totalRows = typeof tab.resultTotalRowCount === "number" ? tab.resultTotalRowCount : null;
       const pageLimit = TABLE_DATA_EXPORT_PAGE_SIZE;
       const effectiveDbType = effectiveDatabaseTypeForConnection(conn);
+      const identifierQuote = connStore.connectionIdentifierQuote?.(tab.connectionId);
       const primaryKeys = tab.tableMeta ? tab.tableMeta.primaryKeys : tableMeta.primaryKeys;
-      const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableIdentifier(effectiveDbType, tab.resultSortColumn)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
+      const sortOrder = tab.resultSortColumn && tab.resultSortDirection ? `${quoteTableDataIdentifier(effectiveDbType, tab.resultSortColumn, identifierQuote)} ${tab.resultSortDirection.toUpperCase()}` : undefined;
       const orderBy = tab.orderByInput?.trim() || sortOrder;
       const queryTimeoutSecs = queryTimeoutSecsForConnection(conn);
       const executionDatabase = dataTabExecutionDatabase(conn, tab.database, tableMeta.catalog);
@@ -3579,6 +3646,7 @@ export const useQueryStore = defineStore("query", () => {
         while (true) {
           const sql = await api.buildTableSelectSql({
             databaseType: effectiveDbType,
+            identifierQuote,
             schema: tableMeta.schema,
             tableName: tableMeta.tableName,
             tableType: tableMeta.tableType,
@@ -3776,6 +3844,7 @@ export const useQueryStore = defineStore("query", () => {
     releaseConnectionTabs,
     releaseDatabaseTabs,
     isDatabaseOpen,
+    openDatabaseKeys,
     rollbackConnectionTransactions,
     rollbackDatabaseTransactions,
     updateSql,
@@ -3790,6 +3859,7 @@ export const useQueryStore = defineStore("query", () => {
     openMongoGridFs,
     openMongoBucket,
     openUserAdmin,
+    openProcessList,
     openDamengJobAdmin,
     openMqAdmin,
     openNacosAdmin,

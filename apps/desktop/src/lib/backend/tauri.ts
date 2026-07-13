@@ -134,6 +134,8 @@ export interface DriverRuntimeInfo {
   can_stop: boolean;
   can_restart: boolean;
   control_unavailable_reason: string | null;
+  protocol_mode: "multi_session" | "legacy" | null;
+  active_sessions: number | null;
 }
 
 export interface DriverRuntimeSummary {
@@ -650,6 +652,11 @@ export async function checkConnectionHealth(connectionId: string): Promise<void>
   return invoke("check_connection_health", { connectionId });
 }
 
+export async function connectionIdentifierQuote(connectionId: string, database?: string): Promise<string | undefined> {
+  const quote = await invoke<string | null>("connection_identifier_quote", { connectionId, database });
+  return quote ?? undefined;
+}
+
 export async function closeDatabaseConnection(connectionId: string, database: string): Promise<boolean> {
   return invoke("close_database_connection", { connectionId, database });
 }
@@ -1116,6 +1123,10 @@ export async function loadTunnelProfiles(): Promise<TunnelProfile[]> {
 
 export async function saveTunnelProfiles(profiles: TunnelProfile[]): Promise<void> {
   return invoke("save_tunnel_profiles", { profiles });
+}
+
+export async function testTunnelProfile(profile: TunnelProfile): Promise<string> {
+  return invoke("test_tunnel_profile", { profile });
 }
 
 export async function readKeychainPassword(service: string): Promise<string> {
@@ -2223,7 +2234,7 @@ export interface TableExportRequest {
   schema?: string;
   tableName: string;
   filePath: string;
-  format: "csv" | "xlsx" | "json" | "markdown" | "sql";
+  format: "csv" | "xlsx" | "json" | "markdown" | "sql" | "txt";
   columns?: string[];
   columnTypes?: Array<string | null | undefined>;
   primaryKeys?: string[];
@@ -2264,7 +2275,7 @@ export interface QueryResultExportRequest {
   databaseType: DatabaseType;
   useAgentCursor: boolean;
   filePath: string;
-  format: "csv" | "xlsx";
+  format: "csv" | "xlsx" | "txt";
   pageSize: number;
   rowLimit?: number | null;
   totalRows?: number | null;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { applyMongoGridChangesToDocument, buildMongoCopyInsertDocument, buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, parseMongoDocumentInputValue } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
+import { applyMongoGridChangesToDocument, buildMongoCopyDocumentFromOriginal, buildMongoCopyInsertDocument, buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, parseMongoDocumentInputValue } from "../../apps/desktop/src/lib/mongo/mongoDocumentValues.ts";
 
 test("parses Mongo shell ISODate literals as extended JSON dates", () => {
   assert.deepEqual(parseMongoDocumentInputValue('ISODate("2026-06-10T13:59:31.287Z")'), {
@@ -36,6 +36,70 @@ test("builds Mongo grid updates with set and unset operators", () => {
   });
 });
 
+test("preserves JSON-shaped strings when updating existing Mongo fields", () => {
+  const original = {
+    _id: "1",
+    answer: '{"action":"New","values":[1]}',
+    tagsText: '["draft"]',
+    profile: { role: "admin" },
+  };
+  const changes = new Map<number, string | number | boolean | null>([
+    [1, '{\n  "action": "Updated",\n  "values": [\n    1,\n    2\n  ]\n}'],
+    [2, '[\n  "published"\n]'],
+    [3, '{"role":"maintainer"}'],
+  ]);
+
+  const update = buildMongoUpdateDocument(changes, ["_id", "answer", "tagsText", "profile"], original);
+
+  assert.deepEqual(update, {
+    $set: {
+      answer: '{\n  "action": "Updated",\n  "values": [\n    1,\n    2\n  ]\n}',
+      tagsText: '[\n  "published"\n]',
+      profile: { role: "maintainer" },
+    },
+  });
+  assert.equal(formatMongoShellLiteral(update), '{"$set":{"answer":"{\\n  \\"action\\": \\"Updated\\",\\n  \\"values\\": [\\n    1,\\n    2\\n  ]\\n}","tagsText":"[\\n  \\"published\\"\\n]","profile":{"role":"maintainer"}}}');
+});
+
+test("preserves existing Mongo strings that resemble typed literals", () => {
+  const original = {
+    _id: "1",
+    numericText: "42",
+    booleanText: "true",
+    dateText: 'ISODate("2026-01-01T00:00:00.000Z")',
+    quotedText: '"literal"',
+  };
+  const changes = new Map<number, string | number | boolean | null>([
+    [1, "43"],
+    [2, "false"],
+    [3, 'ISODate("2026-02-01T00:00:00.000Z")'],
+    [4, '"changed"'],
+  ]);
+
+  assert.deepEqual(buildMongoUpdateDocument(changes, ["_id", "numericText", "booleanText", "dateText", "quotedText"], original), {
+    $set: {
+      numericText: "43",
+      booleanText: "false",
+      dateText: 'ISODate("2026-02-01T00:00:00.000Z")',
+      quotedText: '"changed"',
+    },
+  });
+});
+
+test("keeps JSON inference for fields without an existing Mongo type", () => {
+  const changes = new Map<number, string | number | boolean | null>([
+    [1, '{"enabled":true}'],
+    [2, "42"],
+  ]);
+
+  assert.deepEqual(buildMongoUpdateDocument(changes, ["_id", "newObject", "newNumber"], { _id: "1" }), {
+    $set: {
+      newObject: { enabled: true },
+      newNumber: 42,
+    },
+  });
+});
+
 test("applies saved Mongo grid changes to the raw preview document", () => {
   const original = {
     _id: "1",
@@ -59,6 +123,24 @@ test("applies saved Mongo grid changes to the raw preview document", () => {
     name: "Ada",
     profile: { role: "admin" },
     archivedAt: "2026-01-01",
+  });
+});
+
+test("applies Mongo grid edits without converting existing JSON strings", () => {
+  const original = {
+    _id: "1",
+    answer: '{"action":"New"}',
+    profile: { role: "admin" },
+  };
+  const changes = new Map<number, string | number | boolean | null>([
+    [1, '{\n  "action": "Updated"\n}'],
+    [2, '{"role":"maintainer"}'],
+  ]);
+
+  assert.deepEqual(applyMongoGridChangesToDocument(original, changes, ["_id", "answer", "profile"]), {
+    _id: "1",
+    answer: '{\n  "action": "Updated"\n}',
+    profile: { role: "maintainer" },
   });
 });
 
@@ -86,6 +168,39 @@ test("builds Mongo copy inserts without primary keys when requested", () => {
   assert.deepEqual(buildMongoCopyInsertDocument(["6743e4bfa3f6f84bc3fff6c8", "done"], ["_id", "status"], { excludePrimaryKeys: true }), {
     status: "done",
   });
+});
+
+test("projects original Mongo values without guessing types", () => {
+  const original = {
+    _id: { $oid: "6743e4bfa3f6f84bc3fff6c8" },
+    numericText: "123",
+    booleanText: "true",
+    jsonText: '{"kind":"literal"}',
+    dateText: "2024-01-01 00:00:00",
+    profile: { role: "admin" },
+    hidden: "not selected",
+  };
+
+  assert.deepEqual(
+    buildMongoCopyDocumentFromOriginal(original, ["ignored", "ignored", "ignored", "ignored", "ignored"], ["numericText", "booleanText", "jsonText", "dateText", "profile"], [false, false, false, false, false]),
+    {
+      numericText: "123",
+      booleanText: "true",
+      jsonText: '{"kind":"literal"}',
+      dateText: "2024-01-01 00:00:00",
+      profile: { role: "admin" },
+    },
+  );
+});
+
+test("applies only explicit Mongo grid edits to copied original documents", () => {
+  assert.deepEqual(
+    buildMongoCopyDocumentFromOriginal({ _id: "1", count: "123", profile: { role: "admin" } }, ["1", "456", '{"role":"maintainer"}'], ["_id", "count", "profile"], [false, true, false], { excludePrimaryKeys: true }),
+    {
+      count: 456,
+      profile: { role: "admin" },
+    },
+  );
 });
 
 test("formats extended JSON dates as Mongo shell ISODate literals", () => {

@@ -202,6 +202,7 @@ const defaultForm = (): ConnectionForm => ({
   gbase_server: "",
   informix_server: "",
   external_config: undefined,
+  init_script: undefined,
   read_only: false,
   is_production: false,
   production_databases: [],
@@ -652,7 +653,7 @@ const driverProfiles: Record<
   trino: { type: "trino", port: 8080, user: "", label: "Trino", icon: "trino" },
   prestosql: { type: "prestosql", port: 8080, user: "", label: "PrestoSQL", icon: "presto" },
   hive: { type: "hive", port: 10000, user: "", label: "Apache Hive", icon: "hive" },
-  spark: { type: "spark", port: 10015, user: "", label: "Apache Spark", icon: "spark-logo.png" },
+  spark: { type: "spark", port: 10015, user: "", label: "Apache Spark", icon: "spark" },
   db2: { type: "db2", port: 50000, user: "db2inst1", label: "IBM DB2", icon: "db2" },
   informix: { type: "informix", port: 9088, user: "informix", label: "Informix", icon: "informix" },
   dremio: { type: "jdbc", port: 31010, user: "", label: "Dremio", icon: "dremio" },
@@ -1450,6 +1451,8 @@ watch(
         etcd_endpoints: config.etcd_endpoints || "",
         informix_server: config.informix_server || "",
         external_config: config.external_config,
+        attached_databases: config.attached_databases || [],
+        init_script: config.init_script,
         read_only: config.read_only || false,
         is_production: config.is_production || false,
         production_databases: config.production_databases || [],
@@ -1696,7 +1699,7 @@ const iconTypeMap: Record<string, string> = {
   trino: "trino",
   prestosql: "prestosql",
   hive: "hive",
-  spark: "spark-logo.png",
+  spark: "spark",
   db2: "db2",
   informix: "informix",
   dremio: "dremio",
@@ -4168,6 +4171,20 @@ function openExternalUrl(url: string) {
                       </div>
                       <p class="text-xs text-muted-foreground">
                         {{ t("connection.sqliteExtensionsHint") }}
+                      </p>
+                    </div>
+                  </div>
+                  <div v-if="form.db_type === 'duckdb'" class="grid grid-cols-4 items-start gap-4">
+                    <Label :class="connectionLabelTopClass">{{ t("connection.initScript") }}</Label>
+                    <div class="col-span-3 space-y-1">
+                      <textarea
+                        v-model="form.init_script"
+                        class="flex min-h-[76px] w-full rounded-md border border-input bg-transparent px-3 py-2 font-mono text-sm shadow-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        :placeholder="t('connection.initScriptPlaceholder')"
+                        spellcheck="false"
+                      />
+                      <p class="text-xs text-muted-foreground">
+                        {{ t("connection.initScriptHint") }}
                       </p>
                     </div>
                   </div>
