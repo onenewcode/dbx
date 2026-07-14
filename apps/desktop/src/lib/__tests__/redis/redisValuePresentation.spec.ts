@@ -1,6 +1,19 @@
 import { describe, expect, it } from "vitest";
 
-import { canRenderRedisValueFormat, formatRedisMemberDetail, formatRedisStringValue, getRedisMemberSelectionKey, preferredRedisValueFormat, redisMemberCopyText, sanitizeRedisDisplayText } from "@/lib/redis/redisValuePresentation";
+import {
+  canRenderRedisValueFormat,
+  formatRedisMemberDetail,
+  formatRedisStringValue,
+  getRedisMemberSelectionKey,
+  normalizeRedisJsonDraft,
+  preferredRedisValueFormat,
+  redisJsonValueText,
+  redisMemberCopyText,
+  redisValueCopyText,
+  redisValuePreview,
+  redisValueSize,
+  sanitizeRedisDisplayText,
+} from "@/lib/redis/redisValuePresentation";
 
 describe("redisValuePresentation", () => {
   it("strips control bytes from display without mutating raw member text", () => {
@@ -32,6 +45,52 @@ describe("redisValuePresentation", () => {
 
   it("formats string values for display without changing plain text", () => {
     expect(formatRedisStringValue("plain-text")).toBe("plain-text");
+  });
+
+  it("normalizes valid JSON drafts into compact Redis values", () => {
+    expect(
+      normalizeRedisJsonDraft(`
+        {
+          "name": "Ada",
+          "items": [1, 2, 3]
+        }
+      `),
+    ).toEqual({ ok: true, compactText: '{"name":"Ada","items":[1,2,3]}' });
+  });
+
+  it("returns an invalid result instead of throwing for malformed JSON drafts", () => {
+    expect(normalizeRedisJsonDraft('{"name": }')).toEqual({ ok: false, error: "invalid_json" });
+  });
+
+  it("keeps lossless large and high-precision numbers when normalizing drafts", () => {
+    const compact = '{"id":87712409002717401,"fraction":0.123456789012345678901234,"scientific":1.234567890123456789e20}';
+    const formatted = `{
+      "id": 87712409002717401,
+      "fraction": 0.123456789012345678901234,
+      "scientific": 1.234567890123456789e20
+    }`;
+
+    expect(normalizeRedisJsonDraft(formatted)).toEqual({ ok: true, compactText: compact });
+  });
+
+  it("keeps native RedisJSON source text lossless for copy, preview, and size", () => {
+    const rawText = '{"id":2326645729978441729,"fraction":0.123456789012345678901234,"scientific":1.234567890123456789e20}';
+    const value = {
+      key_display: "json:profile",
+      key_raw: "json:profile",
+      ttl: -1,
+      redis_type: "ReJSON-RL",
+      data: { kind: "json" as const, value: rawText },
+    };
+
+    expect(redisJsonValueText(value.data)).toBe(rawText);
+    expect(redisValuePreview(value)).toBe(rawText);
+    expect(redisValueSize(value)).toBe(new TextEncoder().encode(rawText).byteLength);
+    expect(redisValueCopyText(value)).toBe(`{
+  "id": 2326645729978441729,
+  "fraction": 0.123456789012345678901234,
+  "scientific": 1.234567890123456789e20
+}`);
   });
 
   it("labels raw text views by encoding instead of generic raw text", () => {
