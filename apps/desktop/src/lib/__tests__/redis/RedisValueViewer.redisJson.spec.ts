@@ -3,8 +3,17 @@ import { parse } from "vue/compiler-sfc";
 import ts from "typescript";
 import { describe, expect, it } from "vitest";
 
+import { formatRedisMemberDetail, normalizeRedisJsonDraft } from "@/lib/redis/redisValuePresentation";
+
 const viewerSource = readFileSync(new URL("../../../components/redis/RedisValueViewer.vue", import.meta.url), "utf8");
 const parsedViewer = parse(viewerSource, { filename: "RedisValueViewer.vue" });
+
+/** Owner-review fixture: compact save must not drop the second "role" member. */
+const DUPLICATE_MEMBER_COMPACT = '{"role":"reader","role":"writer"}';
+const DUPLICATE_MEMBER_PRETTY = `{
+  "role": "reader",
+  "role": "writer"
+}`;
 
 type TemplateElement = {
   type: number;
@@ -127,6 +136,65 @@ describe("native RedisJSON editor", () => {
 
     expect(normalizeCall?.arguments.map((argument) => argument.getText())).toEqual(["editValue.value"]);
     expect(redisJsonSetCall?.arguments.map((argument) => argument.getText())).toEqual(["props.connectionId", "props.db", "props.keyRaw", "normalized.compactText"]);
+  });
+
+  it("routes string and hash JSON saves through the same source-preserving normalize helper", () => {
+    const saveString = findFunction("saveString");
+    const saveMemberEdit = findFunction("saveMemberEdit");
+    const saveStringText = saveString.getText();
+    const saveMemberText = saveMemberEdit.getText();
+    const saveStringCalls = callsIn(saveString).map(calledName);
+    const saveMemberCalls = callsIn(saveMemberEdit).map(calledName);
+
+    // String JSON draft (current tab or retained draft format) compact-writes via SET.
+    expect(saveStringText).toContain('stringValueView.value === "json" || stringDraftFormat.value === "json"');
+    expect(saveStringCalls).toContain("normalizeRedisJsonDraft");
+    expect(saveStringText).toContain("value = normalized.compactText");
+    expect(saveStringCalls).toContain("api.redisSetString");
+    expect(saveStringText).toMatch(/redisSetString\([\s\S]*\bvalue\b/);
+
+    // Hash JSON draft (editor open or retained after leaving JSON tab) compact-writes via HSET.
+    expect(saveMemberText).toContain("savingHashJson");
+    expect(saveMemberText).toContain('memberDraftFormat.value === "json"');
+    expect(saveMemberCalls).toContain("normalizeRedisJsonDraft");
+    expect(saveMemberText).toContain("writeValue = normalized.compactText");
+    expect(saveMemberCalls).toContain("api.redisHashSet");
+    expect(saveMemberText).toMatch(/redisHashSet\([\s\S]*\bwriteValue\b/);
+
+    // Editor pretty baseline also uses the source-preserving formatter.
+    expect(findFunction("formatJsonText").getText()).toContain("formatJsonSource");
+  });
+
+  it("string JSON editor open+save keeps duplicate members end-to-end", () => {
+    // Open: string JSON view pretty baseline comes from formatRedisMemberDetail.
+    const opened = formatRedisMemberDetail(DUPLICATE_MEMBER_COMPACT, { allowJsonText: true });
+    expect(opened.json?.formattedText).toBe(DUPLICATE_MEMBER_PRETTY);
+
+    // Save: saveString always compact-writes through normalizeRedisJsonDraft.
+    const saved = normalizeRedisJsonDraft(opened.json!.formattedText);
+    expect(saved).toEqual({ ok: true, compactText: DUPLICATE_MEMBER_COMPACT });
+
+    // Wiring: that compact text is what redisSetString receives.
+    const saveString = findFunction("saveString");
+    expect(saveString.getText()).toContain("value = normalized.compactText");
+    expect(callsIn(saveString).map(calledName)).toEqual(expect.arrayContaining(["normalizeRedisJsonDraft", "api.redisSetString"]));
+  });
+
+  it("hash JSON editor open+save keeps duplicate members end-to-end", () => {
+    // Open: hash field JSON view uses the same detail pretty baseline.
+    const opened = formatRedisMemberDetail(DUPLICATE_MEMBER_COMPACT, { allowJsonText: true });
+    expect(opened.json?.formattedText).toBe(DUPLICATE_MEMBER_PRETTY);
+
+    // Save: saveMemberEdit compact-writes hash JSON drafts through the same helper.
+    const saved = normalizeRedisJsonDraft(opened.json!.formattedText);
+    expect(saved).toEqual({ ok: true, compactText: DUPLICATE_MEMBER_COMPACT });
+
+    // Wiring: hash path only normalizes when savingHashJson, then HSETs writeValue.
+    const saveMemberEdit = findFunction("saveMemberEdit");
+    const text = saveMemberEdit.getText();
+    expect(text).toContain("if (savingHashJson)");
+    expect(text).toContain("writeValue = normalized.compactText");
+    expect(callsIn(saveMemberEdit).map(calledName)).toEqual(expect.arrayContaining(["normalizeRedisJsonDraft", "api.redisHashSet"]));
   });
 
   it("keeps the native editor and export paths on the RedisJSON value-text contract", () => {

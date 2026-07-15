@@ -1,6 +1,6 @@
 import type { BinaryHexViewRow } from "@/lib/dataGrid/binaryHexViewer";
 import { buildBinaryHexViewRows } from "@/lib/dataGrid/binaryHexViewer";
-import { parseJsonPreservingLargeNumbers, safeJsonFormat } from "@/lib/common/safeJsonFormat";
+import { formatJsonSource, parseJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
 import type { RedisBlob, RedisCollectionPage, RedisHashItem, RedisListItem, RedisSetItem, RedisValue, RedisZsetItem } from "@/lib/backend/api";
 import { parseJavaSerializedDetail, type RedisJavaSerializedDetail } from "@/lib/redis/javaSerialized";
 
@@ -204,10 +204,13 @@ export function parseRedisJsonDetail(value: unknown): RedisJsonDetail | null {
   if (!trimmed) return null;
 
   try {
+    // Pretty-print from source tokens so duplicate members and number spellings
+    // stay intact when Redis string/hash values open in the JSON editor.
+    const formattedText = formatJsonSource(trimmed, 2);
     const parsed = parseJsonPreservingLargeNumbers(trimmed);
     return {
       rawText: value,
-      formattedText: safeJsonFormat(trimmed, 2),
+      formattedText,
       value: parsed,
     };
   } catch {
@@ -217,11 +220,12 @@ export function parseRedisJsonDetail(value: unknown): RedisJsonDetail | null {
 
 /**
  * Validates a JSON editor draft and produces the compact text Redis should
- * store. `safeJsonFormat` keeps high-precision numeric literals intact.
+ * store. Source-preserving minification keeps high-precision numbers and
+ * duplicate object members intact.
  */
 export function normalizeRedisJsonDraft(text: string): RedisJsonDraftNormalizationResult {
   try {
-    return { ok: true, compactText: safeJsonFormat(text) };
+    return { ok: true, compactText: formatJsonSource(text) };
   } catch {
     return { ok: false, error: "invalid_json" };
   }
@@ -352,7 +356,7 @@ export function redisValueCopyText(value: RedisValue, collectionItems: RedisColl
     case "json": {
       const rawText = redisJsonValueText(value.data);
       try {
-        return safeJsonFormat(rawText, 2);
+        return formatJsonSource(rawText, 2);
       } catch {
         return rawText;
       }

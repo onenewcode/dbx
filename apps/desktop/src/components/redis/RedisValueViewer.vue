@@ -42,7 +42,7 @@ import {
   type RedisCollectionItem,
   type RedisValueFormat,
 } from "@/lib/redis/redisValuePresentation";
-import { safeJsonFormat } from "@/lib/common/safeJsonFormat";
+import { formatJsonSource } from "@/lib/common/safeJsonFormat";
 
 const { t } = useI18n();
 const { toast } = useToast();
@@ -409,7 +409,8 @@ function readPreferredRedisValueFormat(): RedisValueFormat {
 
 function formatJsonText(raw: string): string | null {
   try {
-    return safeJsonFormat(raw, 2);
+    // Keep Redis JSON baselines source-preserving (duplicate keys, number text).
+    return formatJsonSource(raw, 2);
   } catch {
     return null;
   }
