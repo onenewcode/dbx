@@ -28,7 +28,8 @@ import {
   type DocumentFilterMode,
   type DocumentFilterRule,
 } from "@/lib/app/documentStoreProvider";
-import { documentStoreValueForGrid, parseDocumentStoreInputValue, serializeDocumentStoreId, stringifyDocumentStoreValue } from "@/lib/app/documentJsonValues";
+import { documentStoreIdsEqual, documentStoreValueForGrid, parseDocumentStoreInputValue, parseDocumentStoreJsonDocument, prepareDocumentStoreWriteDocument, serializeDocumentStoreId, stringifyDocumentStoreValue } from "@/lib/app/documentJsonValues";
+import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import { isLosslessJsonNumber, parseJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
 import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, mongoDocumentIdForGrid, parseMongoDocumentInputValue, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
 import { normalizeResultPageSize } from "@/lib/dataGrid/paginationPageSize";
@@ -68,6 +69,8 @@ const selectedIdx = ref<number | null>(null);
 const editJson = ref("");
 const isEditing = ref(false);
 const isNew = ref(false);
+const documentEditMode = ref<"fields" | "json">("json");
+const isSavingDocument = ref(false);
 const error = ref("");
 const editFields = ref<EditNode[]>([]);
 const showDeleteConfirm = ref(false);
@@ -577,38 +580,121 @@ function syncSelectedDocumentAfterLoad(previousSelectedIdx: number | null, previ
   }
 }
 
+function emptyDocumentJson(): string {
+  return stringifyDocumentStoreValue({}, documentStoreProvider.value.kind, 2);
+}
+
+function documentEditErrorMessage(result: { error: "empty" | "invalid" | "not-object" | "unsupported-number" } | { error: "duplicate-key"; field: string }): string {
+  if (result.error === "not-object") return t("mongo.documentMustBeObject");
+  if (result.error === "unsupported-number") return t("mongo.unsupportedJsonNumber");
+  if (result.error === "duplicate-key") return t("mongo.duplicateJsonKey", { field: result.field });
+  return t("mongo.invalidJson");
+}
+
+function buildEditFieldsFromDocument(doc: JsonRecord): EditNode[] {
+  return Object.entries(doc).map(([name, value]) => {
+    const isMetadata = name === "_id" || (documentStoreProvider.value.kind === "elasticsearch" && name === "_routing");
+    // Metadata field names stay fixed; values are editable so _id rekey is possible.
+    return createEditNode(name, value, isMetadata, false);
+  });
+}
+
+function metadataFieldsFromDocument(doc: JsonRecord | undefined): JsonRecord {
+  const metadata: JsonRecord = {};
+  if (!doc) return metadata;
+  if (Object.prototype.hasOwnProperty.call(doc, "_id")) metadata._id = doc._id;
+  if (documentStoreProvider.value.kind === "elasticsearch" && Object.prototype.hasOwnProperty.call(doc, "_routing")) {
+    metadata._routing = doc._routing;
+  }
+  return metadata;
+}
+
+function currentDocumentMetadata(): JsonRecord {
+  if (selectedDoc.value) return metadataFieldsFromDocument(selectedDoc.value);
+  // New documents keep metadata that already exists in either editor mode.
+  if (documentEditMode.value === "json") {
+    const parsed = parseDocumentStoreJsonDocument(editJson.value, documentStoreProvider.value.kind);
+    return parsed.ok ? metadataFieldsFromDocument(parsed.document) : {};
+  }
+  const metadata: JsonRecord = {};
+  for (const field of editFields.value) {
+    const name = field.keyName.trim();
+    if (name === "_id" || (documentStoreProvider.value.kind === "elasticsearch" && name === "_routing")) {
+      metadata[name] = buildValueFromNode(field, name);
+    }
+  }
+  return metadata;
+}
+
+function syncEditJsonFromFields() {
+  const doc = buildDocumentFromFields();
+  // Field mode omits root metadata keys; restore them for JSON round-trips (new + existing).
+  Object.assign(doc, currentDocumentMetadata());
+  editJson.value = stringifyDocumentStoreValue(doc, documentStoreProvider.value.kind, 2);
+}
+
+function setDocumentEditMode(mode: "fields" | "json") {
+  if (!isEditing.value || documentEditMode.value === mode) return;
+  error.value = "";
+  if (mode === "json") {
+    try {
+      syncEditJsonFromFields();
+      documentEditMode.value = "json";
+    } catch (e: unknown) {
+      error.value = e instanceof Error ? e.message : String(e);
+    }
+    return;
+  }
+
+  const parsed = parseDocumentStoreJsonDocument(editJson.value, documentStoreProvider.value.kind);
+  if (!parsed.ok) {
+    error.value = documentEditErrorMessage(parsed);
+    return;
+  }
+  editFields.value = buildEditFieldsFromDocument(parsed.document);
+  documentEditMode.value = "fields";
+}
+
 function selectDoc(idx: number) {
   selectedIdx.value = idx;
   editJson.value = stringifyDocumentStoreValue(documents.value[idx], documentStoreProvider.value.kind, 2);
   isEditing.value = false;
   isNew.value = false;
+  documentEditMode.value = "fields";
   editFields.value = [];
+  error.value = "";
 }
 
 function startNew() {
   selectedIdx.value = null;
-  editJson.value = "";
+  editJson.value = emptyDocumentJson();
   editFields.value = [createEditNode("", "", false, false)];
+  documentEditMode.value = "json";
   isEditing.value = true;
   isNew.value = true;
+  error.value = "";
 }
 
 function startEdit() {
   const doc = selectedDoc.value;
   if (!doc) return;
-  editFields.value = Object.entries(doc).map(([name, value]) => {
-    const readonlyMetadata = name === "_id" || (documentStoreProvider.value.kind === "elasticsearch" && name === "_routing");
-    return createEditNode(name, value, readonlyMetadata, readonlyMetadata);
-  });
+  // Issue #2952: open whole-document JSON editing by default (DBeaver-style), not field tree.
+  editJson.value = stringifyDocumentStoreValue(doc, documentStoreProvider.value.kind, 2);
+  editFields.value = buildEditFieldsFromDocument(doc);
+  documentEditMode.value = "json";
   isEditing.value = true;
   isNew.value = false;
+  error.value = "";
 }
 
 function cancelEdit() {
   isEditing.value = false;
+  documentEditMode.value = "fields";
   if (isNew.value) {
     isNew.value = false;
     editFields.value = [];
+    editJson.value = "";
+    error.value = "";
     return;
   }
   if (selectedDoc.value) {
@@ -720,23 +806,126 @@ function buildDocumentFromFields(): JsonRecord {
   return buildObjectFromNodes(editFields.value, "");
 }
 
+function buildDocumentFromEditor(): JsonRecord | null {
+  if (documentEditMode.value === "json") {
+    const parsed = parseDocumentStoreJsonDocument(editJson.value, documentStoreProvider.value.kind);
+    if (!parsed.ok) {
+      error.value = documentEditErrorMessage(parsed);
+      return null;
+    }
+    return parsed.document;
+  }
+
+  // Field mode skips root metadata in buildDocumentFromFields(); reattach editable/readonly metadata values.
+  const doc = buildDocumentFromFields();
+  for (const field of editFields.value) {
+    const name = field.keyName.trim();
+    if (name === "_id" || (documentStoreProvider.value.kind === "elasticsearch" && name === "_routing")) {
+      doc[name] = buildValueFromNode(field, name);
+    }
+  }
+  return doc;
+}
+
+async function insertDocumentStoreDocument(doc: JsonRecord) {
+  if (documentStoreProvider.value.kind === "elasticsearch") {
+    const explicitId = documentIdFromGridValue(documentStoreValueForGrid(doc._id, "elasticsearch"));
+    const routing = documentRoutingValue(doc._routing);
+    const prepared = prepareDocumentStoreWriteDocument(doc, {
+      kind: "elasticsearch",
+      mode: explicitId ? "update" : "insert",
+      existingId: explicitId ?? undefined,
+    });
+    if (explicitId) {
+      await api.documentUpdateDocument(props.connectionId, props.database, props.collection, explicitId, stringifyDocumentStoreValue(prepared.document, "elasticsearch"), routing);
+      return;
+    }
+    await api.documentInsertDocument(props.connectionId, props.database, props.collection, stringifyDocumentStoreValue(prepared.document, "elasticsearch"));
+    return;
+  }
+
+  const prepared = prepareDocumentStoreWriteDocument(doc, {
+    kind: documentStoreProvider.value.kind,
+    mode: "insert",
+  });
+  await api.documentInsertDocument(props.connectionId, props.database, props.collection, stringifyDocumentStoreValue(prepared.document, documentStoreProvider.value.kind));
+}
+
+async function replaceDocumentStoreDocument(current: JsonRecord, currentId: unknown, doc: JsonRecord) {
+  const prepared = prepareDocumentStoreWriteDocument(doc, {
+    kind: documentStoreProvider.value.kind,
+    mode: "update",
+    existingId: currentId,
+  });
+  await api.documentUpdateDocument(props.connectionId, props.database, props.collection, serializeDocumentStoreId(currentId, documentStoreProvider.value.kind), stringifyDocumentStoreValue(prepared.document, documentStoreProvider.value.kind), documentRoutingFromDocument(current));
+}
+
+async function rekeyDocumentStoreDocument(current: JsonRecord, currentId: unknown, doc: JsonRecord) {
+  // MongoDB/ES document ids are identity keys: changing _id means insert under the new id, then delete the old document.
+  if (!Object.prototype.hasOwnProperty.call(doc, "_id") || doc._id === undefined || doc._id === null || doc._id === "") {
+    error.value = t("mongo.jsonIdRequired");
+    return false;
+  }
+
+  if (documentStoreProvider.value.kind === "elasticsearch") {
+    const newId = documentIdFromGridValue(documentStoreValueForGrid(doc._id, "elasticsearch"));
+    if (!newId) {
+      error.value = t("mongo.jsonIdRequired");
+      return false;
+    }
+    const routing = documentRoutingValue(doc._routing) ?? documentRoutingFromDocument(current);
+    const prepared = prepareDocumentStoreWriteDocument(doc, {
+      kind: "elasticsearch",
+      mode: "update",
+      existingId: newId,
+    });
+    await api.documentUpdateDocument(props.connectionId, props.database, props.collection, newId, stringifyDocumentStoreValue(prepared.document, "elasticsearch"), routing);
+  } else {
+    const prepared = prepareDocumentStoreWriteDocument(doc, {
+      kind: documentStoreProvider.value.kind,
+      mode: "insert",
+    });
+    await api.documentInsertDocument(props.connectionId, props.database, props.collection, stringifyDocumentStoreValue(prepared.document, documentStoreProvider.value.kind));
+  }
+
+  await api.documentDeleteDocument(props.connectionId, props.database, props.collection, serializeDocumentStoreId(currentId, documentStoreProvider.value.kind), documentRoutingFromDocument(current));
+  return true;
+}
+
 async function saveDoc() {
+  if (isSavingDocument.value) return;
   error.value = "";
+  isSavingDocument.value = true;
   try {
-    const doc = buildDocumentFromFields();
+    const doc = buildDocumentFromEditor();
+    if (!doc) return;
+
     if (isNew.value) {
-      await api.documentInsertDocument(props.connectionId, props.database, props.collection, stringifyDocumentStoreValue(doc, documentStoreProvider.value.kind));
+      await insertDocumentStoreDocument(doc);
     } else if (selectedIdx.value !== null) {
       const current = documents.value[selectedIdx.value];
-      const id = current?._id;
-      if (!id) {
+      const currentId = current?._id;
+      if (currentId === undefined || currentId === null) {
         error.value = "No _id field";
         return;
       }
-      await api.documentUpdateDocument(props.connectionId, props.database, props.collection, serializeDocumentStoreId(id, documentStoreProvider.value.kind), stringifyDocumentStoreValue(doc, documentStoreProvider.value.kind), documentRoutingFromDocument(current));
+
+      const hasPayloadId = Object.prototype.hasOwnProperty.call(doc, "_id");
+      const idChanged = hasPayloadId && !documentStoreIdsEqual(doc._id, currentId, documentStoreProvider.value.kind);
+      if (idChanged) {
+        const rekeyed = await rekeyDocumentStoreDocument(current, currentId, doc);
+        if (!rekeyed) return;
+      } else {
+        // Same identity: replace body. Missing payload _id keeps the selected document id.
+        await replaceDocumentStoreDocument(current, currentId, doc);
+      }
+    } else {
+      return;
     }
+
     isEditing.value = false;
     isNew.value = false;
+    documentEditMode.value = "fields";
     editFields.value = [];
     await load();
     if (selectedIdx.value !== null && documents.value[selectedIdx.value]) {
@@ -744,6 +933,8 @@ async function saveDoc() {
     }
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    isSavingDocument.value = false;
   }
 }
 
@@ -1198,21 +1389,34 @@ function resetTableSearchSplitWidth() {
               <span class="flex-1" />
               <Button v-if="!isEditing" variant="ghost" size="sm" class="h-6 text-xs" @click="startEdit">{{ t("mongo.edit") }}</Button>
               <template v-if="isEditing">
-                <Button variant="ghost" size="sm" class="h-6 text-xs" @click="addField"> <Plus class="w-3 h-3 mr-1" /> {{ t("mongo.addField") }} </Button>
-                <Button variant="ghost" size="sm" class="h-6 text-xs" @click="cancelEdit">{{ t("grid.discard") }}</Button>
-                <Button size="sm" class="h-6 text-xs" @click="saveDoc"><Save class="w-3 h-3 mr-1" />{{ t("grid.save") }}</Button>
+                <div class="flex items-center border rounded-md overflow-hidden mr-1">
+                  <Button variant="ghost" size="sm" class="h-6 rounded-none px-2 text-xs" :class="{ 'bg-accent': documentEditMode === 'json' }" :disabled="isSavingDocument" @click="setDocumentEditMode('json')">{{ t("mongo.editModeJson") }}</Button>
+                  <Button variant="ghost" size="sm" class="h-6 rounded-none px-2 text-xs" :class="{ 'bg-accent': documentEditMode === 'fields' }" :disabled="isSavingDocument" @click="setDocumentEditMode('fields')">{{ t("mongo.editModeFields") }}</Button>
+                </div>
+                <Button v-if="documentEditMode === 'fields'" variant="ghost" size="sm" class="h-6 text-xs" :disabled="isSavingDocument" @click="addField"> <Plus class="w-3 h-3 mr-1" /> {{ t("mongo.addField") }} </Button>
+                <Button variant="ghost" size="sm" class="h-6 text-xs" :disabled="isSavingDocument" @click="cancelEdit">{{ t("grid.discard") }}</Button>
+                <Button size="sm" class="h-6 text-xs" :disabled="isSavingDocument" @click="saveDoc"><Save class="w-3 h-3 mr-1" />{{ t("grid.save") }}</Button>
               </template>
             </div>
 
-            <div v-if="isEditing" class="flex-1 overflow-auto bg-muted/10">
-              <div class="json-edit min-w-fit p-5" :style="{ ...documentFontStyle, '--mongo-key-width': editKeyWidth }">
-                <div class="json-edit-brace">{</div>
+            <div v-if="isEditing && documentEditMode === 'json' && !isNew" class="px-4 py-1.5 text-[11px] text-muted-foreground border-b bg-muted/20 shrink-0">
+              {{ t("mongo.jsonReplaceHint") }}
+            </div>
 
-                <JsonEditNode v-for="(field, idx) in editFields" :key="field.key" :node="field" parent-kind="root" :removable="!field.readonlyValue" @remove="requestRemoveField(idx)" />
+            <div v-if="isEditing" class="flex-1 min-h-0 overflow-hidden bg-muted/10">
+              <div v-if="documentEditMode === 'json'" class="h-full min-h-0 p-2">
+                <RedisJsonEditor v-model="editJson" class="h-full rounded border bg-background" :save-disabled="isSavingDocument" :read-only="isSavingDocument" @save="saveDoc" />
+              </div>
+              <div v-else class="h-full overflow-auto">
+                <div class="json-edit min-w-fit p-5" :class="{ 'pointer-events-none opacity-60': isSavingDocument }" :style="{ ...documentFontStyle, '--mongo-key-width': editKeyWidth }" :aria-disabled="isSavingDocument ? 'true' : undefined">
+                  <div class="json-edit-brace">{</div>
 
-                <Button variant="ghost" size="sm" class="json-edit-add" @click="addField"> <Plus class="w-3 h-3 mr-1" /> {{ t("mongo.addField") }} </Button>
+                  <JsonEditNode v-for="(field, idx) in editFields" :key="field.key" :node="field" parent-kind="root" :removable="!isSavingDocument && !field.readonlyValue" @remove="requestRemoveField(idx)" />
 
-                <div class="json-edit-brace">}</div>
+                  <Button variant="ghost" size="sm" class="json-edit-add" :disabled="isSavingDocument" @click="addField"> <Plus class="w-3 h-3 mr-1" /> {{ t("mongo.addField") }} </Button>
+
+                  <div class="json-edit-brace">}</div>
+                </div>
               </div>
             </div>
 
