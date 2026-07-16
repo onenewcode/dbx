@@ -28,7 +28,18 @@ import {
   type DocumentFilterMode,
   type DocumentFilterRule,
 } from "@/lib/app/documentStoreProvider";
-import { documentStoreIdsEqual, documentStoreValueForGrid, parseDocumentStoreInputValue, parseDocumentStoreJsonDocument, prepareDocumentStoreWriteDocument, serializeDocumentStoreId, stringifyDocumentStoreValue } from "@/lib/app/documentJsonValues";
+import {
+  isDocumentStoreIdentityField,
+  normalizeDocumentStoreRouting,
+  parseDocumentStoreInputValue,
+  parseDocumentStoreJsonDocument,
+  planDocumentStoreIdentityMigration,
+  resolveDocumentStoreWriteRouting,
+  serializeDocumentStoreId,
+  stringifyDocumentStoreValue,
+  documentStoreValueForGrid,
+} from "@/lib/app/documentJsonValues";
+import { applyDocumentStoreIdentityPlan, insertDocumentStoreDocument as insertDocumentStoreDocumentCore } from "@/lib/app/documentStoreSave";
 import RedisJsonEditor from "@/components/redis/RedisJsonEditor.vue";
 import { isLosslessJsonNumber, parseJsonPreservingLargeNumbers } from "@/lib/common/safeJsonFormat";
 import { buildMongoInsertDocument, buildMongoUpdateDocument, formatMongoShellLiteral, mongoDocumentIdForGrid, parseMongoDocumentInputValue, serializeMongoDocumentId, type MongoInputValue } from "@/lib/mongo/mongoDocumentValues";
@@ -281,20 +292,21 @@ function documentIdFromGridValue(value: MongoInputValue | undefined): string | n
   return id.trim() ? id : null;
 }
 
-function documentRoutingValue(value: unknown): string | undefined {
-  if (value === null || value === undefined) return undefined;
-  const routing = typeof value === "string" ? value : String(value);
-  const trimmed = routing.trim();
-  return trimmed ? trimmed : undefined;
-}
-
 function documentRoutingFromDocument(doc: JsonRecord | undefined): string | undefined {
-  return documentRoutingValue(doc?._routing);
+  return normalizeDocumentStoreRouting(doc?._routing);
 }
 
 function documentRoutingFromGridRow(row: MongoInputValue[] | undefined, columns: string[]): string | undefined {
   const routingColIdx = columns.indexOf("_routing");
-  return routingColIdx >= 0 ? documentRoutingValue(row?.[routingColIdx]) : undefined;
+  return routingColIdx >= 0 ? normalizeDocumentStoreRouting(row?.[routingColIdx]) : undefined;
+}
+
+function documentStoreWriteApis() {
+  return {
+    insert: (docJson: string, routing?: string) => api.documentInsertDocument(props.connectionId, props.database, props.collection, docJson, routing),
+    update: (id: string, docJson: string, routing?: string) => api.documentUpdateDocument(props.connectionId, props.database, props.collection, id, docJson, routing),
+    delete: (id: string, routing?: string) => api.documentDeleteDocument(props.connectionId, props.database, props.collection, id, routing),
+  };
 }
 
 async function gridSave(changes: DocumentGridChanges) {
@@ -346,10 +358,11 @@ async function gridSave(changes: DocumentGridChanges) {
     const doc = isEs ? buildElasticsearchInsertDocument(newRow, cols) : buildMongoInsertDocument(newRow, cols);
     if (isEs) {
       const id = documentIdFromGridValue(newRow[idColIdx]);
+      const routing = documentRoutingFromGridRow(newRow, cols);
       if (id) {
-        await api.documentUpdateDocument(props.connectionId, props.database, props.collection, id, stringifyDocumentStoreValue(doc, "elasticsearch"), documentRoutingFromGridRow(newRow, cols));
+        await api.documentUpdateDocument(props.connectionId, props.database, props.collection, id, stringifyDocumentStoreValue(doc, "elasticsearch"), routing);
       } else {
-        await api.documentInsertDocument(props.connectionId, props.database, props.collection, stringifyDocumentStoreValue(doc, "elasticsearch"));
+        await api.documentInsertDocument(props.connectionId, props.database, props.collection, stringifyDocumentStoreValue(doc, "elasticsearch"), routing);
       }
       continue;
     }
@@ -593,8 +606,8 @@ function documentEditErrorMessage(result: { error: "empty" | "invalid" | "not-ob
 
 function buildEditFieldsFromDocument(doc: JsonRecord): EditNode[] {
   return Object.entries(doc).map(([name, value]) => {
-    const isMetadata = name === "_id" || (documentStoreProvider.value.kind === "elasticsearch" && name === "_routing");
-    // Metadata field names stay fixed; values are editable so _id rekey is possible.
+    const isMetadata = isDocumentStoreIdentityField(documentStoreProvider.value.kind, name);
+    // Metadata field names stay fixed; values are editable so _id / routing rekey is possible.
     return createEditNode(name, value, isMetadata, false);
   });
 }
@@ -619,7 +632,7 @@ function currentDocumentMetadata(): JsonRecord {
   const metadata: JsonRecord = {};
   for (const field of editFields.value) {
     const name = field.keyName.trim();
-    if (name === "_id" || (documentStoreProvider.value.kind === "elasticsearch" && name === "_routing")) {
+    if (isDocumentStoreIdentityField(documentStoreProvider.value.kind, name)) {
       metadata[name] = buildValueFromNode(field, name);
     }
   }
@@ -785,7 +798,7 @@ function buildObjectFromNodes(nodes: EditNode[], path: string): JsonRecord {
 
   for (const field of nodes) {
     const name = field.keyName.trim();
-    if (!name || (!path && (name === "_id" || (documentStoreProvider.value.kind === "elasticsearch" && name === "_routing")))) continue;
+    if (!name || (!path && isDocumentStoreIdentityField(documentStoreProvider.value.kind, name))) continue;
     if (seen.has(name)) throw new Error(t("mongo.duplicateField", { field: name }));
     seen.add(name);
     doc[name] = buildValueFromNode(field, path ? `${path}.${name}` : name);
@@ -816,80 +829,37 @@ function buildDocumentFromEditor(): JsonRecord | null {
     return parsed.document;
   }
 
-  // Field mode skips root metadata in buildDocumentFromFields(); reattach editable/readonly metadata values.
+  // Field mode skips root metadata in buildDocumentFromFields(); reattach identity field values.
   const doc = buildDocumentFromFields();
   for (const field of editFields.value) {
     const name = field.keyName.trim();
-    if (name === "_id" || (documentStoreProvider.value.kind === "elasticsearch" && name === "_routing")) {
+    if (isDocumentStoreIdentityField(documentStoreProvider.value.kind, name)) {
       doc[name] = buildValueFromNode(field, name);
     }
   }
   return doc;
 }
 
-async function insertDocumentStoreDocument(doc: JsonRecord) {
+function resolveDocumentStorePathId(id: unknown): string | null {
   if (documentStoreProvider.value.kind === "elasticsearch") {
-    const explicitId = documentIdFromGridValue(documentStoreValueForGrid(doc._id, "elasticsearch"));
-    const routing = documentRoutingValue(doc._routing);
-    const prepared = prepareDocumentStoreWriteDocument(doc, {
-      kind: "elasticsearch",
-      mode: explicitId ? "update" : "insert",
-      existingId: explicitId ?? undefined,
-    });
-    if (explicitId) {
-      await api.documentUpdateDocument(props.connectionId, props.database, props.collection, explicitId, stringifyDocumentStoreValue(prepared.document, "elasticsearch"), routing);
-      return;
-    }
-    await api.documentInsertDocument(props.connectionId, props.database, props.collection, stringifyDocumentStoreValue(prepared.document, "elasticsearch"));
-    return;
+    return documentIdFromGridValue(documentStoreValueForGrid(id, "elasticsearch"));
   }
-
-  const prepared = prepareDocumentStoreWriteDocument(doc, {
-    kind: documentStoreProvider.value.kind,
-    mode: "insert",
-  });
-  await api.documentInsertDocument(props.connectionId, props.database, props.collection, stringifyDocumentStoreValue(prepared.document, documentStoreProvider.value.kind));
+  if (id === undefined || id === null || id === "") return null;
+  try {
+    const serialized = serializeDocumentStoreId(id, documentStoreProvider.value.kind);
+    return serialized.trim() ? serialized : null;
+  } catch {
+    return null;
+  }
 }
 
-async function replaceDocumentStoreDocument(current: JsonRecord, currentId: unknown, doc: JsonRecord) {
-  const prepared = prepareDocumentStoreWriteDocument(doc, {
-    kind: documentStoreProvider.value.kind,
-    mode: "update",
-    existingId: currentId,
-  });
-  await api.documentUpdateDocument(props.connectionId, props.database, props.collection, serializeDocumentStoreId(currentId, documentStoreProvider.value.kind), stringifyDocumentStoreValue(prepared.document, documentStoreProvider.value.kind), documentRoutingFromDocument(current));
-}
-
-async function rekeyDocumentStoreDocument(current: JsonRecord, currentId: unknown, doc: JsonRecord) {
-  // MongoDB/ES document ids are identity keys: changing _id means insert under the new id, then delete the old document.
-  if (!Object.prototype.hasOwnProperty.call(doc, "_id") || doc._id === undefined || doc._id === null || doc._id === "") {
-    error.value = t("mongo.jsonIdRequired");
-    return false;
-  }
-
-  if (documentStoreProvider.value.kind === "elasticsearch") {
-    const newId = documentIdFromGridValue(documentStoreValueForGrid(doc._id, "elasticsearch"));
-    if (!newId) {
-      error.value = t("mongo.jsonIdRequired");
-      return false;
-    }
-    const routing = documentRoutingValue(doc._routing) ?? documentRoutingFromDocument(current);
-    const prepared = prepareDocumentStoreWriteDocument(doc, {
-      kind: "elasticsearch",
-      mode: "update",
-      existingId: newId,
-    });
-    await api.documentUpdateDocument(props.connectionId, props.database, props.collection, newId, stringifyDocumentStoreValue(prepared.document, "elasticsearch"), routing);
-  } else {
-    const prepared = prepareDocumentStoreWriteDocument(doc, {
-      kind: documentStoreProvider.value.kind,
-      mode: "insert",
-    });
-    await api.documentInsertDocument(props.connectionId, props.database, props.collection, stringifyDocumentStoreValue(prepared.document, documentStoreProvider.value.kind));
-  }
-
-  await api.documentDeleteDocument(props.connectionId, props.database, props.collection, serializeDocumentStoreId(currentId, documentStoreProvider.value.kind), documentRoutingFromDocument(current));
-  return true;
+function resolveWriteIdentityFromEditor(doc: JsonRecord, currentId: unknown, currentRouting: string | undefined): { writeId: string; writeRouting?: string } | null {
+  const kind = documentStoreProvider.value.kind;
+  const hasPayloadId = Object.prototype.hasOwnProperty.call(doc, "_id");
+  const writeId = hasPayloadId ? resolveDocumentStorePathId(doc._id) : resolveDocumentStorePathId(currentId);
+  if (!writeId) return null;
+  const writeRouting = kind === "elasticsearch" ? resolveDocumentStoreWriteRouting(doc, currentRouting) : undefined;
+  return { writeId, writeRouting };
 }
 
 async function saveDoc() {
@@ -900,8 +870,18 @@ async function saveDoc() {
     const doc = buildDocumentFromEditor();
     if (!doc) return;
 
+    const apis = documentStoreWriteApis();
+    const kind = documentStoreProvider.value.kind;
+
     if (isNew.value) {
-      await insertDocumentStoreDocument(doc);
+      const explicitId = kind === "elasticsearch" ? documentIdFromGridValue(documentStoreValueForGrid(doc._id, "elasticsearch")) : null;
+      await insertDocumentStoreDocumentCore({
+        kind,
+        document: doc,
+        explicitId,
+        routing: normalizeDocumentStoreRouting(doc._routing),
+        apis,
+      });
     } else if (selectedIdx.value !== null) {
       const current = documents.value[selectedIdx.value];
       const currentId = current?._id;
@@ -910,15 +890,24 @@ async function saveDoc() {
         return;
       }
 
-      const hasPayloadId = Object.prototype.hasOwnProperty.call(doc, "_id");
-      const idChanged = hasPayloadId && !documentStoreIdsEqual(doc._id, currentId, documentStoreProvider.value.kind);
-      if (idChanged) {
-        const rekeyed = await rekeyDocumentStoreDocument(current, currentId, doc);
-        if (!rekeyed) return;
-      } else {
-        // Same identity: replace body. Missing payload _id keeps the selected document id.
-        await replaceDocumentStoreDocument(current, currentId, doc);
+      const deleteId = resolveDocumentStorePathId(currentId);
+      if (!deleteId) {
+        error.value = "No _id field";
+        return;
       }
+      const currentRouting = documentRoutingFromDocument(current);
+      const write = resolveWriteIdentityFromEditor(doc, currentId, currentRouting);
+      if (!write) {
+        error.value = t("mongo.jsonIdRequired");
+        return;
+      }
+
+      const plan = planDocumentStoreIdentityMigration({
+        write: { id: write.writeId, routing: write.writeRouting },
+        current: { id: deleteId, routing: kind === "elasticsearch" ? currentRouting : undefined },
+      });
+      // Rekey writes first then deletes; write failure leaves the old document intact.
+      await applyDocumentStoreIdentityPlan({ kind, plan, document: doc, apis });
     } else {
       return;
     }

@@ -40,13 +40,24 @@ test("document edit mode toggles whole JSON editing for insert and save", () => 
   assert.match(source, /documentEditMode\.value = "json"/);
   assert.match(source, /parseDocumentStoreJsonDocument\(editJson\.value, documentStoreProvider\.value\.kind\)/);
   assert.match(source, /emptyDocumentJson\(\)/);
-  assert.match(source, /prepareDocumentStoreWriteDocument\(/);
   assert.match(source, /mongo\.jsonReplaceHint/);
   assert.match(source, /isSavingDocument/);
-  assert.match(source, /rekeyDocumentStoreDocument/);
   assert.match(source, /unsupportedJsonNumber|unsupported-number/);
-  assert.match(source, /documentUpdateDocument\([\s\S]*explicitId/);
   assert.match(source, /pointer-events-none/);
   assert.match(source, /mongo\.jsonIdRequired/);
-  assert.match(source, /documentDeleteDocument/);
+  assert.match(source, /applyDocumentStoreIdentityPlan/);
+  assert.match(source, /planDocumentStoreIdentityMigration/);
+  assert.match(source, /insertDocumentStoreDocumentCore|insertDocumentStoreDocument/);
+});
+
+test("document save uses shared identity plan and write helpers", () => {
+  const source = documentBrowserSource();
+  assert.match(source, /planDocumentStoreIdentityMigration\(/);
+  assert.match(source, /applyDocumentStoreIdentityPlan\(/);
+  assert.match(source, /resolveDocumentStoreWriteRouting\(/);
+  assert.match(source, /isDocumentStoreIdentityField\(/);
+  assert.match(source, /normalizeDocumentStoreRouting\(/);
+  // No local rekey/replace triple-copy orchestration.
+  assert.doesNotMatch(source, /async function rekeyDocumentStoreDocument/);
+  assert.doesNotMatch(source, /async function replaceDocumentStoreDocument/);
 });

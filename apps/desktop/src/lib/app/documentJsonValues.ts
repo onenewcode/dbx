@@ -13,14 +13,6 @@ export type ParseDocumentStoreJsonDocumentResult = { ok: true; document: Record<
 export type PrepareDocumentStoreWriteDocumentOptions = {
   kind: DocumentStoreKind;
   mode: "insert" | "update";
-  /** Existing document _id used for update identity. */
-  existingId?: unknown;
-};
-
-export type PrepareDocumentStoreWriteDocumentResult = {
-  document: Record<string, unknown>;
-  /** True when the payload included a different _id than the document being updated. */
-  ignoredIdChange: boolean;
 };
 
 export function parseDocumentStoreInputValue(raw: MongoInputValue, kind: DocumentStoreKind): unknown {
@@ -84,26 +76,22 @@ export function parseDocumentStoreJsonDocument(text: string, kind: DocumentStore
 
 /**
  * Normalize a parsed document for insert/update.
- * - Same-id updates drop `_id` from the body because MongoDB/ES identity is applied via the write path.
- * - Identity changes are handled by the caller (insert under the new id, then delete the old document).
- * - Elasticsearch `_routing` is always dropped from the body; routing is sent separately.
+ * - Updates drop `_id` from the body (identity is applied via the write path).
+ * - Elasticsearch always drops `_routing` from the body; routing is an API argument on insert/update/delete.
+ * - Identity changes are planned by the caller (write under the new id/routing, then delete the old document).
  */
-export function prepareDocumentStoreWriteDocument(document: Record<string, unknown>, options: PrepareDocumentStoreWriteDocumentOptions): PrepareDocumentStoreWriteDocumentResult {
+export function prepareDocumentStoreWriteDocument(document: Record<string, unknown>, options: PrepareDocumentStoreWriteDocumentOptions): Record<string, unknown> {
   const next: Record<string, unknown> = { ...document };
-  let ignoredIdChange = false;
 
-  if (options.mode === "update") {
-    if (Object.prototype.hasOwnProperty.call(next, "_id")) {
-      ignoredIdChange = !documentStoreIdsEqual(next._id, options.existingId, options.kind);
-      delete next._id;
-    }
+  if (options.mode === "update" && Object.prototype.hasOwnProperty.call(next, "_id")) {
+    delete next._id;
   }
 
   if (options.kind === "elasticsearch" && Object.prototype.hasOwnProperty.call(next, "_routing")) {
     delete next._routing;
   }
 
-  return { document: next, ignoredIdChange };
+  return next;
 }
 
 export function documentStoreIdsEqual(left: unknown, right: unknown, kind: DocumentStoreKind): boolean {
@@ -118,6 +106,72 @@ export function documentStoreIdsEqual(left: unknown, right: unknown, kind: Docum
       return false;
     }
   }
+}
+
+/** Root identity metadata field (`_id`, and Elasticsearch `_routing`). */
+export function isDocumentStoreIdentityField(kind: DocumentStoreKind, name: string): boolean {
+  if (name === "_id") return true;
+  return kind === "elasticsearch" && name === "_routing";
+}
+
+/** Normalize Elasticsearch custom routing for API write/delete arguments. */
+export function normalizeDocumentStoreRouting(value: unknown): string | undefined {
+  if (value === null || value === undefined) return undefined;
+  const routing = typeof value === "string" ? value : String(value);
+  const trimmed = routing.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+/**
+ * Resolve write routing from an edited document payload.
+ * - Present `_routing` key uses the normalized value (empty/null clears routing).
+ * - Absent `_routing` key keeps the current document routing.
+ */
+export function resolveDocumentStoreWriteRouting(nextDocument: Record<string, unknown>, currentRouting: string | undefined): string | undefined {
+  if (Object.prototype.hasOwnProperty.call(nextDocument, "_routing")) {
+    return normalizeDocumentStoreRouting(nextDocument._routing);
+  }
+  return currentRouting;
+}
+
+export type DocumentStoreIdentityCoords = {
+  id: string;
+  routing?: string;
+};
+
+export type DocumentStoreIdentityPlan =
+  | { action: "replace"; writeId: string; writeRouting?: string }
+  | {
+      action: "rekey";
+      writeId: string;
+      writeRouting?: string;
+      deleteId: string;
+      deleteRouting?: string;
+    };
+
+/** True when two document identities (path id + optional ES routing) are equal. */
+export function documentStoreIdentityEquals(left: DocumentStoreIdentityCoords, right: DocumentStoreIdentityCoords): boolean {
+  return left.id === right.id && left.routing === right.routing;
+}
+
+/**
+ * Plan how to save relative to the currently selected identity.
+ * Callers must resolve path ids and routing first; this only compares string coordinates.
+ *
+ * Elasticsearch treats custom routing as part of identity: routing-only changes rekey
+ * (write under the new routing, then delete under the old routing after a successful write).
+ */
+export function planDocumentStoreIdentityMigration(options: { write: DocumentStoreIdentityCoords; current: DocumentStoreIdentityCoords }): DocumentStoreIdentityPlan {
+  if (documentStoreIdentityEquals(options.write, options.current)) {
+    return { action: "replace", writeId: options.write.id, writeRouting: options.write.routing };
+  }
+  return {
+    action: "rekey",
+    writeId: options.write.id,
+    writeRouting: options.write.routing,
+    deleteId: options.current.id,
+    deleteRouting: options.current.routing,
+  };
 }
 
 class UnsupportedMongoJsonNumberError extends Error {

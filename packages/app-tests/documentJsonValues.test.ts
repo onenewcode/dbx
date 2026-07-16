@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import {
+  documentStoreIdentityEquals,
   documentStoreValueForGrid,
+  isDocumentStoreIdentityField,
+  normalizeDocumentStoreRouting,
   parseDocumentStoreInputValue,
   parseDocumentStoreJsonDocument,
   documentStoreIdsEqual,
+  planDocumentStoreIdentityMigration,
   prepareDocumentStoreWriteDocument,
+  resolveDocumentStoreWriteRouting,
   serializeDocumentStoreId,
   stringifyDocumentStoreValue,
 } from "../../apps/desktop/src/lib/app/documentJsonValues.ts";
@@ -82,7 +87,7 @@ test("rejects invalid whole document JSON payloads", () => {
   );
 });
 
-test("prepareDocumentStoreWriteDocument strips immutable identity fields on update", () => {
+test("prepareDocumentStoreWriteDocument always strips ES routing; update strips _id", () => {
   const mongo = prepareDocumentStoreWriteDocument(
     {
       _id: { $oid: "6743e4bfa3f6f84bc3fff6c8" },
@@ -91,27 +96,11 @@ test("prepareDocumentStoreWriteDocument strips immutable identity fields on upda
     {
       kind: "mongodb",
       mode: "update",
-      existingId: { $oid: "aaaaaaaaaaaaaaaaaaaaaaaa" },
     },
   );
-  assert.equal(mongo.ignoredIdChange, true);
-  assert.deepEqual(mongo.document, { name: "Ada" });
+  assert.deepEqual(mongo, { name: "Ada" });
 
-  const sameId = prepareDocumentStoreWriteDocument(
-    {
-      _id: { $oid: "6743e4bfa3f6f84bc3fff6c8" },
-      name: "Ada",
-    },
-    {
-      kind: "mongodb",
-      mode: "update",
-      existingId: { $oid: "6743e4bfa3f6f84bc3fff6c8" },
-    },
-  );
-  assert.equal(sameId.ignoredIdChange, false);
-  assert.deepEqual(sameId.document, { name: "Ada" });
-
-  const es = prepareDocumentStoreWriteDocument(
+  const esUpdate = prepareDocumentStoreWriteDocument(
     {
       _id: "doc-1",
       _routing: "shard-a",
@@ -120,11 +109,9 @@ test("prepareDocumentStoreWriteDocument strips immutable identity fields on upda
     {
       kind: "elasticsearch",
       mode: "update",
-      existingId: "doc-1",
     },
   );
-  assert.equal(es.ignoredIdChange, false);
-  assert.deepEqual(es.document, { title: "hello" });
+  assert.deepEqual(esUpdate, { title: "hello" });
 
   const insertKeepsId = prepareDocumentStoreWriteDocument(
     {
@@ -136,18 +123,132 @@ test("prepareDocumentStoreWriteDocument strips immutable identity fields on upda
       mode: "insert",
     },
   );
-  assert.equal(insertKeepsId.ignoredIdChange, false);
-  assert.deepEqual(insertKeepsId.document, {
+  assert.deepEqual(insertKeepsId, {
     _id: { $oid: "6743e4bfa3f6f84bc3fff6c8" },
     name: "Ada",
   });
+
+  // ES insert also strips _routing — routing is always an API argument.
+  const esInsert = prepareDocumentStoreWriteDocument(
+    {
+      _routing: "tenant-1",
+      title: "hello",
+    },
+    {
+      kind: "elasticsearch",
+      mode: "insert",
+    },
+  );
+  assert.deepEqual(esInsert, { title: "hello" });
 });
 
 test("documentStoreIdsEqual falls back safely for unstringifiable values", () => {
   const circular: Record<string, unknown> = {};
   circular.self = circular;
-  // Same reference remains equal without traversing the cycle.
   assert.equal(documentStoreIdsEqual(circular, circular, "mongodb"), true);
-  // BigInt-bearing objects must not throw when comparing identifiers.
   assert.doesNotThrow(() => documentStoreIdsEqual({ value: 1n }, { value: 2n }, "mongodb"));
+});
+
+test("isDocumentStoreIdentityField covers _id and ES routing only", () => {
+  assert.equal(isDocumentStoreIdentityField("mongodb", "_id"), true);
+  assert.equal(isDocumentStoreIdentityField("mongodb", "_routing"), false);
+  assert.equal(isDocumentStoreIdentityField("elasticsearch", "_id"), true);
+  assert.equal(isDocumentStoreIdentityField("elasticsearch", "_routing"), true);
+  assert.equal(isDocumentStoreIdentityField("elasticsearch", "title"), false);
+});
+
+test("normalizeDocumentStoreRouting trims empty values to undefined", () => {
+  assert.equal(normalizeDocumentStoreRouting(" tenant-a "), "tenant-a");
+  assert.equal(normalizeDocumentStoreRouting(""), undefined);
+  assert.equal(normalizeDocumentStoreRouting("   "), undefined);
+  assert.equal(normalizeDocumentStoreRouting(null), undefined);
+  assert.equal(normalizeDocumentStoreRouting(undefined), undefined);
+  assert.equal(normalizeDocumentStoreRouting(42), "42");
+});
+
+test("resolveDocumentStoreWriteRouting distinguishes omit from explicit clear", () => {
+  assert.equal(resolveDocumentStoreWriteRouting({ name: "Ada" }, "shard-a"), "shard-a");
+  assert.equal(resolveDocumentStoreWriteRouting({ _routing: "shard-b", name: "Ada" }, "shard-a"), "shard-b");
+  assert.equal(resolveDocumentStoreWriteRouting({ _routing: "", name: "Ada" }, "shard-a"), undefined);
+  assert.equal(resolveDocumentStoreWriteRouting({ _routing: null, name: "Ada" }, "shard-a"), undefined);
+  assert.equal(resolveDocumentStoreWriteRouting({ _routing: "  ", name: "Ada" }, "shard-a"), undefined);
+});
+
+test("planDocumentStoreIdentityMigration covers owner review ES routing cases", () => {
+  // Same id + routing → replace body only.
+  assert.deepEqual(
+    planDocumentStoreIdentityMigration({
+      write: { id: "doc-1", routing: "shard-a" },
+      current: { id: "doc-1", routing: "shard-a" },
+    }),
+    { action: "replace", writeId: "doc-1", writeRouting: "shard-a" },
+  );
+
+  // Same _id, routing A→B: rekey write(B) delete(A).
+  assert.deepEqual(
+    planDocumentStoreIdentityMigration({
+      write: { id: "doc-1", routing: "shard-b" },
+      current: { id: "doc-1", routing: "shard-a" },
+    }),
+    {
+      action: "rekey",
+      writeId: "doc-1",
+      writeRouting: "shard-b",
+      deleteId: "doc-1",
+      deleteRouting: "shard-a",
+    },
+  );
+
+  // Same _id, clear routing.
+  assert.deepEqual(
+    planDocumentStoreIdentityMigration({
+      write: { id: "doc-1", routing: undefined },
+      current: { id: "doc-1", routing: "shard-a" },
+    }),
+    {
+      action: "rekey",
+      writeId: "doc-1",
+      writeRouting: undefined,
+      deleteId: "doc-1",
+      deleteRouting: "shard-a",
+    },
+  );
+
+  // Both _id and routing change.
+  assert.deepEqual(
+    planDocumentStoreIdentityMigration({
+      write: { id: "doc-2", routing: "shard-b" },
+      current: { id: "doc-1", routing: "shard-a" },
+    }),
+    {
+      action: "rekey",
+      writeId: "doc-2",
+      writeRouting: "shard-b",
+      deleteId: "doc-1",
+      deleteRouting: "shard-a",
+    },
+  );
+
+  // Id-only change, same routing.
+  assert.deepEqual(
+    planDocumentStoreIdentityMigration({
+      write: { id: "doc-2", routing: "shard-a" },
+      current: { id: "doc-1", routing: "shard-a" },
+    }),
+    {
+      action: "rekey",
+      writeId: "doc-2",
+      writeRouting: "shard-a",
+      deleteId: "doc-1",
+      deleteRouting: "shard-a",
+    },
+  );
+
+  // Same identity never produces rekey (no self-delete).
+  const same = planDocumentStoreIdentityMigration({
+    write: { id: "doc-1", routing: "shard-a" },
+    current: { id: "doc-1", routing: "shard-a" },
+  });
+  assert.equal(same.action, "replace");
+  assert.equal(documentStoreIdentityEquals({ id: "doc-1", routing: "shard-a" }, { id: "doc-1", routing: "shard-a" }), true);
 });
