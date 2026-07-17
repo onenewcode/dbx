@@ -734,20 +734,45 @@ pub async fn find_documents_extended_json(
     Ok(MongoDocumentResult { extended_documents: Some(documents.clone()), documents, raw_documents: None, total })
 }
 
+/// Run `db.collection.aggregate(pipeline, options)`.
+///
+/// - No options: use the driver cursor API (same path as before this change).
+/// - With options: forward the free-form options document to the server
+///   [`aggregate`](https://www.mongodb.com/docs/manual/reference/command/aggregate/)
+///   command (allowDiskUse, cursor, maxTimeMS, bypassDocumentValidation, readConcern,
+///   collation, hint, comment, writeConcern, let, explain, …). `run_command` avoids
+///   driver mapping gaps and surfaces MongoDB's original validation errors.
 pub async fn aggregate_documents(
     client: &Client,
     database: &str,
     collection: &str,
     pipeline_json: &str,
     max_rows: Option<usize>,
+    options_json: Option<&str>,
 ) -> Result<MongoDocumentResult, String> {
     let json: serde_json::Value =
         serde_json::from_str(pipeline_json).map_err(|e| format!("Invalid pipeline JSON: {e}"))?;
     let pipeline_values = json.as_array().ok_or_else(|| "Aggregate pipeline must be a JSON array".to_string())?;
-    let pipeline = pipeline_values
+    let pipeline_docs = pipeline_values
         .iter()
         .map(|value| json_object_to_document(value).map_err(|e| format!("Invalid pipeline stage: {e}")))
         .collect::<Result<Vec<Document>, String>>()?;
+
+    let options = parse_aggregate_options_document(options_json)?;
+    if options.is_empty() {
+        return aggregate_with_driver_cursor(client, database, collection, pipeline_docs, max_rows).await;
+    }
+
+    aggregate_with_command_options(client, database, collection, pipeline_docs, options, max_rows).await
+}
+
+async fn aggregate_with_driver_cursor(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    pipeline: Vec<Document>,
+    max_rows: Option<usize>,
+) -> Result<MongoDocumentResult, String> {
     let col = client.database(database).collection::<Document>(collection);
     let mut cursor = col.aggregate(pipeline).await.map_err(|e| e.to_string())?;
     let max_rows = max_rows.unwrap_or(100);
@@ -765,6 +790,157 @@ pub async fn aggregate_documents(
         extended_documents.truncate(max_rows);
     }
     Ok(MongoDocumentResult { documents, raw_documents: None, extended_documents: Some(extended_documents), total })
+}
+
+async fn aggregate_with_command_options(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    pipeline: Vec<Document>,
+    options: Document,
+    max_rows: Option<usize>,
+) -> Result<MongoDocumentResult, String> {
+    let explain = aggregate_options_explain(&options)?;
+    let pipeline_bson: Vec<Bson> = pipeline.into_iter().map(Bson::Document).collect();
+    let mut command = doc! {
+        "aggregate": collection,
+        "pipeline": pipeline_bson,
+    };
+    for (key, value) in options {
+        command.insert(key, value);
+    }
+    // Server requires `cursor` unless `explain` is true.
+    if !explain && !command.contains_key("cursor") {
+        command.insert("cursor", doc! {});
+    }
+
+    let db = client.database(database);
+    let result = db.run_command(command).await.map_err(|e| e.to_string())?;
+
+    if explain {
+        let document = bson_to_json(&Bson::Document(result.clone()));
+        let extended = Bson::Document(result).into_relaxed_extjson();
+        return Ok(MongoDocumentResult {
+            documents: vec![document],
+            raw_documents: None,
+            extended_documents: Some(vec![extended]),
+            total: 1,
+        });
+    }
+
+    collect_aggregate_cursor_documents(&db, collection, result, max_rows).await
+}
+
+fn parse_aggregate_options_document(options_json: Option<&str>) -> Result<Document, String> {
+    let Some(raw) = options_json.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(Document::new());
+    };
+    let value: serde_json::Value =
+        serde_json::from_str(raw).map_err(|e| format!("Invalid aggregate options JSON: {e}"))?;
+    if !value.is_object() {
+        return Err("Aggregate options must be a JSON object".to_string());
+    }
+    // Free-form object conversion keeps every official aggregate option (nested
+    // docs, hint strings, maxTimeMS numbers, comments, let vars, …) intact.
+    json_object_to_document(&value).map_err(|e| format!("Invalid aggregate options: {e}"))
+}
+
+fn aggregate_options_explain(options: &Document) -> Result<bool, String> {
+    match options.get("explain") {
+        None => Ok(false),
+        Some(Bson::Boolean(flag)) => Ok(*flag),
+        Some(_) => Err("aggregate options.explain must be a boolean (for example { explain: true })".to_string()),
+    }
+}
+
+async fn collect_aggregate_cursor_documents(
+    db: &Database,
+    collection: &str,
+    first_reply: Document,
+    max_rows: Option<usize>,
+) -> Result<MongoDocumentResult, String> {
+    let max_rows = max_rows.unwrap_or(100);
+    let fetch_limit = max_rows.saturating_add(1);
+    let mut documents = Vec::new();
+    let mut extended_documents = Vec::new();
+
+    let cursor = first_reply
+        .get_document("cursor")
+        .map_err(|_| "Aggregate response missing cursor (server may have rejected the command)".to_string())?;
+    append_aggregate_batch(&mut documents, &mut extended_documents, cursor, fetch_limit)?;
+    let mut cursor_id = bson_cursor_id(cursor)?;
+
+    while documents.len() < fetch_limit && cursor_id != 0 {
+        let more = db
+            .run_command(doc! {
+                "getMore": cursor_id,
+                "collection": collection,
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+        let next_cursor = more.get_document("cursor").map_err(|_| "getMore response missing cursor".to_string())?;
+        append_aggregate_batch(&mut documents, &mut extended_documents, next_cursor, fetch_limit)?;
+        cursor_id = bson_cursor_id(next_cursor)?;
+    }
+
+    // Best-effort kill leftover server cursors when we stop early due to max_rows.
+    if cursor_id != 0 {
+        let _ = db
+            .run_command(doc! {
+                "killCursors": collection,
+                "cursors": [cursor_id],
+            })
+            .await;
+    }
+
+    let total = documents.len() as u64;
+    if documents.len() > max_rows {
+        documents.truncate(max_rows);
+        extended_documents.truncate(max_rows);
+    }
+    Ok(MongoDocumentResult { documents, raw_documents: None, extended_documents: Some(extended_documents), total })
+}
+
+fn append_aggregate_batch(
+    documents: &mut Vec<serde_json::Value>,
+    extended_documents: &mut Vec<serde_json::Value>,
+    cursor: &Document,
+    fetch_limit: usize,
+) -> Result<(), String> {
+    let batch_key = if cursor.contains_key("firstBatch") {
+        "firstBatch"
+    } else if cursor.contains_key("nextBatch") {
+        "nextBatch"
+    } else {
+        return Ok(());
+    };
+    let batch = cursor.get_array(batch_key).map_err(|e| format!("Invalid aggregate cursor batch: {e}"))?;
+    for item in batch {
+        if documents.len() >= fetch_limit {
+            break;
+        }
+        match item {
+            Bson::Document(doc) => {
+                documents.push(bson_to_json(&Bson::Document(doc.clone())));
+                extended_documents.push(Bson::Document(doc.clone()).into_relaxed_extjson());
+            }
+            other => {
+                // Rare non-document batch elements still render as a single cell.
+                documents.push(bson_to_json(other));
+                extended_documents.push(other.clone().into_relaxed_extjson());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn bson_cursor_id(cursor: &Document) -> Result<i64, String> {
+    match cursor.get("id") {
+        Some(Bson::Int64(id)) => Ok(*id),
+        Some(Bson::Int32(id)) => Ok(i64::from(*id)),
+        Some(other) => Err(format!("Invalid aggregate cursor id: {other:?}")),
+        None => Ok(0),
+    }
 }
 
 /// Distinct values of a field, matching the mongo shell's `db.coll.distinct(field, filter)`:
@@ -1675,6 +1851,43 @@ fn expand_object_id_string_array(items: &[serde_json::Value]) -> Bson {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_aggregate_options_document_keeps_official_fields() {
+        let doc = parse_aggregate_options_document(Some(
+            r#"{
+                "explain": true,
+                "allowDiskUse": true,
+                "cursor": { "batchSize": 25 },
+                "maxTimeMS": 1000,
+                "bypassDocumentValidation": true,
+                "collation": { "locale": "en" },
+                "hint": "status_1",
+                "comment": "agg-test",
+                "let": { "year": 2024 },
+                "readConcern": { "level": "local" }
+            }"#,
+        ))
+        .unwrap();
+        assert_eq!(doc.get_bool("explain").ok(), Some(true));
+        assert_eq!(doc.get_bool("allowDiskUse").ok(), Some(true));
+        assert_eq!(doc.get_i64("maxTimeMS").ok(), Some(1000));
+        assert_eq!(doc.get_str("hint").ok(), Some("status_1"));
+        assert_eq!(doc.get_str("comment").ok(), Some("agg-test"));
+        assert_eq!(doc.get_document("cursor").ok().and_then(|c| c.get_i64("batchSize").ok()), Some(25));
+        assert_eq!(doc.get_document("collation").ok().and_then(|c| c.get_str("locale").ok()), Some("en"));
+        assert_eq!(doc.get_document("let").ok().and_then(|c| c.get_i64("year").ok()), Some(2024));
+        assert!(aggregate_options_explain(&doc).unwrap());
+
+        let no_explain = parse_aggregate_options_document(Some(r#"{"allowDiskUse":false}"#)).unwrap();
+        assert!(!aggregate_options_explain(&no_explain).unwrap());
+
+        let err = aggregate_options_explain(
+            &parse_aggregate_options_document(Some(r#"{"explain":"executionStats"}"#)).unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("boolean"), "{err}");
+    }
 
     #[test]
     fn update_modifications_accept_document_and_pipeline() {

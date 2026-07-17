@@ -26,6 +26,8 @@ export interface MongoCountDocumentsCommand {
 export interface MongoAggregateCommand {
   collection: string;
   pipeline: string;
+  /** Optional second argument to `aggregate(pipeline, options)`, e.g. `{explain: true}`. */
+  options?: string;
 }
 
 export interface MongoGetIndexesCommand {
@@ -318,7 +320,9 @@ export function parseMongoAggregateCommand(input: string): MongoAggregateCommand
   if (closeIndex < 0 || source.slice(closeIndex + 1).trim()) return null;
 
   const args = splitTopLevel(source.slice(openIndex + 1, closeIndex));
-  if (args.length !== 1) return null;
+  // Shell accepts aggregate(pipeline) or aggregate(pipeline, options).
+  if (args.length < 1 || args.length > 2) return null;
+  if (args.length === 2 && !args[1]?.trim()) return null;
   const pipeline = normalizeJsonArgument(args[0]);
   if (!pipeline) return null;
   try {
@@ -327,10 +331,71 @@ export function parseMongoAggregateCommand(input: string): MongoAggregateCommand
     return null;
   }
 
+  const options = args.length === 2 ? parseMongoObjectArgument(args[1]) : undefined;
+  if (args.length === 2 && !options) return null;
+
   return {
     collection: target.collection,
     pipeline,
+    ...(options ? { options } : {}),
   };
+}
+
+/** Shared hint when input is not a recognized Mongo shell command. */
+export const MONGO_SHELL_COMMAND_HINT =
+  "Use MongoDB shell-style commands, for example: db.collection.find({}).limit(100), " +
+  "db.collection.aggregate([]), db.collection.aggregate([], { explain: true }), " +
+  'db.version(), db.collection.countDocuments({}), db.collection.distinct("field"), ' +
+  "db.collection.getIndexes(), db.collection.createIndex({...}), or db.collection.insertOne({...}).";
+
+/**
+ * Client-side diagnosis when shell parsing fails, so the query tab does not fall
+ * through to the SQL executor's generic rejection.
+ */
+export function describeMongoCommandParseFailure(input: string): string {
+  const source = trimMongoOuterComments(input).trim().replace(/;$/, "").trim();
+  if (!source) return "Empty MongoDB command.";
+  if (hasUnclosedMongoDelimiters(source)) {
+    return "MongoDB command has unclosed parentheses, brackets, braces, or strings.";
+  }
+  return MONGO_SHELL_COMMAND_HINT;
+}
+
+/** True when (), [], {}, or quotes are unbalanced (quotes only; no second full lexer). */
+function hasUnclosedMongoDelimiters(source: string): boolean {
+  const stack: string[] = [];
+  let quote: string | null = null;
+  let escaped = false;
+  for (let i = 0; i < source.length; i += 1) {
+    const char = source[i] ?? "";
+    if (quote) {
+      if (escaped) escaped = false;
+      else if (char === "\\") escaped = true;
+      else if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === "(" || char === "[" || char === "{") {
+      stack.push(char);
+      continue;
+    }
+    if (char === ")" || char === "]" || char === "}") {
+      const expected = char === ")" ? "(" : char === "]" ? "[" : "{";
+      if (stack.pop() !== expected) return true;
+    }
+  }
+  return quote !== null || stack.length > 0;
+}
+
+function parseMongoObjectArgument(arg: string | undefined): string | null {
+  if (!arg?.trim()) return null;
+  const normalized = normalizeJsonArgument(arg);
+  if (!normalized) return null;
+  const value = parseNormalizedJson(normalized);
+  return isRecord(value) ? normalized : null;
 }
 
 export function parseMongoDistinctCommand(input: string): MongoDistinctCommand | null {

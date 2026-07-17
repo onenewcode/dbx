@@ -34,6 +34,8 @@ use crate::sql::{split_sql_batches, split_sql_statements, starts_with_executable
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_ROWS: usize = 10000;
 pub const QUERY_CANCELED: &str = "Query canceled";
+/// Fallback when a Mongo connection hits the generic SQL executor instead of the shell path.
+const MONGO_SHELL_COMMAND_HINT: &str = "Use MongoDB shell-style commands (for example db.collection.find({}), db.collection.aggregate([]), db.collection.aggregate([], {explain:true}), db.version()). Unsupported or invalid shell input is rejected before SQL execution.";
 const SQL_OMITTED_ERROR_CONTEXT: &str =
     "SQL text omitted from user-facing error; enable debug SQL diagnostics for a redacted statement.";
 #[cfg(feature = "duckdb-bundled")]
@@ -1487,7 +1489,7 @@ pub async fn do_execute(
             result
         }
         PoolKind::Redis(_) => Err("Use Redis-specific commands".to_string()),
-        PoolKind::MongoDb(_) => Err("Use MongoDB-specific commands".to_string()),
+        PoolKind::MongoDb(_) => Err(MONGO_SHELL_COMMAND_HINT.to_string()),
         PoolKind::MessageQueue => Err("Use Message Queue-specific commands".to_string()),
         PoolKind::Nacos => Err("Use Nacos-specific commands".to_string()),
         PoolKind::InfluxDb(client) => {
@@ -1712,7 +1714,7 @@ pub async fn execute_sql_statement_with_options(
     // (e.g. typos) must be rejected before any pool/key creation so that
     // session-scoped pools do not leak MongoDB Clients and SSH tunnels.
     if connection_is_mongodb(state, connection_id).await {
-        return Err("Use MongoDB-specific commands".to_string());
+        return Err(MONGO_SHELL_COMMAND_HINT.to_string());
     }
 
     let db_type = connection_database_type(state, connection_id).await;
@@ -1934,7 +1936,7 @@ pub async fn execute_multi_core_with_options_for_client(
 ) -> Result<Vec<ExecuteMultiResult>, String> {
     // Reject MongoDB queries that fall through to the generic executor.
     if connection_is_mongodb(state, connection_id).await {
-        return Err("Use MongoDB-specific commands".to_string());
+        return Err(MONGO_SHELL_COMMAND_HINT.to_string());
     }
 
     let pool_key = if database.is_empty() {

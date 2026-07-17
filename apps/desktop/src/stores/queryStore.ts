@@ -17,6 +17,7 @@ import {
   mongoDistinctToQueryResult,
   mongoCreateIndexToQueryResult,
   mongoDocumentsToQueryResult,
+  describeMongoCommandParseFailure,
   mongoDroppedIndexesToQueryResult,
   mongoIndexesToQueryResult,
   mongoUseToQueryResult,
@@ -2884,6 +2885,12 @@ export const useQueryStore = defineStore("query", () => {
         return;
       }
 
+      if (conn?.db_type === "mongodb" && mongoCommands.length === 0 && sql.trim()) {
+        // Avoid falling through to the SQL executor, which only returns the generic
+        // "Use MongoDB-specific commands" rejection and hides parse/syntax details.
+        throw new Error(describeMongoCommandParseFailure(sql));
+      }
+
       if (mongoCommands.length > 0) {
         queryExecutionLog("info", "mongo:start", { traceId, commandCount: mongoCommands.length, sqlLength: sql.length });
 
@@ -2972,7 +2979,7 @@ export const useQueryStore = defineStore("query", () => {
                 }
                 queryExecutionLog("info", "mongo-aggregate:start", { traceId, collection: mongoCommand.collection, database: currentDatabase });
                 const aggregateMaxRows = normalizeResultPageSize(pageLimit ?? options?.pagination?.limit ?? settingsStore.editorSettings.pageSize);
-                const result = await api.mongoAggregateDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.pipeline, aggregateMaxRows, executionId);
+                const result = await api.mongoAggregateDocuments(tab.connectionId, currentDatabase, mongoCommand.collection, mongoCommand.pipeline, aggregateMaxRows, mongoCommand.options, executionId);
                 allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total))));
                 mongoEditTarget = undefined;
                 queryExecutionLog("info", "mongo-aggregate:done", {

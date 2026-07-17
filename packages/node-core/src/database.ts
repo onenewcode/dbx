@@ -893,7 +893,7 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
     if (aggregate) {
       const safety = evaluateMongoAggregateSafety(aggregate, sqlSafetyFromEnv());
       if (!safety.allowed) throw new Error(safety.reason);
-      const result = await withTimeout(mongoAggregateDocuments(config, aggregate.collection, aggregate.pipeline, resolveMaxRows(options)), resolveTimeoutMs(options));
+      const result = await withTimeout(mongoAggregateDocuments(config, aggregate.collection, aggregate.pipeline, resolveMaxRows(options), aggregate.options), resolveTimeoutMs(options));
       return mongoDocumentsToQueryResult(result.documents.slice(0, resolveMaxRows(options)), result.total);
     }
     const distinct = parseMongoDistinctCommand(sql);
@@ -933,7 +933,7 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       return { columns: [], rows: [], row_count: result.affectedRows };
     }
     throw new Error(
-      'Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.version(), db.projects.countDocuments({}), db.projects.count({}), db.projects.distinct("status"), db.projects.getIndexes(), db.projects.dataSize(), db.projects.storageSize(1024), db.projects.totalIndexSize(), db.projects.stats(), db.projects.createIndex({...}), db.projects.dropIndex("name"), db.projects.dropIndexes(), db.projects.drop(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})',
+      'Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.projects.aggregate([]), db.projects.aggregate([], {explain:true}), db.version(), db.projects.countDocuments({}), db.projects.count({}), db.projects.distinct("status"), db.projects.getIndexes(), db.projects.dataSize(), db.projects.storageSize(1024), db.projects.totalIndexSize(), db.projects.stats(), db.projects.createIndex({...}), db.projects.dropIndex("name"), db.projects.dropIndexes(), db.projects.drop(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})',
     );
   }
   if (isDirectQueryType(config.db_type)) {
@@ -1225,7 +1225,7 @@ async function executeMongoWrite(config: ConnectionConfig, command: MongoWriteCo
   return { affectedRows: result.affected_rows };
 }
 
-async function mongoAggregateDocuments(config: ConnectionConfig, collection: string, pipelineJson: string, maxRows: number): Promise<MongoDocumentResult> {
+async function mongoAggregateDocuments(config: ConnectionConfig, collection: string, pipelineJson: string, maxRows: number, optionsJson?: string): Promise<MongoDocumentResult> {
   return bridgeDataRequest<MongoDocumentResult>("/data/mongo/aggregate-documents", {
     connection_id: config.id,
     connection_name: config.name,
@@ -1233,6 +1233,7 @@ async function mongoAggregateDocuments(config: ConnectionConfig, collection: str
     collection,
     pipeline_json: pipelineJson,
     max_rows: maxRows,
+    ...(optionsJson ? { options_json: optionsJson } : {}),
   });
 }
 
@@ -1338,6 +1339,7 @@ interface MongoCountDocumentsCommand {
 interface MongoAggregateCommand {
   collection: string;
   pipeline: string;
+  options?: string;
 }
 
 interface MongoDistinctCommand {
@@ -1441,10 +1443,32 @@ export function parseMongoAggregateCommand(input: string): MongoAggregateCommand
   const target = parseCollectionMethodTarget(source, "aggregate");
   if (!target) return null;
   const args = parseMethodArgs(source, target.methodCallIndex);
-  if (!args || args.length !== 1) return null;
+  if (!args || args.length < 1 || args.length > 2) return null;
+  if (args.length === 2 && !args[1]?.trim()) return null;
   const pipeline = normalizeJsonArgument(args[0]);
   if (!pipeline) return null;
-  return Array.isArray(JSON.parse(pipeline)) ? { collection: target.collection, pipeline } : null;
+  try {
+    if (!Array.isArray(JSON.parse(pipeline))) return null;
+  } catch {
+    return null;
+  }
+
+  // Keep in sync with apps/desktop/src/lib/mongo/mongoShellCommand.ts (aggregate options).
+  let options: string | undefined;
+  if (args.length === 2) {
+    const parsedOptions = normalizeJsonArgument(args[1]);
+    if (!parsedOptions) return null;
+    let value: unknown;
+    try {
+      value = JSON.parse(parsedOptions);
+    } catch {
+      return null;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    options = parsedOptions;
+  }
+
+  return { collection: target.collection, pipeline, ...(options ? { options } : {}) };
 }
 
 export function parseMongoDistinctCommand(input: string): MongoDistinctCommand | null {
