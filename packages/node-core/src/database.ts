@@ -10,17 +10,23 @@ import { isDirectQueryType } from "./diagnostics.js";
 import { bridgePortFilePath } from "./paths.js";
 import { parseRedisCommandArgv, classifyRedisCommand, type RedisCommandOptions, type RedisCommandResult, type RedisCommandSafety } from "./redis-command.js";
 import {
+  chainedMethodCallPattern,
   describeMongoCommandParseFailure,
+  findChainedMethodCallIndex,
+  findMatchingParen,
+  normalizeJsonArgument,
+  parseCollectionMethodTarget,
   parseMongoAggregateCommand,
+  splitTopLevel,
   type MongoAggregateCommand,
-} from "./mongo-shell-aggregate.js";
+} from "@dbx-app/mongo-shell";
 
 export {
   describeMongoCommandParseFailure,
   parseMongoAggregateCommand,
   MONGO_SHELL_COMMAND_HINT,
-} from "./mongo-shell-aggregate.js";
-export type { MongoAggregateCommand } from "./mongo-shell-aggregate.js";
+} from "@dbx-app/mongo-shell";
+export type { MongoAggregateCommand } from "@dbx-app/mongo-shell";
 
 export interface TableInfo {
   name: string;
@@ -1630,15 +1636,6 @@ export function evaluateMongoAggregateSafety(command: MongoAggregateCommand, opt
   return { allowed: true };
 }
 
-function parseCollectionMethodTarget(source: string, method: string): { collection: string; methodCallIndex: number } | null {
-  const escapedMethod = escapeRegExp(method);
-  const direct = new RegExp(`^db\\s*\\.\\s*([A-Za-z_$][\\w$]*)\\s*\\.\\s*${escapedMethod}\\s*\\(`).exec(source);
-  if (direct) return { collection: direct[1], methodCallIndex: findChainedMethodCallIndex(source, method) };
-  const quoted = new RegExp(`^db\\s*\\.\\s*getCollection\\s*\\(\\s*(['"])([^'"]+)\\1\\s*\\)\\s*\\.\\s*${escapedMethod}\\s*\\(`).exec(source);
-  if (quoted) return { collection: quoted[2], methodCallIndex: findChainedMethodCallIndex(source, method) };
-  return null;
-}
-
 function parseMethodArgs(source: string, methodCallIndex: number): string[] | null {
   const openIndex = source.indexOf("(", methodCallIndex);
   const closeIndex = findMatchingParen(source, openIndex);
@@ -1663,33 +1660,11 @@ function hasSingleEmptyChainedCall(chain: string, method: string): boolean {
   return closeIndex >= 0 && !trimmed.slice(openIndex + 1, closeIndex).trim() && !trimmed.slice(closeIndex + 1).trim();
 }
 
-function findChainedMethodCallIndex(source: string, method: string): number {
-  return chainedMethodCallPattern(method).exec(source)?.index ?? -1;
-}
-
-function chainedMethodCallPattern(method: string): RegExp {
-  return new RegExp(`\\.\\s*${escapeRegExp(method)}\\s*\\(`, "g");
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 function readChainedIntegerArgument(chain: string, method: string, fallback: number): number | null {
   const arg = readChainedCallArgument(chain, method);
   if (arg === undefined) return fallback;
   if (!/^\d+$/.test(arg.trim())) return null;
   return Number(arg.trim());
-}
-
-function normalizeJsonArgument(arg: string): string | null {
-  const value = quoteUnquotedObjectKeys(convertSingleQuotedStrings((arg.trim() || "{}").replace(/ObjectId\s*\(\s*["']([^"']+)["']\s*\)/g, '{"$oid":"$1"}')));
-  try {
-    JSON.parse(value);
-    return value;
-  } catch {
-    return null;
-  }
 }
 
 function parseMongoDropIndexArgument(args: string[]): string | null {
@@ -1722,98 +1697,6 @@ function parseMongoCollectionStatsScale(args: string[]): number | undefined | nu
   return scale;
 }
 
-function convertSingleQuotedStrings(source: string): string {
-  let result = "";
-  let copiedUntil = 0;
-  let quote: string | null = null;
-  let start = 0;
-  let value = "";
-  let escaped = false;
-
-  for (let i = 0; i < source.length; i += 1) {
-    const char = source[i];
-    if (!quote) {
-      if (char === "'") {
-        quote = char;
-        start = i;
-        value = "";
-        escaped = false;
-      } else if (char === '"') {
-        quote = char;
-      }
-      continue;
-    }
-
-    if (quote === '"') {
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === '"') quote = null;
-      continue;
-    }
-
-    if (escaped) {
-      value += char;
-      escaped = false;
-    } else if (char === "\\") {
-      escaped = true;
-    } else if (char === "'") {
-      result += source.slice(copiedUntil, start) + JSON.stringify(value);
-      copiedUntil = i + 1;
-      quote = null;
-    } else {
-      value += char;
-    }
-  }
-
-  return quote === "'" ? source : result + source.slice(copiedUntil);
-}
-
-function quoteUnquotedObjectKeys(source: string): string {
-  let result = "";
-  let quote: string | null = null;
-  let escaped = false;
-
-  for (let i = 0; i < source.length; i += 1) {
-    const char = source[i];
-    if (quote) {
-      result += char;
-      if (escaped) escaped = false;
-      else if (char === "\\") escaped = true;
-      else if (char === quote) quote = null;
-      continue;
-    }
-
-    if (char === '"' || char === "'") {
-      quote = char;
-      result += char;
-      continue;
-    }
-
-    if (/[A-Za-z_$]/.test(char) && shouldQuoteObjectKey(source, i)) {
-      let end = i + 1;
-      while (/[\w$]/.test(source[end] || "")) end += 1;
-      result += `"${source.slice(i, end)}"`;
-      i = end - 1;
-      continue;
-    }
-
-    result += char;
-  }
-
-  return result;
-}
-
-function shouldQuoteObjectKey(source: string, index: number): boolean {
-  let before = index - 1;
-  while (/\s/.test(source[before] || "")) before -= 1;
-  if (source[before] !== "{" && source[before] !== ",") return false;
-
-  let after = index + 1;
-  while (/[\w$]/.test(source[after] || "")) after += 1;
-  while (/\s/.test(source[after] || "")) after += 1;
-  return source[after] === ":";
-}
-
 function parseNormalizedJson(json: string): unknown {
   try {
     return JSON.parse(json);
@@ -1841,51 +1724,6 @@ function mongoDropIndexesRequiresDangerous(command: MongoWriteCommand): boolean 
   const parsed = parseNormalizedJson(command.indexes);
   if (parsed === "*") return true;
   return Array.isArray(parsed) && parsed.length > 1;
-}
-
-function splitTopLevel(source: string): string[] {
-  const parts: string[] = [];
-  let depth = 0;
-  let start = 0;
-  let quote: string | null = null;
-  for (let i = 0; i < source.length; i += 1) {
-    const ch = source[i];
-    if (quote) {
-      if (ch === "\\" && i + 1 < source.length) i += 1;
-      else if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === "'" || ch === '"') quote = ch;
-    else if (ch === "{" || ch === "[" || ch === "(") depth += 1;
-    else if (ch === "}" || ch === "]" || ch === ")") depth -= 1;
-    else if (ch === "," && depth === 0) {
-      parts.push(source.slice(start, i));
-      start = i + 1;
-    }
-  }
-  parts.push(source.slice(start));
-  return parts;
-}
-
-function findMatchingParen(source: string, openIndex: number): number {
-  if (openIndex < 0 || source[openIndex] !== "(") return -1;
-  let depth = 0;
-  let quote: string | null = null;
-  for (let i = openIndex; i < source.length; i += 1) {
-    const ch = source[i];
-    if (quote) {
-      if (ch === "\\" && i + 1 < source.length) i += 1;
-      else if (ch === quote) quote = null;
-      continue;
-    }
-    if (ch === "'" || ch === '"') quote = ch;
-    else if (ch === "(") depth += 1;
-    else if (ch === ")") {
-      depth -= 1;
-      if (depth === 0) return i;
-    }
-  }
-  return -1;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
