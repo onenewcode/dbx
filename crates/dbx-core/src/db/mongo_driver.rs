@@ -1,7 +1,7 @@
 use mongodb::{
     bson::{doc, oid::ObjectId, Bson, DateTime, Document},
     options::{ClientOptions, GridFsBucketOptions, IndexOptions, UpdateModifications},
-    Client, Database, IndexModel,
+    Client, Cursor, Database, IndexModel,
 };
 use serde::{Deserialize, Serialize};
 
@@ -736,12 +736,18 @@ pub async fn find_documents_extended_json(
 
 /// Run `db.collection.aggregate(pipeline, options)`.
 ///
-/// - No options: use the driver cursor API (same path as before this change).
-/// - With options: forward the free-form options document to the server
-///   [`aggregate`](https://www.mongodb.com/docs/manual/reference/command/aggregate/)
-///   command (allowDiskUse, cursor, maxTimeMS, bypassDocumentValidation, readConcern,
-///   collation, hint, comment, writeConcern, let, explain, …). `run_command` avoids
-///   driver mapping gaps and surfaces MongoDB's original validation errors.
+/// One execution model for every non-explain aggregate (empty or free-form options):
+/// build the server [`aggregate`](https://www.mongodb.com/docs/manual/reference/command/aggregate/)
+/// command and open it with [`Database::run_cursor_command`] so session-scoped getMore/killCursors
+/// stay with the driver cursor. Options are forwarded as-is (`allowDiskUse`, `cursor.batchSize`,
+/// `maxTimeMS`, collation, hint, comment, let, …).
+///
+/// `explain: true` is the only special case: the server returns a plan document (no cursor), so
+/// that path uses plain `run_command`.
+///
+/// Note: this intentionally uses the command/cursor path rather than `Collection::aggregate`, so
+/// default read/write concern inheritance matches other free-form shell options (explicit options
+/// on the command document only).
 pub async fn aggregate_documents(
     client: &Client,
     database: &str,
@@ -759,22 +765,55 @@ pub async fn aggregate_documents(
         .collect::<Result<Vec<Document>, String>>()?;
 
     let options = parse_aggregate_options_document(options_json)?;
-    if options.is_empty() {
-        return aggregate_with_driver_cursor(client, database, collection, pipeline_docs, max_rows).await;
+    let (command, explain) = build_aggregate_command(collection, pipeline_docs, options)?;
+    let db = client.database(database);
+
+    if explain {
+        let result = db.run_command(command).await.map_err(|e| e.to_string())?;
+        let document = bson_to_json(&Bson::Document(result.clone()));
+        let extended = Bson::Document(result).into_relaxed_extjson();
+        return Ok(MongoDocumentResult {
+            documents: vec![document],
+            raw_documents: None,
+            extended_documents: Some(vec![extended]),
+            total: 1,
+        });
     }
 
-    aggregate_with_command_options(client, database, collection, pipeline_docs, options, max_rows).await
+    // Driver cursor owns the implicit session across aggregate + getMore + killCursors.
+    let mut cursor = db.run_cursor_command(command).await.map_err(|e| e.to_string())?;
+    drain_document_cursor(&mut cursor, max_rows).await
 }
 
-async fn aggregate_with_driver_cursor(
-    client: &Client,
-    database: &str,
+/// Build the server aggregate command document, preserving free-form options.
+/// Returns `(command, explain)` so callers branch only on the explain flag.
+fn build_aggregate_command(
     collection: &str,
     pipeline: Vec<Document>,
+    options: Document,
+) -> Result<(Document, bool), String> {
+    let explain = aggregate_options_explain(&options)?;
+    let pipeline_bson: Vec<Bson> = pipeline.into_iter().map(Bson::Document).collect();
+    let mut command = doc! {
+        "aggregate": collection,
+        "pipeline": pipeline_bson,
+    };
+    for (key, value) in options {
+        command.insert(key, value);
+    }
+    // Server requires `cursor` unless `explain` is true.
+    if !explain && !command.contains_key("cursor") {
+        command.insert("cursor", doc! {});
+    }
+    Ok((command, explain))
+}
+
+/// Drain a driver cursor up to `max_rows`, peeking one extra document so callers can detect
+/// truncation: when more rows exist, `total == max_rows + 1` while `documents.len() == max_rows`.
+async fn drain_document_cursor(
+    cursor: &mut Cursor<Document>,
     max_rows: Option<usize>,
 ) -> Result<MongoDocumentResult, String> {
-    let col = client.database(database).collection::<Document>(collection);
-    let mut cursor = col.aggregate(pipeline).await.map_err(|e| e.to_string())?;
     let max_rows = max_rows.unwrap_or(100);
     let fetch_limit = max_rows.saturating_add(1);
     let mut documents = Vec::new();
@@ -790,45 +829,6 @@ async fn aggregate_with_driver_cursor(
         extended_documents.truncate(max_rows);
     }
     Ok(MongoDocumentResult { documents, raw_documents: None, extended_documents: Some(extended_documents), total })
-}
-
-async fn aggregate_with_command_options(
-    client: &Client,
-    database: &str,
-    collection: &str,
-    pipeline: Vec<Document>,
-    options: Document,
-    max_rows: Option<usize>,
-) -> Result<MongoDocumentResult, String> {
-    let explain = aggregate_options_explain(&options)?;
-    let pipeline_bson: Vec<Bson> = pipeline.into_iter().map(Bson::Document).collect();
-    let mut command = doc! {
-        "aggregate": collection,
-        "pipeline": pipeline_bson,
-    };
-    for (key, value) in options {
-        command.insert(key, value);
-    }
-    // Server requires `cursor` unless `explain` is true.
-    if !explain && !command.contains_key("cursor") {
-        command.insert("cursor", doc! {});
-    }
-
-    let db = client.database(database);
-    let result = db.run_command(command).await.map_err(|e| e.to_string())?;
-
-    if explain {
-        let document = bson_to_json(&Bson::Document(result.clone()));
-        let extended = Bson::Document(result).into_relaxed_extjson();
-        return Ok(MongoDocumentResult {
-            documents: vec![document],
-            raw_documents: None,
-            extended_documents: Some(vec![extended]),
-            total: 1,
-        });
-    }
-
-    collect_aggregate_cursor_documents(&db, collection, result, max_rows).await
 }
 
 fn parse_aggregate_options_document(options_json: Option<&str>) -> Result<Document, String> {
@@ -850,96 +850,6 @@ fn aggregate_options_explain(options: &Document) -> Result<bool, String> {
         None => Ok(false),
         Some(Bson::Boolean(flag)) => Ok(*flag),
         Some(_) => Err("aggregate options.explain must be a boolean (for example { explain: true })".to_string()),
-    }
-}
-
-async fn collect_aggregate_cursor_documents(
-    db: &Database,
-    collection: &str,
-    first_reply: Document,
-    max_rows: Option<usize>,
-) -> Result<MongoDocumentResult, String> {
-    let max_rows = max_rows.unwrap_or(100);
-    let fetch_limit = max_rows.saturating_add(1);
-    let mut documents = Vec::new();
-    let mut extended_documents = Vec::new();
-
-    let cursor = first_reply
-        .get_document("cursor")
-        .map_err(|_| "Aggregate response missing cursor (server may have rejected the command)".to_string())?;
-    append_aggregate_batch(&mut documents, &mut extended_documents, cursor, fetch_limit)?;
-    let mut cursor_id = bson_cursor_id(cursor)?;
-
-    while documents.len() < fetch_limit && cursor_id != 0 {
-        let more = db
-            .run_command(doc! {
-                "getMore": cursor_id,
-                "collection": collection,
-            })
-            .await
-            .map_err(|e| e.to_string())?;
-        let next_cursor = more.get_document("cursor").map_err(|_| "getMore response missing cursor".to_string())?;
-        append_aggregate_batch(&mut documents, &mut extended_documents, next_cursor, fetch_limit)?;
-        cursor_id = bson_cursor_id(next_cursor)?;
-    }
-
-    // Best-effort kill leftover server cursors when we stop early due to max_rows.
-    if cursor_id != 0 {
-        let _ = db
-            .run_command(doc! {
-                "killCursors": collection,
-                "cursors": [cursor_id],
-            })
-            .await;
-    }
-
-    let total = documents.len() as u64;
-    if documents.len() > max_rows {
-        documents.truncate(max_rows);
-        extended_documents.truncate(max_rows);
-    }
-    Ok(MongoDocumentResult { documents, raw_documents: None, extended_documents: Some(extended_documents), total })
-}
-
-fn append_aggregate_batch(
-    documents: &mut Vec<serde_json::Value>,
-    extended_documents: &mut Vec<serde_json::Value>,
-    cursor: &Document,
-    fetch_limit: usize,
-) -> Result<(), String> {
-    let batch_key = if cursor.contains_key("firstBatch") {
-        "firstBatch"
-    } else if cursor.contains_key("nextBatch") {
-        "nextBatch"
-    } else {
-        return Ok(());
-    };
-    let batch = cursor.get_array(batch_key).map_err(|e| format!("Invalid aggregate cursor batch: {e}"))?;
-    for item in batch {
-        if documents.len() >= fetch_limit {
-            break;
-        }
-        match item {
-            Bson::Document(doc) => {
-                documents.push(bson_to_json(&Bson::Document(doc.clone())));
-                extended_documents.push(Bson::Document(doc.clone()).into_relaxed_extjson());
-            }
-            other => {
-                // Rare non-document batch elements still render as a single cell.
-                documents.push(bson_to_json(other));
-                extended_documents.push(other.clone().into_relaxed_extjson());
-            }
-        }
-    }
-    Ok(())
-}
-
-fn bson_cursor_id(cursor: &Document) -> Result<i64, String> {
-    match cursor.get("id") {
-        Some(Bson::Int64(id)) => Ok(*id),
-        Some(Bson::Int32(id)) => Ok(i64::from(*id)),
-        Some(other) => Err(format!("Invalid aggregate cursor id: {other:?}")),
-        None => Ok(0),
     }
 }
 
@@ -1887,6 +1797,46 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("boolean"), "{err}");
+    }
+
+    #[test]
+    fn build_aggregate_command_adds_cursor_unless_explain() {
+        let pipeline = vec![doc! { "$match": { "active": true } }];
+        let (with_cursor, explain_flag) = build_aggregate_command(
+            "products",
+            pipeline.clone(),
+            parse_aggregate_options_document(Some(r#"{"allowDiskUse":true,"cursor":{"batchSize":1}}"#)).unwrap(),
+        )
+        .unwrap();
+        assert!(!explain_flag);
+        assert_eq!(with_cursor.get_str("aggregate").ok(), Some("products"));
+        assert_eq!(with_cursor.get_bool("allowDiskUse").ok(), Some(true));
+        assert_eq!(with_cursor.get_document("cursor").ok().and_then(|c| c.get_i64("batchSize").ok()), Some(1));
+
+        let (default_cursor, _) = build_aggregate_command(
+            "products",
+            pipeline.clone(),
+            parse_aggregate_options_document(Some(r#"{"comment":"agg"}"#)).unwrap(),
+        )
+        .unwrap();
+        assert!(default_cursor.get_document("cursor").is_ok(), "non-explain aggregate requires cursor");
+        assert_eq!(default_cursor.get_str("comment").ok(), Some("agg"));
+
+        // Empty options still produce a cursor command (single path with run_cursor_command).
+        let (empty_options, empty_explain) =
+            build_aggregate_command("products", pipeline.clone(), Document::new()).unwrap();
+        assert!(!empty_explain);
+        assert!(empty_options.get_document("cursor").is_ok());
+
+        let (explain, is_explain) = build_aggregate_command(
+            "products",
+            pipeline,
+            parse_aggregate_options_document(Some(r#"{"explain":true,"allowDiskUse":true}"#)).unwrap(),
+        )
+        .unwrap();
+        assert!(is_explain);
+        assert!(explain.get("cursor").is_none(), "explain path must not inject cursor");
+        assert_eq!(explain.get_bool("explain").ok(), Some(true));
     }
 
     #[test]

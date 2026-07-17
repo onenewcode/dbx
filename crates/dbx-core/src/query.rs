@@ -35,7 +35,9 @@ pub const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 pub const MAX_ROWS: usize = 10000;
 pub const QUERY_CANCELED: &str = "Query canceled";
 /// Fallback when a Mongo connection hits the generic SQL executor instead of the shell path.
-const MONGO_SHELL_COMMAND_HINT: &str = "Use MongoDB shell-style commands (for example db.collection.find({}), db.collection.aggregate([]), db.collection.aggregate([], {explain:true}), db.version()). Unsupported or invalid shell input is rejected before SQL execution.";
+/// Wording must match packages/node-core/src/mongo-shell-aggregate.ts `MONGO_SHELL_COMMAND_HINT`
+/// (desktop/CLI diagnose first; this is only the Rust SQL-executor backstop).
+const MONGO_SHELL_COMMAND_HINT: &str = "Use MongoDB shell-style commands, for example: db.collection.find({}).limit(100), db.collection.aggregate([]), db.collection.aggregate([], { explain: true }), db.version(), db.collection.countDocuments({}), db.collection.distinct(\"field\"), db.collection.getIndexes(), db.collection.createIndex({...}), or db.collection.insertOne({...}).";
 const SQL_OMITTED_ERROR_CONTEXT: &str =
     "SQL text omitted from user-facing error; enable debug SQL diagnostics for a redacted statement.";
 #[cfg(feature = "duckdb-bundled")]

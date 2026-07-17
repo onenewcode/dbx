@@ -489,9 +489,14 @@ test("describeMongoCommandParseFailure reports unclosed delimiters and shell hin
   const unclosed = describeMongoCommandParseFailure("db.uc_user.aggregate([], {explain: true");
   assert.match(unclosed, /unclosed/i);
 
-  // Parsed-looking but unsupported forms still get the supported-command hint.
-  const unsupported = describeMongoCommandParseFailure("db.products.aggregate([]).limit(10)");
-  assert.match(unsupported, /MongoDB shell-style commands/i);
+  const chained = describeMongoCommandParseFailure("db.products.aggregate([]).limit(10)");
+  assert.match(chained, /chaining|not supported/i);
+
+  const nonArrayPipeline = describeMongoCommandParseFailure('db.products.aggregate({"$match":{}})');
+  assert.match(nonArrayPipeline, /pipeline must be a JSON array/i);
+
+  const badOptions = describeMongoCommandParseFailure("db.products.aggregate([], [])");
+  assert.match(badOptions, /options must be a JSON object/i);
 
   const generic = describeMongoCommandParseFailure("SELECT 1");
   assert.match(generic, /MongoDB shell-style commands/i);

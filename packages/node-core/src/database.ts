@@ -9,6 +9,18 @@ import { sqlSafetyFromEnv } from "./sql-safety.js";
 import { isDirectQueryType } from "./diagnostics.js";
 import { bridgePortFilePath } from "./paths.js";
 import { parseRedisCommandArgv, classifyRedisCommand, type RedisCommandOptions, type RedisCommandResult, type RedisCommandSafety } from "./redis-command.js";
+import {
+  describeMongoCommandParseFailure,
+  parseMongoAggregateCommand,
+  type MongoAggregateCommand,
+} from "./mongo-shell-aggregate.js";
+
+export {
+  describeMongoCommandParseFailure,
+  parseMongoAggregateCommand,
+  MONGO_SHELL_COMMAND_HINT,
+} from "./mongo-shell-aggregate.js";
+export type { MongoAggregateCommand } from "./mongo-shell-aggregate.js";
 
 export interface TableInfo {
   name: string;
@@ -932,9 +944,7 @@ export async function executeQuery(config: ConnectionConfig, sql: string, option
       }
       return { columns: [], rows: [], row_count: result.affectedRows };
     }
-    throw new Error(
-      'Use MongoDB shell-style commands, for example: db.projects.find({}).limit(100), db.projects.aggregate([]), db.projects.aggregate([], {explain:true}), db.version(), db.projects.countDocuments({}), db.projects.count({}), db.projects.distinct("status"), db.projects.getIndexes(), db.projects.dataSize(), db.projects.storageSize(1024), db.projects.totalIndexSize(), db.projects.stats(), db.projects.createIndex({...}), db.projects.dropIndex("name"), db.projects.dropIndexes(), db.projects.drop(), db.projects.insertOne({...}), db.projects.updateOne({...}, {$set: {...}}), or db.projects.deleteOne({...})',
-    );
+    throw new Error(describeMongoCommandParseFailure(sql));
   }
   if (isDirectQueryType(config.db_type)) {
     return query(config, sql, undefined, options);
@@ -1336,12 +1346,6 @@ interface MongoCountDocumentsCommand {
   mode: "accurate" | "legacy";
 }
 
-interface MongoAggregateCommand {
-  collection: string;
-  pipeline: string;
-  options?: string;
-}
-
 interface MongoDistinctCommand {
   collection: string;
   field: string;
@@ -1436,39 +1440,6 @@ function parseFindCountCommand(source: string): MongoCountDocumentsCommand | nul
   if (findArgs.length > 2 && findArgs.slice(2).some((arg) => arg.trim())) return null;
   const filter = normalizeJsonArgument(findArgs[0] || "{}");
   return filter ? { collection: target.collection, filter, mode: "legacy" } : null;
-}
-
-export function parseMongoAggregateCommand(input: string): MongoAggregateCommand | null {
-  const source = input.trim().replace(/;$/, "").trim();
-  const target = parseCollectionMethodTarget(source, "aggregate");
-  if (!target) return null;
-  const args = parseMethodArgs(source, target.methodCallIndex);
-  if (!args || args.length < 1 || args.length > 2) return null;
-  if (args.length === 2 && !args[1]?.trim()) return null;
-  const pipeline = normalizeJsonArgument(args[0]);
-  if (!pipeline) return null;
-  try {
-    if (!Array.isArray(JSON.parse(pipeline))) return null;
-  } catch {
-    return null;
-  }
-
-  // Keep in sync with apps/desktop/src/lib/mongo/mongoShellCommand.ts (aggregate options).
-  let options: string | undefined;
-  if (args.length === 2) {
-    const parsedOptions = normalizeJsonArgument(args[1]);
-    if (!parsedOptions) return null;
-    let value: unknown;
-    try {
-      value = JSON.parse(parsedOptions);
-    } catch {
-      return null;
-    }
-    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-    options = parsedOptions;
-  }
-
-  return { collection: target.collection, pipeline, ...(options ? { options } : {}) };
 }
 
 export function parseMongoDistinctCommand(input: string): MongoDistinctCommand | null {
