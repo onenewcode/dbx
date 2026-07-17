@@ -62,3 +62,27 @@ test("shared dialog state is owner-gated and confirm handlers use snapshots", ()
   assert.match(runtimeHost, /batchTruncateTargets\.value = targets\.slice\(\)/);
   assert.match(runtimeHost, /activateActionTarget\(target\)/);
 });
+
+test("dialog controller routing reuses the cached reactive instance", () => {
+  // Cloning/spreading the controller unwraps nested module refs (showDeleteConfirm)
+  // into disconnected plain values. Route must mutate and emit the same instance.
+  const routeBody = (() => {
+    const signatureIndex = runtimeHost.indexOf("function routeTreeItemDialogController(");
+    assert.notEqual(signatureIndex, -1);
+    const bodyStart = runtimeHost.indexOf("{", signatureIndex);
+    let depth = 0;
+    for (let index = bodyStart; index < runtimeHost.length; index += 1) {
+      if (runtimeHost[index] === "{") depth += 1;
+      if (runtimeHost[index] === "}" && --depth === 0) return runtimeHost.slice(bodyStart + 1, index);
+    }
+    throw new Error("Could not parse routeTreeItemDialogController");
+  })();
+  assert.match(routeBody, /getTreeItemDialogController\(\)/);
+  assert.match(routeBody, /controller\.node = target/);
+  assert.match(routeBody, /emit\("open-dialog-controller", controller\)/);
+  assert.doesNotMatch(routeBody, /\.\.\.controller/);
+  assert.doesNotMatch(routeBody, /reactive\(/);
+  assert.match(runtimeHost, /bindDialogControllerActions\(/);
+  assert.match(runtimeHost, /sidebarFormTarget\.value/);
+  assert.match(dialogHost, /@click="confirmDelete\(\)"/);
+});

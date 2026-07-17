@@ -57,5 +57,16 @@ test("menu and dialog mutations resolve immutable accepted targets", () => {
   assert.match(runtimeHost, /activateActionTarget\(target\)/);
   assert.match(runtimeHost, /findSidebarActionTarget\(connectionStore\.treeNodes, target\) \?\? target/);
   assert.match(runtimeHost, /routedRequest\.confirm = async \(\) => \{[\s\S]*?activateActionTarget\(target\)/);
-  assert.match(runtimeHost, /routedController\[key\] = \(\.\.\.args: unknown\[\]\) => \{[\s\S]*?activateActionTarget\(target\)/);
+  assert.match(runtimeHost, /function bindDialogControllerActions\(/);
+  assert.match(runtimeHost, /const target = sidebarFormTarget\.value/);
+  assert.match(runtimeHost, /if \(target\) activateActionTarget\(target\)/);
+});
+
+test("connection delete confirm uses the dialog snapshot and clears open state", () => {
+  const body = functionBody("confirmDelete");
+  assert.match(body, /connectionDeleteTargetSnapshot\.value\.slice\(\)/);
+  assert.doesNotMatch(body, /connectionDeleteTargets\(\)/);
+  assert.match(body, /showDeleteConfirm\.value = false/);
+  assert.match(body, /connectionDeleteTargetSnapshot\.value = \[\]/);
+  assert.match(body, /removeConnections\(connectionIds\)/);
 });

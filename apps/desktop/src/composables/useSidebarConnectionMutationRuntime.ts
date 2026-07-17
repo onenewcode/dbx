@@ -86,7 +86,9 @@ export function useSidebarConnectionMutationRuntime(options: SidebarConnectionMu
   }
 
   async function confirmDelete() {
-    const targets = connectionDeleteTargets();
+    const targets = connectionDeleteTargetSnapshot.value.slice();
+    showDeleteConfirm.value = false;
+    connectionDeleteTargetSnapshot.value = [];
     if (!targets.length) return;
     const connectionIds = targets.map((target) => target.connectionId);
     try {

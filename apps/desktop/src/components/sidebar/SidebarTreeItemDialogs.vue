@@ -163,14 +163,7 @@ watch(
       </p>
       <DialogFooter>
         <Button variant="outline" @click="showDeleteConfirm = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button
-          variant="destructive"
-          @click="
-            showDeleteConfirm = false;
-            confirmDelete();
-          "
-          >{{ connectionDeleteMenuLabel() }}</Button
-        >
+        <Button variant="destructive" @click="confirmDelete()">{{ connectionDeleteMenuLabel() }}</Button>
       </DialogFooter>
     </DialogContent>
   </Dialog>

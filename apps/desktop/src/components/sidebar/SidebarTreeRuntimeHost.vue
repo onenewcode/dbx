@@ -401,22 +401,17 @@ function claimTreeItemDialogOwnership() {
 }
 
 function routeTreeItemDialogController() {
+  // Reuse the cached reactive controller. Cloning/spreading it unwraps nested
+  // module-level refs (e.g. showDeleteConfirm) into disconnected plain values.
   const controller = getTreeItemDialogController();
   const target = createSidebarActionTarget(activeNode.value);
   sidebarFormTarget.value = target;
-  const routedController = reactive<Record<string, any>>({ ...controller, node: target });
-  for (const [key, value] of Object.entries(controller)) {
-    if (typeof value !== "function") continue;
-    routedController[key] = (...args: unknown[]) => {
-      activateActionTarget(target);
-      return value(...args);
-    };
-  }
-  routedController.pasteTableDataCopySupported = pasteTableDataCopySupported.value;
-  routedController.canSetCreateDatabaseCharset = canSetCreateDatabaseCharset.value;
-  routedController.canEditDatabaseCharsetCollation = canEditDatabaseCharsetCollation.value;
-  routedController.canEditDatabaseComment = canEditDatabaseComment.value;
-  emit("open-dialog-controller", routedController);
+  controller.node = target;
+  controller.pasteTableDataCopySupported = pasteTableDataCopySupported.value;
+  controller.canSetCreateDatabaseCharset = canSetCreateDatabaseCharset.value;
+  controller.canEditDatabaseCharsetCollation = canEditDatabaseCharsetCollation.value;
+  controller.canEditDatabaseComment = canEditDatabaseComment.value;
+  emit("open-dialog-controller", controller);
 }
 
 const sidebarTreeContext = inject(sidebarTreeContextKey, null);
@@ -3229,16 +3224,34 @@ function databaseSpecificDialogCapabilities() {
   };
 }
 
+function bindDialogControllerActions(capabilities: Record<string, unknown>): Record<string, unknown> {
+  const bound: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(capabilities)) {
+    if (typeof value !== "function") {
+      bound[key] = value;
+      continue;
+    }
+    bound[key] = (...args: unknown[]) => {
+      const target = sidebarFormTarget.value;
+      if (target) activateActionTarget(target);
+      return (value as (...inner: unknown[]) => unknown)(...args);
+    };
+  }
+  return bound;
+}
+
 function getTreeItemDialogController(): Record<string, any> {
   if (treeItemDialogController) return treeItemDialogController;
   treeItemDialogController = reactive<Record<string, any>>({
     node: createSidebarActionTarget(activeNode.value),
     t,
     highlight,
-    ...connectionDialogCapabilities(),
-    ...objectDialogCapabilities(),
-    ...databaseDialogCapabilities(),
-    ...databaseSpecificDialogCapabilities(),
+    ...bindDialogControllerActions({
+      ...connectionDialogCapabilities(),
+      ...objectDialogCapabilities(),
+      ...databaseDialogCapabilities(),
+      ...databaseSpecificDialogCapabilities(),
+    }),
   });
   return treeItemDialogController;
 }
