@@ -319,9 +319,18 @@ pub async fn mongo_insert_documents(
     database: String,
     collection: String,
     docs_json: String,
+    options_json: Option<String>,
 ) -> Result<u64, String> {
     ensure_connection_writable(&state, &connection_id, "Insert").await?;
-    dbx_core::mongo_ops::mongo_insert_documents_core(&state, &connection_id, &database, &collection, &docs_json).await
+    dbx_core::mongo_ops::mongo_insert_documents_with_options_core(
+        &state,
+        &connection_id,
+        &database,
+        &collection,
+        &docs_json,
+        options_json.as_deref(),
+    )
+    .await
 }
 
 #[tauri::command]

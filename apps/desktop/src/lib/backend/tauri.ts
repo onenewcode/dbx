@@ -1934,8 +1934,8 @@ export async function documentInsertDocument(connectionId: string, database: str
   return invoke("document_insert_document", { connectionId, database, collection, docJson, routing });
 }
 
-export async function mongoInsertDocuments(connectionId: string, database: string, collection: string, docsJson: string): Promise<{ affected_rows: number }> {
-  const affectedRows = await invoke<number>("mongo_insert_documents", { connectionId, database, collection, docsJson });
+export async function mongoInsertDocuments(connectionId: string, database: string, collection: string, docsJson: string, optionsJson?: string): Promise<{ affected_rows: number }> {
+  const affectedRows = await invoke<number>("mongo_insert_documents", { connectionId, database, collection, docsJson, optionsJson });
   return { affected_rows: affectedRows };
 }
 

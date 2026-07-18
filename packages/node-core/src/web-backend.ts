@@ -377,6 +377,7 @@ async function executeMongoWrite(config: ConnectionConfig, command: MongoWriteCo
         database: config.database || "",
         collection: command.collection,
         docsJson: command.docsJson,
+        optionsJson: command.options,
       }),
     });
     const result = (await res.json()) as { affected_rows: number };

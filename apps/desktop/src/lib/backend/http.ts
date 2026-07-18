@@ -2164,8 +2164,8 @@ export async function documentInsertDocument(connectionId: string, database: str
   return post("/api/document-store/insert-document", { connectionId, database, collection, docJson, routing });
 }
 
-export async function mongoInsertDocuments(connectionId: string, database: string, collection: string, docsJson: string): Promise<{ affected_rows: number }> {
-  return post("/api/mongo/insert-documents", { connectionId, database, collection, docsJson });
+export async function mongoInsertDocuments(connectionId: string, database: string, collection: string, docsJson: string, optionsJson?: string): Promise<{ affected_rows: number }> {
+  return post("/api/mongo/insert-documents", { connectionId, database, collection, docsJson, optionsJson });
 }
 
 export async function mongoUpdateDocument(connectionId: string, database: string, collection: string, id: string, docJson: string, routing?: string): Promise<number> {

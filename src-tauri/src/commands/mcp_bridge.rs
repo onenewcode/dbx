@@ -144,6 +144,7 @@ struct MongoInsertDocumentsRequest {
     database: Option<String>,
     collection: String,
     docs_json: String,
+    options_json: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -806,12 +807,13 @@ async fn handle_mongo_insert_documents_data(state: &Arc<AppState>, body: &str, s
         respond_error(stream, "403 Forbidden", &e).await;
         return;
     }
-    match dbx_core::mongo_ops::mongo_insert_documents_core(
+    match dbx_core::mongo_ops::mongo_insert_documents_with_options_core(
         state,
         &connection_id,
         &database,
         &req.collection,
         &req.docs_json,
+        req.options_json.as_deref(),
     )
     .await
     {

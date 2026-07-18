@@ -295,6 +295,53 @@ test("parseMongoWriteCommand accepts supported write commands", () => {
   });
 });
 
+test("parseMongoWriteCommand accepts legacy insert commands", () => {
+  assert.deepEqual(
+    parseMongoWriteCommand(`db.getCollection("accounting_reconciliations").insert({
+    "accountId": 999,
+    "status": "done"
+  });`),
+    {
+      kind: "insert",
+      collection: "accounting_reconciliations",
+      docsJson: '{\n    "accountId": 999,\n    "status": "done"\n  }',
+    },
+  );
+  assert.deepEqual(parseMongoWriteCommand('db.projects.insert([{name: "Ada"}, {name: "Grace"}], {ordered: false})'), {
+    kind: "insert",
+    collection: "projects",
+    docsJson: '[{"name": "Ada"}, {"name": "Grace"}]',
+    options: '{"ordered": false}',
+  });
+  assert.deepEqual(parseMongoWriteCommand('db.projects.insertOne({ name: "Ada" }, { writeConcern: { w: "majority" } })'), {
+    kind: "insert",
+    collection: "projects",
+    docsJson: '{ "name": "Ada" }',
+    options: '{ "writeConcern": { "w": "majority" } }',
+  });
+  assert.deepEqual(parseMongoWriteCommand('db.projects.insertMany([{ name: "Ada" }], { ordered: false })'), {
+    kind: "insert",
+    collection: "projects",
+    docsJson: '[{ "name": "Ada" }]',
+    options: '{ "ordered": false }',
+  });
+  assert.equal(parseMongoWriteCommand("db.projects.insert()"), null);
+  assert.equal(parseMongoWriteCommand("db.projects.insert(null)"), null);
+  assert.equal(parseMongoWriteCommand("db.projects.insert(42)"), null);
+  assert.equal(parseMongoWriteCommand("db.projects.insert([])"), null);
+  assert.equal(parseMongoWriteCommand("db.projects.insert([{}, 1])"), null);
+  assert.equal(parseMongoWriteCommand("db.projects.insert({}, null)"), null);
+  assert.equal(parseMongoWriteCommand("db.projects.insert({}, [])"), null);
+  assert.equal(parseMongoWriteCommand("db.projects.insert({}, {}, {})"), null);
+  assert.equal(parseMongoWriteCommand("db.projects.insertOne([])"), null);
+  assert.equal(parseMongoWriteCommand("db.projects.insertOne({}, null)"), null);
+  assert.equal(parseMongoWriteCommand("db.projects.insertOne({}, {}, {})"), null);
+  assert.equal(parseMongoWriteCommand("db.projects.insertMany([])"), null);
+  assert.equal(parseMongoWriteCommand("db.projects.insertMany([{}, 1])"), null);
+  assert.equal(parseMongoWriteCommand("db.projects.insertMany([{}], [])"), null);
+  assert.equal(parseMongoWriteCommand("db.projects.insertMany([{}], {}, {})"), null);
+});
+
 test("parseMongoWriteCommand rejects invalid dropIndex and dropIndexes commands", () => {
   assert.equal(parseMongoWriteCommand("db.projects.dropIndex()"), null);
   assert.equal(parseMongoWriteCommand('db.projects.dropIndex("*")'), null);

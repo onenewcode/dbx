@@ -16,16 +16,16 @@ import {
   findMatchingParen,
   normalizeJsonArgument,
   parseCollectionMethodTarget,
+  parseMongoDocumentArgument,
+  parseMongoDocumentArrayArgument,
+  parseMongoInsertDocumentsArgument,
   parseMongoAggregateCommand,
+  parseMongoObjectArgument,
   splitTopLevel,
   type MongoAggregateCommand,
 } from "@dbx-app/mongo-shell";
 
-export {
-  describeMongoCommandParseFailure,
-  parseMongoAggregateCommand,
-  MONGO_SHELL_COMMAND_HINT,
-} from "@dbx-app/mongo-shell";
+export { describeMongoCommandParseFailure, parseMongoAggregateCommand, MONGO_SHELL_COMMAND_HINT } from "@dbx-app/mongo-shell";
 export type { MongoAggregateCommand } from "@dbx-app/mongo-shell";
 
 export interface TableInfo {
@@ -1270,6 +1270,7 @@ async function executeMongoWrite(config: ConnectionConfig, command: MongoWriteCo
       database: config.database || "",
       collection: command.collection,
       docs_json: command.docsJson,
+      options_json: command.options,
     });
     return { affectedRows: result.affected_rows };
   }
@@ -1458,7 +1459,7 @@ interface MongoCollectionStatsCommand {
 }
 
 export type MongoWriteCommand =
-  | { kind: "insert"; collection: string; docsJson: string }
+  | { kind: "insert"; collection: string; docsJson: string; options?: string }
   | { kind: "update"; collection: string; filter: string; update: string; options?: string; many: boolean }
   | { kind: "delete"; collection: string; filter: string; many: boolean }
   | { kind: "createIndex"; collection: string; keys: string; options?: string }
@@ -1599,18 +1600,34 @@ export function parseMongoWriteCommand(input: string): MongoWriteCommand | null 
   const insertOne = parseCollectionMethodTarget(source, "insertOne");
   if (insertOne) {
     const args = parseMethodArgs(source, insertOne.methodCallIndex);
-    if (!args || args.length !== 1) return null;
-    const doc = normalizeJsonArgument(args[0]);
-    return doc ? { kind: "insert", collection: insertOne.collection, docsJson: doc } : null;
+    if (!args || args.length < 1 || args.length > 2) return null;
+    const doc = parseMongoDocumentArgument(args[0]);
+    if (!doc) return null;
+    const options = args[1]?.trim() ? parseMongoObjectArgument(args[1]) : undefined;
+    if (args[1]?.trim() && !options) return null;
+    return { kind: "insert", collection: insertOne.collection, docsJson: doc, ...(options ? { options } : {}) };
   }
 
   const insertMany = parseCollectionMethodTarget(source, "insertMany");
   if (insertMany) {
     const args = parseMethodArgs(source, insertMany.methodCallIndex);
-    if (!args || args.length !== 1) return null;
-    const docs = normalizeJsonArgument(args[0]);
+    if (!args || args.length < 1 || args.length > 2) return null;
+    const docs = parseMongoDocumentArrayArgument(args[0]);
     if (!docs) return null;
-    return Array.isArray(JSON.parse(docs)) ? { kind: "insert", collection: insertMany.collection, docsJson: docs } : null;
+    const options = args[1]?.trim() ? parseMongoObjectArgument(args[1]) : undefined;
+    if (args[1]?.trim() && !options) return null;
+    return { kind: "insert", collection: insertMany.collection, docsJson: docs, ...(options ? { options } : {}) };
+  }
+
+  const insert = parseCollectionMethodTarget(source, "insert");
+  if (insert) {
+    const args = parseMethodArgs(source, insert.methodCallIndex);
+    if (!args || args.length < 1 || args.length > 2) return null;
+    const docs = parseMongoInsertDocumentsArgument(args[0]);
+    if (!docs) return null;
+    const options = args[1]?.trim() ? parseMongoObjectArgument(args[1]) : undefined;
+    if (args[1]?.trim() && !options) return null;
+    return { kind: "insert", collection: insert.collection, docsJson: docs, ...(options ? { options } : {}) };
   }
 
   for (const method of ["updateOne", "updateMany"] as const) {

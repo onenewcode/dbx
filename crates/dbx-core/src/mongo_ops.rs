@@ -352,10 +352,23 @@ pub async fn mongo_insert_documents_core(
     collection: &str,
     docs_json: &str,
 ) -> Result<u64, String> {
+    mongo_insert_documents_with_options_core(state, connection_id, database, collection, docs_json, None).await
+}
+
+pub async fn mongo_insert_documents_with_options_core(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    collection: &str,
+    docs_json: &str,
+    options_json: Option<&str>,
+) -> Result<u64, String> {
     ensure_document_pool(state, connection_id).await?;
     let connections = state.connections.read().await;
     match connections.get(connection_id).ok_or("Not found")? {
-        PoolKind::MongoDb(client) => mongo_driver::insert_documents(client, database, collection, docs_json).await,
+        PoolKind::MongoDb(client) => {
+            mongo_driver::insert_documents_with_options(client, database, collection, docs_json, options_json).await
+        }
         PoolKind::Agent(_) => Err("MongoDB legacy agent does not support bulk insertMany/insertOne writes".to_string()),
         _ => Err("Not a MongoDB connection".to_string()),
     }

@@ -32,18 +32,48 @@ export function parseMongoObjectArgument(arg: string | undefined): string | null
   }
 }
 
-export function parseCollectionMethodTarget(
-  source: string,
-  method: string,
-): { collection: string; methodCallIndex: number } | null {
+/** Single document accepted by MongoDB insertOne commands. */
+export function parseMongoDocumentArgument(arg: string | undefined): string | null {
+  if (!arg?.trim()) return null;
+  const normalized = normalizeJsonArgument(arg);
+  if (!normalized) return null;
+  try {
+    const value = JSON.parse(normalized) as unknown;
+    return isMongoDocument(value) ? normalized : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Non-empty document array accepted by MongoDB insertMany commands. */
+export function parseMongoDocumentArrayArgument(arg: string | undefined): string | null {
+  if (!arg?.trim()) return null;
+  const normalized = normalizeJsonArgument(arg);
+  if (!normalized) return null;
+  try {
+    const value = JSON.parse(normalized) as unknown;
+    return Array.isArray(value) && value.length > 0 && value.every(isMongoDocument) ? normalized : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Document or non-empty document array accepted by MongoDB insert commands. */
+export function parseMongoInsertDocumentsArgument(arg: string | undefined): string | null {
+  return parseMongoDocumentArgument(arg) ?? parseMongoDocumentArrayArgument(arg);
+}
+
+function isMongoDocument(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+export function parseCollectionMethodTarget(source: string, method: string): { collection: string; methodCallIndex: number } | null {
   const escapedMethod = escapeRegExp(method);
   const direct = new RegExp(`^db\\s*\\.\\s*([A-Za-z_$][\\w$]*)\\s*\\.\\s*${escapedMethod}\\s*\\(`).exec(source);
   if (direct) {
     return { collection: direct[1]!, methodCallIndex: findChainedMethodCallIndex(source, method) };
   }
-  const getCollection = new RegExp(
-    `^db\\s*\\.\\s*getCollection\\s*\\(\\s*(["'])(.*?)\\1\\s*\\)\\s*\\.\\s*${escapedMethod}\\s*\\(`,
-  ).exec(source);
+  const getCollection = new RegExp(`^db\\s*\\.\\s*getCollection\\s*\\(\\s*(["'])(.*?)\\1\\s*\\)\\s*\\.\\s*${escapedMethod}\\s*\\(`).exec(source);
   if (getCollection) {
     return { collection: getCollection[2]!, methodCallIndex: findChainedMethodCallIndex(source, method) };
   }
@@ -213,8 +243,7 @@ function shouldQuoteObjectKey(source: string, index: number): boolean {
 }
 
 function replaceMongoShellConstructors(source: string): string {
-  const constructor =
-    /^(ObjectId|NumberLong|ISODate)\s*\(\s*["']([^"']+)["']\s*\)|^(ObjectId|NumberLong)\s*\(\s*(-?\d+)\s*\)|^(?:new\s+Date)\s*\(\s*["']([^"']+)["']\s*\)/;
+  const constructor = /^(ObjectId|NumberLong|ISODate)\s*\(\s*["']([^"']+)["']\s*\)|^(ObjectId|NumberLong)\s*\(\s*(-?\d+)\s*\)|^(?:new\s+Date)\s*\(\s*["']([^"']+)["']\s*\)/;
   let result = "";
   let index = 0;
   while (index < source.length) {
@@ -237,12 +266,7 @@ function replaceMongoShellConstructors(source: string): string {
       continue;
     }
     if (match[1]) {
-      result +=
-        match[1] === "ObjectId"
-          ? `{"$oid":"${match[2]}"}`
-          : match[1] === "NumberLong"
-            ? `{"$numberLong":"${match[2]}"}`
-            : `{"$date":"${match[2]}"}`;
+      result += match[1] === "ObjectId" ? `{"$oid":"${match[2]}"}` : match[1] === "NumberLong" ? `{"$numberLong":"${match[2]}"}` : `{"$date":"${match[2]}"}`;
     } else if (match[3]) {
       result += match[3] === "NumberLong" ? `{"$numberLong":"${match[4]}"}` : `{"$oid":"${match[4]}"}`;
     } else {

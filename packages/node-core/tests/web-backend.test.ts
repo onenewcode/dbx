@@ -6,6 +6,7 @@ import { executeQuery, loadConnections, resetWebAuthForTests } from "../src/web-
 const originalFetch = globalThis.fetch;
 const originalWebUrl = process.env.DBX_WEB_URL;
 const originalWebPassword = process.env.DBX_WEB_PASSWORD;
+const originalAllowWrites = process.env.DBX_MCP_ALLOW_WRITES;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
@@ -13,6 +14,8 @@ afterEach(() => {
   else process.env.DBX_WEB_URL = originalWebUrl;
   if (originalWebPassword === undefined) delete process.env.DBX_WEB_PASSWORD;
   else process.env.DBX_WEB_PASSWORD = originalWebPassword;
+  if (originalAllowWrites === undefined) delete process.env.DBX_MCP_ALLOW_WRITES;
+  else process.env.DBX_MCP_ALLOW_WRITES = originalAllowWrites;
   resetWebAuthForTests();
 });
 
@@ -98,11 +101,7 @@ test("web backend logs in with DBX_WEB_PASSWORD and sends the session cookie", a
   assert.equal(connections[0]?.name, "local");
   assert.deepEqual(
     calls.map((call) => call.url),
-    [
-      "http://127.0.0.1:4224/api/auth/check",
-      "http://127.0.0.1:4224/api/auth/login",
-      "http://127.0.0.1:4224/api/connection/list",
-    ],
+    ["http://127.0.0.1:4224/api/auth/check", "http://127.0.0.1:4224/api/auth/login", "http://127.0.0.1:4224/api/connection/list"],
   );
 });
 
@@ -174,10 +173,56 @@ test("web backend routes MongoDB count commands through count-documents", async 
   });
   assert.deepEqual(
     calls.map((call) => call.url),
-    [
-      "http://127.0.0.1:4224/api/auth/check",
-      "http://127.0.0.1:4224/api/connection/connect",
-      "http://127.0.0.1:4224/api/mongo/count-documents",
-    ],
+    ["http://127.0.0.1:4224/api/auth/check", "http://127.0.0.1:4224/api/connection/connect", "http://127.0.0.1:4224/api/mongo/count-documents"],
+  );
+});
+
+test("web backend forwards legacy MongoDB insert options", async () => {
+  process.env.DBX_WEB_URL = "http://127.0.0.1:4224";
+  process.env.DBX_MCP_ALLOW_WRITES = "1";
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  globalThis.fetch = (async (input, init) => {
+    const url = String(input);
+    calls.push({ url, init });
+    if (url.endsWith("/api/auth/check")) {
+      return jsonResponse({ authenticated: true, required: false, setup_required: false });
+    }
+    if (url.endsWith("/api/connection/connect")) {
+      return jsonResponse({ ok: true });
+    }
+    if (url.endsWith("/api/mongo/insert-documents")) {
+      assert.equal(init?.method, "POST");
+      assert.deepEqual(JSON.parse(String(init?.body)), {
+        connectionId: "mongo-web",
+        database: "app",
+        collection: "projects",
+        docsJson: '[{ "name": "Ada" }, { "name": "Grace" }]',
+        optionsJson: '{ "ordered": false }',
+      });
+      return jsonResponse({ affected_rows: 2 });
+    }
+    throw new Error(`unexpected request: ${url}`);
+  }) as typeof fetch;
+
+  const result = await executeQuery(
+    {
+      id: "mongo-web",
+      name: "mongo-web",
+      db_type: "mongodb",
+      host: "127.0.0.1",
+      port: 27017,
+      username: "",
+      password: "",
+      database: "app",
+      ssh_enabled: false,
+      ssl: false,
+    },
+    'db.projects.insert([{ name: "Ada" }, { name: "Grace" }], { ordered: false })',
+  );
+
+  assert.deepEqual(result, { columns: [], rows: [], row_count: 2 });
+  assert.deepEqual(
+    calls.map((call) => call.url),
+    ["http://127.0.0.1:4224/api/auth/check", "http://127.0.0.1:4224/api/connection/connect", "http://127.0.0.1:4224/api/mongo/insert-documents"],
   );
 });

@@ -1,6 +1,6 @@
 use mongodb::{
     bson::{doc, oid::ObjectId, Bson, DateTime, Document},
-    options::{ClientOptions, GridFsBucketOptions, IndexOptions, UpdateModifications},
+    options::{Acknowledgment, ClientOptions, GridFsBucketOptions, IndexOptions, UpdateModifications, WriteConcern},
     Client, Cursor, Database, IndexModel,
 };
 use serde::{Deserialize, Serialize};
@@ -1030,20 +1030,87 @@ pub async fn insert_documents(
     collection: &str,
     docs_json: &str,
 ) -> Result<u64, String> {
+    insert_documents_with_options(client, database, collection, docs_json, None).await
+}
+
+pub async fn insert_documents_with_options(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    docs_json: &str,
+    options_json: Option<&str>,
+) -> Result<u64, String> {
+    let docs = parse_mongo_insert_documents(docs_json)?;
+    let options = parse_mongo_insert_options(options_json)?;
+    let col = client.database(database).collection::<Document>(collection);
+    let mut action = col.insert_many(docs);
+    if let Some(ordered) = options.ordered {
+        action = action.ordered(ordered);
+    }
+    if let Some(write_concern) = options.write_concern {
+        action = action.write_concern(write_concern.into());
+    }
+    let result = action.await.map_err(|e| e.to_string())?;
+    Ok(result.inserted_ids.len() as u64)
+}
+
+fn parse_mongo_insert_documents(docs_json: &str) -> Result<Vec<Document>, String> {
     let json: serde_json::Value = serde_json::from_str(docs_json).map_err(|e| format!("Invalid JSON: {e}"))?;
-    let docs = match json {
+    match json {
+        serde_json::Value::Array(values) if values.is_empty() => {
+            Err("MongoDB insert requires a non-empty document array".to_string())
+        }
         serde_json::Value::Array(values) => values
             .into_iter()
             .map(|value| json_object_to_document(&value).map_err(|e| format!("Invalid document: {e}")))
-            .collect::<Result<Vec<Document>, String>>()?,
-        value => vec![json_object_to_document(&value).map_err(|e| format!("Invalid document: {e}"))?],
-    };
-    if docs.is_empty() {
-        return Ok(0);
+            .collect::<Result<Vec<Document>, String>>(),
+        value => Ok(vec![json_object_to_document(&value).map_err(|e| format!("Invalid document: {e}"))?]),
     }
-    let col = client.database(database).collection::<Document>(collection);
-    let result = col.insert_many(docs).await.map_err(|e| e.to_string())?;
-    Ok(result.inserted_ids.len() as u64)
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct MongoInsertOptions {
+    ordered: Option<bool>,
+    write_concern: Option<MongoWriteConcern>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MongoWriteConcern {
+    w: Option<Acknowledgment>,
+    #[serde(rename = "wtimeout", alias = "wtimeoutMS")]
+    w_timeout_ms: Option<u64>,
+    #[serde(rename = "j", alias = "journal")]
+    journal: Option<bool>,
+}
+
+impl From<MongoWriteConcern> for WriteConcern {
+    fn from(value: MongoWriteConcern) -> Self {
+        let mut write_concern = WriteConcern::default();
+        write_concern.w = value.w;
+        write_concern.w_timeout = value.w_timeout_ms.map(Duration::from_millis);
+        write_concern.journal = value.journal;
+        write_concern
+    }
+}
+
+fn parse_mongo_insert_options(options_json: Option<&str>) -> Result<MongoInsertOptions, String> {
+    match options_json.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(raw) => {
+            let options: MongoInsertOptions =
+                serde_json::from_str(raw).map_err(|e| format!("Invalid insert options: {e}"))?;
+            if options
+                .write_concern
+                .as_ref()
+                .is_some_and(|write_concern| matches!(write_concern.w.as_ref(), Some(Acknowledgment::Nodes(0))))
+            {
+                return Err("MongoDB insert does not support unacknowledged writeConcern { w: 0 }".to_string());
+            }
+            Ok(options)
+        }
+        None => Ok(MongoInsertOptions::default()),
+    }
 }
 
 pub async fn insert_documents_extended_json(
@@ -1817,6 +1884,33 @@ fn expand_object_id_string_array(items: &[serde_json::Value]) -> Bson {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_insert_documents_and_options() {
+        assert_eq!(parse_mongo_insert_documents(r#"{"name":"Ada"}"#).unwrap().len(), 1);
+        assert_eq!(parse_mongo_insert_documents(r#"[{"name":"Ada"},{"name":"Grace"}]"#).unwrap().len(), 2);
+        assert!(parse_mongo_insert_documents("null").is_err());
+        assert!(parse_mongo_insert_documents("[]").is_err());
+        assert!(parse_mongo_insert_documents(r#"[{"name":"Ada"},1]"#).is_err());
+
+        let options = parse_mongo_insert_options(Some(
+            r#"{"ordered":false,"writeConcern":{"w":"majority","wtimeout":1000,"j":true}}"#,
+        ))
+        .unwrap();
+        assert_eq!(options.ordered, Some(false));
+        let write_concern = options.write_concern.unwrap();
+        assert!(matches!(write_concern.w, Some(Acknowledgment::Majority)));
+        assert_eq!(write_concern.w_timeout_ms, Some(1000));
+        assert_eq!(write_concern.journal, Some(true));
+        assert!(
+            parse_mongo_insert_options(Some(r#"{"writeConcern":{"w":1,"wtimeoutMS":1000,"journal":false}}"#)).is_ok()
+        );
+        assert!(parse_mongo_insert_options(Some(r#"{"ordered":"false"}"#)).is_err());
+        assert!(parse_mongo_insert_options(Some(r#"{"writeConcern":{"w":0}}"#)).is_err());
+        assert!(parse_mongo_insert_options(Some(r#"{"writeConcern":{"w":0,"j":true}}"#)).is_err());
+        assert!(parse_mongo_insert_options(Some(r#"{"writeConcern":{"w":1,"journla":true}}"#)).is_err());
+        assert!(parse_mongo_insert_options(Some(r#"{"bypassDocumentValidation":true}"#)).is_err());
+    }
 
     #[test]
     fn parse_aggregate_options_document_keeps_official_fields() {

@@ -3327,6 +3327,58 @@ test("mongo dropIndexes execution returns dropped index names", async () => {
   }
 });
 
+test("mongo legacy insert forwards documents and options to the write endpoint", async () => {
+  const restoreStorage = installMemoryStorage();
+  setActivePinia(createPinia());
+  const connectionStore = useConnectionStore();
+  const store = useQueryStore();
+  const originalFetch = globalThis.fetch;
+  const insertBodies: any[] = [];
+
+  connectionStore.addEphemeralConnection({
+    ...conn("mongo-1"),
+    db_type: "mongodb",
+    port: 27017,
+  });
+
+  globalThis.fetch = withConnectionHealthMock(async (input, init) => {
+    const url = String(input);
+    if (url === "/api/mongo/insert-documents") {
+      insertBodies.push(JSON.parse(String(init?.body ?? "{}")));
+      return new Response(JSON.stringify({ affected_rows: 2 }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    return new Response("unexpected request", { status: 500 });
+  });
+
+  try {
+    const tabId = store.createTab("mongo-1", "accounting", "Query", "query", "");
+    await store.executeTabSql(
+      tabId,
+      `db.getCollection("accounting_reconciliations").insert(
+        [{ accountId: 999 }, { accountId: 1000 }],
+        { ordered: false }
+      );`,
+    );
+    const tab = store.tabs.find((item) => item.id === tabId);
+
+    assert.equal(insertBodies.length, 1);
+    assert.deepEqual(insertBodies[0], {
+      connectionId: "mongo-1",
+      database: "accounting",
+      collection: "accounting_reconciliations",
+      docsJson: '[{ "accountId": 999 }, { "accountId": 1000 }]',
+      optionsJson: '{ "ordered": false }',
+    });
+    assert.equal(tab?.result?.affected_rows, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+    restoreStorage();
+  }
+});
+
 test("mongo multi-command execution runs writes sequentially and keeps grouped results", async () => {
   const restoreStorage = installMemoryStorage();
   setActivePinia(createPinia());

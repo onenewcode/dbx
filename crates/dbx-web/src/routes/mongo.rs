@@ -178,6 +178,7 @@ pub struct MongoInsertDocumentsRequest {
     pub database: String,
     pub collection: String,
     pub docs_json: String,
+    pub options_json: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -526,12 +527,13 @@ pub async fn insert_documents(
     Json(req): Json<MongoInsertDocumentsRequest>,
 ) -> Result<Json<serde_json::Value>, AppError> {
     ensure_writable(&state.app, &req.connection_id, "Insert").await?;
-    let result = dbx_core::mongo_ops::mongo_insert_documents_core(
+    let result = dbx_core::mongo_ops::mongo_insert_documents_with_options_core(
         &state.app,
         &req.connection_id,
         &req.database,
         &req.collection,
         &req.docs_json,
+        req.options_json.as_deref(),
     )
     .await
     .map_err(AppError)?;

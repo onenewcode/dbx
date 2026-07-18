@@ -288,6 +288,55 @@ test("parseMongoWriteCommand accepts unquoted insert and update commands", () =>
   });
 });
 
+test("parseMongoWriteCommand accepts legacy insert commands", () => {
+  const issueCommand = parseMongoCommand(`db.getCollection("accounting_reconciliations").insert({
+    "accountId": 999,
+    "status": "done"
+  });`);
+  assert.deepEqual(issueCommand?.command, {
+    kind: "insert",
+    collection: "accounting_reconciliations",
+    docsJson: '{\n    "accountId": 999,\n    "status": "done"\n  }',
+  });
+
+  const batch = parseMongoWriteCommand("db.products.insert([{name: 'Ada'}, {name: 'Grace'}], {ordered: false})");
+  assert.deepEqual(batch, {
+    kind: "insert",
+    collection: "products",
+    docsJson: '[{"name": "Ada"}, {"name": "Grace"}]',
+    options: '{"ordered": false}',
+  });
+
+  assert.deepEqual(parseMongoWriteCommand('db.products.insertOne({ name: "Ada" }, { writeConcern: { w: "majority" } })'), {
+    kind: "insert",
+    collection: "products",
+    docsJson: '{ "name": "Ada" }',
+    options: '{ "writeConcern": { "w": "majority" } }',
+  });
+  assert.deepEqual(parseMongoWriteCommand('db.products.insertMany([{ name: "Ada" }], { ordered: false })'), {
+    kind: "insert",
+    collection: "products",
+    docsJson: '[{ "name": "Ada" }]',
+    options: '{ "ordered": false }',
+  });
+
+  assert.equal(parseMongoWriteCommand("db.products.insert()"), null);
+  assert.equal(parseMongoWriteCommand("db.products.insert(null)"), null);
+  assert.equal(parseMongoWriteCommand("db.products.insert(42)"), null);
+  assert.equal(parseMongoWriteCommand("db.products.insert([])"), null);
+  assert.equal(parseMongoWriteCommand("db.products.insert([{}, 1])"), null);
+  assert.equal(parseMongoWriteCommand("db.products.insert({}, null)"), null);
+  assert.equal(parseMongoWriteCommand("db.products.insert({}, [])"), null);
+  assert.equal(parseMongoWriteCommand("db.products.insert({}, {}, {})"), null);
+  assert.equal(parseMongoWriteCommand("db.products.insertOne([])"), null);
+  assert.equal(parseMongoWriteCommand("db.products.insertOne({}, null)"), null);
+  assert.equal(parseMongoWriteCommand("db.products.insertOne({}, {}, {})"), null);
+  assert.equal(parseMongoWriteCommand("db.products.insertMany([])"), null);
+  assert.equal(parseMongoWriteCommand("db.products.insertMany([{}, 1])"), null);
+  assert.equal(parseMongoWriteCommand("db.products.insertMany([{}], [])"), null);
+  assert.equal(parseMongoWriteCommand("db.products.insertMany([{}], {}, {})"), null);
+});
+
 test("parseMongoWriteCommand accepts updateMany arrayFilters options", () => {
   assert.deepEqual(
     parseMongoWriteCommand(`db.issue_3231.updateMany(
