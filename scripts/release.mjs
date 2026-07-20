@@ -10,23 +10,20 @@ const PACKAGE_TAG_PREFIX = "packages-v";
 const AGENT_TAG_PREFIX = "agents-v";
 const APP_TAG_PREFIX = "v";
 const PACKAGE_RELEASE_PATHS = [
-  "packages/mongo-shell/src/",
-  "packages/mongo-shell/package.json",
-  "packages/mongo-shell/tsconfig.json",
-  "packages/node-core/src/",
-  "packages/node-core/README.md",
-  "packages/node-core/package.json",
-  "packages/node-core/tsconfig.json",
   "packages/cli/src/",
   "packages/cli/README.md",
   "packages/cli/package.json",
-  "packages/cli/tsconfig.json",
-  "packages/mcp-server/src/",
+  "packages/cli/bin/",
+  "packages/cli-darwin-arm64/",
+  "packages/cli-darwin-x64/",
+  "packages/cli-linux-arm64-gnu/",
+  "packages/cli-linux-x64-gnu/",
+  "packages/cli-win32-arm64/",
+  "packages/cli-win32-x64/",
   "packages/mcp-server/bin/",
   "packages/mcp-server/README.md",
   "packages/mcp-server/package.json",
   "packages/mcp-server/server.json",
-  "packages/mcp-server/tsconfig.json",
   "packages/mcp-darwin-arm64/",
   "packages/mcp-darwin-x64/",
   "packages/mcp-linux-arm64-gnu/",
@@ -34,6 +31,8 @@ const PACKAGE_RELEASE_PATHS = [
   "packages/mcp-win32-arm64/",
   "packages/mcp-win32-x64/",
   "crates/dbx-mcp/",
+  "crates/dbx-cli/",
+  "crates/dbx-core/src/mongo_shell.rs",
   "Cargo.toml",
   "Cargo.lock",
   ".github/workflows/mcp-release.yml",
@@ -269,8 +268,6 @@ function getLatestPackageVersion() {
   if (tag) return tag.versionText;
 
   const packageVersions = [
-    "packages/mongo-shell/package.json",
-    "packages/node-core/package.json",
     "packages/cli/package.json",
     "packages/mcp-server/package.json",
     "packages/mcp-darwin-arm64/package.json",

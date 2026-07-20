@@ -340,6 +340,13 @@ make docs
 
 The official DBX documentation site lives in `docs/`. If you want to improve the website content or documentation pages, edit the files under `docs/` and run `make docs` to preview the site locally.
 
+For clean, reproducible local database instances, use the versioned Docker Compose recipes under [`deploy/database/`](deploy/database/README.md):
+
+```bash
+make db-list
+make db-verify DB=mysql@8.4
+```
+
 JDBC agent driver development projects live in `agents/`:
 
 ```bash
@@ -370,6 +377,7 @@ The installer will be in `src-tauri/target/release/bundle/`.
 ## Documentation
 
 - [Official docs](https://dbxio.com/en/docs/what-is-dbx) — feature guides and tutorials
+- [Database Test Lab](https://dbxio.com/en/docs/database-lab) — local database recipes for development and verification
 - [Contributing](CONTRIBUTING.md) — how to pick up issues and open PRs
 - [Web API reference](docs/content/docs/web-api.mdx) — HTTP API for Docker/Web deployments
 - [Examples](examples/) — CLI, MCP, Docker, and API samples

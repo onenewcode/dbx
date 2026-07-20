@@ -9,8 +9,8 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::backend::{new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
-use crate::mongo::{self, MongoCommand};
+use crate::backend::{format_query_result, new_connection_config, parse_database_type, ConnectionSummary, DbxBackend};
+use crate::mongo::{self, MongoCommand, MongoSafetyError};
 use dbx_core::{
     db::redis_driver::{classify_command, parse_command_argv, RedisCommandResult, RedisCommandSafety},
     models::connection::DatabaseType,
@@ -262,7 +262,7 @@ impl DbxMcpServer {
                 Err(error) => return error,
             };
             return match self.backend.execute_mongo_command(&connection, &database, &command).await {
-                Ok(result) => text(result),
+                Ok(result) => text(format_query_result(&result, 100)),
                 Err(error) => tool_error("QUERY_ERROR", error),
             };
         }
@@ -644,26 +644,29 @@ fn validate_mongo_command(
         )
     })?;
     let permissions = default_permissions();
-    if command.is_mutating() && !permissions.allow_writes {
-        return Err(tool_error(
-            "SQL_BLOCKED",
-            "MCP MongoDB execution is read-only for this session. Set DBX_MCP_ALLOW_WRITES=1 to allow write commands.",
-        ));
-    }
-    if command.has_empty_filter() && !permissions.allow_dangerous {
-        return Err(tool_error(
-            "SQL_BLOCKED",
-            "MongoDB update/delete commands must include a non-empty filter unless DBX_MCP_ALLOW_DANGEROUS_SQL=1 is set.",
-        ));
-    }
-    if command.is_dangerous() && !permissions.allow_dangerous {
-        return Err(tool_error(
-            "SQL_BLOCKED",
-            "Dangerous MongoDB command is blocked. Set DBX_MCP_ALLOW_DANGEROUS_SQL=1 to allow it.",
-        ));
-    }
-    if command.is_mutating() && is_production_database(connection, database) {
-        return Err(tool_error("PRODUCTION_WRITE_BLOCKED", "MCP cannot execute writes against a production database."));
+    if let Err(error) = mongo::validate_safety(
+        &command,
+        permissions.allow_writes,
+        permissions.allow_dangerous,
+        is_production_database(connection, database),
+    ) {
+        return Err(match error {
+            MongoSafetyError::WritesDisabled => tool_error(
+                "SQL_BLOCKED",
+                "MCP MongoDB execution is read-only for this session. Set DBX_MCP_ALLOW_WRITES=1 to allow write commands.",
+            ),
+            MongoSafetyError::EmptyFilter => tool_error(
+                "SQL_BLOCKED",
+                "MongoDB update/delete commands must include a non-empty filter unless DBX_MCP_ALLOW_DANGEROUS_SQL=1 is set.",
+            ),
+            MongoSafetyError::Dangerous => tool_error(
+                "SQL_BLOCKED",
+                "Dangerous MongoDB command is blocked. Set DBX_MCP_ALLOW_DANGEROUS_SQL=1 to allow it.",
+            ),
+            MongoSafetyError::ProductionWrite => {
+                tool_error("PRODUCTION_WRITE_BLOCKED", "MCP cannot execute writes against a production database.")
+            }
+        });
     }
     Ok(command)
 }

@@ -94,6 +94,20 @@ export type MongoCommand =
 
 export type MongoWriteCommand = Extract<MongoCommand, { kind: MongoWriteKind }>;
 
+export function normalizeRustMongoCommand(raw: Record<string, unknown>): MongoCommand {
+  const command = Object.fromEntries(Object.entries(raw).filter(([, value]) => value !== null)) as Record<string, any>;
+  if (command.kind === "countDocuments") {
+    const { accurate, ...rest } = command;
+    return { ...rest, kind: "countDocuments", mode: accurate ? "accurate" : "legacy" } as MongoCommand;
+  }
+  if (command.kind === "dropIndexes") {
+    const { single, indexes, ...rest } = command;
+    if (single) return { ...rest, kind: "dropIndex", index: indexes } as MongoCommand;
+    return { ...rest, kind: "dropIndexes", ...(indexes ? { indexes } : {}) } as MongoCommand;
+  }
+  return command as MongoCommand;
+}
+
 export interface ParsedMongoCommand {
   text: string;
   command: MongoCommand;

@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { normalizeRustMongoCommand, type MongoCommand } from "@/lib/mongo/mongoShellCommand";
 import type {
   ConnectionConfig,
   ConnectionTestResult,
@@ -16,6 +17,7 @@ import type {
   ObjectSource,
   ObjectSourceKind,
   ColumnInfo,
+  SqlServerColumnMetadata,
   IndexInfo,
   ForeignKeyInfo,
   TriggerInfo,
@@ -786,6 +788,10 @@ export async function listSchemaInfos(connectionId: string, database: string): P
 
 export async function getColumns(connectionId: string, database: string, schema: string, table: string, catalog?: string): Promise<ColumnInfo[]> {
   return invoke("get_columns", { connectionId, database, schema, table, catalog });
+}
+
+export async function getSqlServerColumnMetadata(connectionId: string, database: string, schema: string, table: string): Promise<SqlServerColumnMetadata[]> {
+  return invoke("get_sqlserver_column_metadata", { connectionId, database, schema, table });
 }
 
 export async function listDataTypes(connectionId: string, database: string): Promise<string[]> {
@@ -1858,6 +1864,11 @@ export async function mongoFindOne(connectionId: string, database: string, colle
   return invoke("mongo_find_one", { connectionId, database, collection, filter, projection, options, executionId });
 }
 
+export async function mongoParseShellCommand(source: string): Promise<MongoCommand> {
+  const raw = await invoke<Record<string, unknown>>("mongo_parse_shell_command", { source });
+  return normalizeRustMongoCommand(raw);
+}
+
 export async function documentFindDocuments(connectionId: string, database: string, collection: string, skip: number, limit: number, filter?: string, projection?: string, sort?: string, executionId?: string): Promise<MongoDocumentResult> {
   return invoke("document_find_documents", { connectionId, database, collection, skip, limit, filter, projection, sort, executionId });
 }
@@ -2285,6 +2296,7 @@ export interface DatabaseExportRequest {
   schema: string;
   filePath: string;
   selectedTables?: string[];
+  excludedTables?: string[];
   includeStructure: boolean;
   includeData: boolean;
   includeObjects: boolean;

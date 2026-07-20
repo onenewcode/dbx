@@ -53,6 +53,17 @@ pub trait DbxBackend: Send + Sync {
         arguments: Value,
         permissions: AgentSqlPermissions,
     ) -> ToolResult;
+    async fn execute_query(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        sql: &str,
+        max_rows: Option<usize>,
+        timeout_secs: Option<u64>,
+    ) -> Result<dbx_core::db::QueryResult, String> {
+        let _ = (connection, database, sql, max_rows, timeout_secs);
+        Err("SQL queries are not supported by this backend.".to_string())
+    }
     async fn save_connections(&self, connections: &[ConnectionConfig]) -> Result<(), String>;
     async fn list_tables(
         &self,
@@ -88,7 +99,7 @@ pub trait DbxBackend: Send + Sync {
         connection: &ConnectionConfig,
         database: &str,
         command: &MongoCommand,
-    ) -> Result<String, String> {
+    ) -> Result<dbx_core::db::QueryResult, String> {
         let _ = (connection, database, command);
         Err("MongoDB shell commands are not supported by this backend.".to_string())
     }
@@ -255,6 +266,26 @@ impl DbxBackend for LocalBackend {
         agent_tools::execute_tool(&call, &self.state, &connection.id, database, &connection.db_type, permissions).await
     }
 
+    async fn execute_query(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        sql: &str,
+        max_rows: Option<usize>,
+        timeout_secs: Option<u64>,
+    ) -> Result<dbx_core::db::QueryResult, String> {
+        dbx_core::query::execute_sql_statement_with_options(
+            &self.state,
+            &connection.id,
+            database,
+            sql,
+            None,
+            None,
+            dbx_core::query::QueryExecutionOptions { max_rows, timeout_secs, ..Default::default() },
+        )
+        .await
+    }
+
     async fn save_connections(&self, connections: &[ConnectionConfig]) -> Result<(), String> {
         self.state.storage.save_connections(connections).await?;
         *self.state.configs.write().await =
@@ -303,14 +334,15 @@ impl DbxBackend for LocalBackend {
         connection: &ConnectionConfig,
         database: &str,
         command: &MongoCommand,
-    ) -> Result<String, String> {
+    ) -> Result<dbx_core::db::QueryResult, String> {
         use dbx_core::mongo_ops;
 
         let connection_id = &connection.id;
         match command {
             MongoCommand::Version => mongo_ops::mongo_server_version_core(&self.state, connection_id, database)
                 .await
-                .map(|version| format!("| version |\n| --- |\n| {} |\n\n1 row(s)", escape_markdown_cell(&version))),
+                .map(|version| scalar_query_result("version", Value::String(version))),
+            MongoCommand::Use { database } => Ok(scalar_query_result("database", Value::String(database.clone()))),
             MongoCommand::Find { collection, filter, projection, sort, skip, limit } => {
                 let result = mongo_ops::mongo_find_documents_core(
                     &self.state,
@@ -324,7 +356,20 @@ impl DbxBackend for LocalBackend {
                     sort.as_deref(),
                 )
                 .await?;
-                Ok(format_mongo_documents(&result.documents))
+                Ok(mongo_documents_query_result(result.documents))
+            }
+            MongoCommand::FindOne { collection, filter, projection, options } => {
+                let result = mongo_ops::mongo_find_one_core(
+                    &self.state,
+                    connection_id,
+                    database,
+                    collection,
+                    Some(filter),
+                    projection.as_deref(),
+                    options.as_deref(),
+                )
+                .await?;
+                Ok(mongo_documents_query_result(result.documents))
             }
             MongoCommand::Count { collection, filter, accurate } => {
                 let mode = if *accurate { "accurate" } else { "legacy" };
@@ -337,7 +382,7 @@ impl DbxBackend for LocalBackend {
                     Some(mode),
                 )
                 .await?;
-                Ok(format!("| count |\n| --- |\n| {total} |\n\n1 row(s)"))
+                Ok(scalar_query_result("count", Value::from(total)))
             }
             MongoCommand::Aggregate { collection, pipeline, options } => {
                 let result = mongo_ops::mongo_aggregate_documents_core(
@@ -350,7 +395,7 @@ impl DbxBackend for LocalBackend {
                     options.as_deref(),
                 )
                 .await?;
-                Ok(format_mongo_documents(&result.documents))
+                Ok(mongo_documents_query_result(result.documents))
             }
             MongoCommand::Distinct { collection, field, filter } => {
                 let result = mongo_ops::mongo_distinct_core(
@@ -362,7 +407,7 @@ impl DbxBackend for LocalBackend {
                     filter.as_deref(),
                 )
                 .await?;
-                Ok(format_mongo_documents(&result.documents))
+                Ok(mongo_documents_query_result(result.documents))
             }
             MongoCommand::GetIndexes { collection } => {
                 let result = mongo_ops::mongo_aggregate_documents_core(
@@ -375,7 +420,7 @@ impl DbxBackend for LocalBackend {
                     None,
                 )
                 .await?;
-                Ok(format_mongo_documents(&result.documents))
+                Ok(mongo_documents_query_result(result.documents))
             }
             MongoCommand::CollectionStats { collection, metric, scale } => {
                 let stats = mongo_ops::mongo_collection_stats_core(
@@ -388,7 +433,7 @@ impl DbxBackend for LocalBackend {
                 .await?;
                 let value = serde_json::to_value(stats).map_err(|error| error.to_string())?;
                 if metric == "stats" {
-                    Ok(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()))
+                    Ok(mongo_documents_query_result(vec![value]))
                 } else {
                     let key = match metric.as_str() {
                         "dataSize" => "size",
@@ -397,14 +442,14 @@ impl DbxBackend for LocalBackend {
                         _ => metric,
                     };
                     let metric_value = value.get(key).cloned().unwrap_or(Value::Null);
-                    Ok(format!("| {metric} |\n| --- |\n| {} |\n\n1 row(s)", format_query_cell(&metric_value)))
+                    Ok(scalar_query_result(metric, metric_value))
                 }
             }
             MongoCommand::Insert { collection, documents } => {
                 let affected =
                     mongo_ops::mongo_insert_documents_core(&self.state, connection_id, database, collection, documents)
                         .await?;
-                Ok(format!("Query executed. {affected} row(s) affected."))
+                Ok(affected_query_result(affected))
             }
             MongoCommand::Update { collection, filter, update, options, many } => {
                 let affected = mongo_ops::mongo_update_documents_core(
@@ -418,7 +463,7 @@ impl DbxBackend for LocalBackend {
                     options.as_deref(),
                 )
                 .await?;
-                Ok(format!("Query executed. {affected} row(s) affected."))
+                Ok(affected_query_result(affected))
             }
             MongoCommand::Delete { collection, filter, many } => {
                 let affected = mongo_ops::mongo_delete_documents_core(
@@ -430,7 +475,7 @@ impl DbxBackend for LocalBackend {
                     *many,
                 )
                 .await?;
-                Ok(format!("Query executed. {affected} row(s) affected."))
+                Ok(affected_query_result(affected))
             }
             MongoCommand::CreateIndex { collection, keys, options } => {
                 let name = mongo_ops::mongo_create_index_core(
@@ -442,7 +487,7 @@ impl DbxBackend for LocalBackend {
                     options.as_deref(),
                 )
                 .await?;
-                Ok(format!("| name |\n| --- |\n| {} |\n\n1 row(s)", escape_markdown_cell(&name)))
+                Ok(scalar_query_result("name", Value::String(name)))
             }
             MongoCommand::DropIndexes { collection, indexes, single } => {
                 let result = mongo_ops::mongo_drop_indexes_core(
@@ -454,11 +499,54 @@ impl DbxBackend for LocalBackend {
                     *single,
                 )
                 .await?;
-                Ok(format!("Query executed. {} row(s) affected.", result.affected_rows))
+                let rows = result.dropped_names.into_iter().map(|name| vec![Value::String(name)]).collect::<Vec<_>>();
+                Ok(query_result(
+                    if rows.is_empty() { Vec::new() } else { vec!["name".to_string()] },
+                    rows,
+                    result.affected_rows,
+                ))
             }
             MongoCommand::DropCollection { collection } => {
                 mongo_ops::mongo_drop_collection_core(&self.state, connection_id, database, collection).await?;
-                Ok("Query executed. 1 row(s) affected.".to_string())
+                Ok(affected_query_result(1))
+            }
+            MongoCommand::FindOneAndUpdate { collection, filter, update, options } => {
+                let result = mongo_ops::mongo_find_one_and_update_core(
+                    &self.state,
+                    connection_id,
+                    database,
+                    collection,
+                    filter,
+                    update,
+                    options.as_deref(),
+                )
+                .await?;
+                Ok(mongo_documents_query_result(result.documents))
+            }
+            MongoCommand::FindOneAndReplace { collection, filter, replacement, options } => {
+                let result = mongo_ops::mongo_find_one_and_replace_core(
+                    &self.state,
+                    connection_id,
+                    database,
+                    collection,
+                    filter,
+                    replacement,
+                    options.as_deref(),
+                )
+                .await?;
+                Ok(mongo_documents_query_result(result.documents))
+            }
+            MongoCommand::FindOneAndDelete { collection, filter, options } => {
+                let result = mongo_ops::mongo_find_one_and_delete_core(
+                    &self.state,
+                    connection_id,
+                    database,
+                    collection,
+                    filter,
+                    options.as_deref(),
+                )
+                .await?;
+                Ok(mongo_documents_query_result(result.documents))
             }
         }
     }
@@ -530,6 +618,29 @@ impl DbxBackend for WebBackend {
             is_error: result.is_err(),
             explain_data: None,
         }
+    }
+
+    async fn execute_query(
+        &self,
+        connection: &ConnectionConfig,
+        database: &str,
+        sql: &str,
+        _max_rows: Option<usize>,
+        _timeout_secs: Option<u64>,
+    ) -> Result<dbx_core::db::QueryResult, String> {
+        if connection.db_type == DatabaseType::MongoDb {
+            return Err("MongoDB shell commands in DBX Web mode are not implemented by the Rust CLI yet.".to_string());
+        }
+        self.ensure_connected(connection).await?;
+        self.request(
+            reqwest::Method::POST,
+            "/api/query/execute",
+            Some(json!({ "connectionId": connection.id, "database": database, "sql": sql })),
+        )
+        .await?
+        .json()
+        .await
+        .map_err(|error| format!("Invalid query response: {error}"))
     }
 
     async fn save_connections(&self, _connections: &[ConnectionConfig]) -> Result<(), String> {
@@ -665,7 +776,7 @@ impl DbxBackend for WebBackend {
         connection: &ConnectionConfig,
         database: &str,
         command: &MongoCommand,
-    ) -> Result<String, String> {
+    ) -> Result<dbx_core::db::QueryResult, String> {
         self.ensure_connected(connection).await?;
         let connection_id = &connection.id;
         match command {
@@ -680,8 +791,9 @@ impl DbxBackend for WebBackend {
                     .json()
                     .await
                     .map_err(|error| format!("Invalid MongoDB version response: {error}"))?;
-                Ok(format!("| version |\n| --- |\n| {} |\n\n1 row(s)", escape_markdown_cell(&version)))
+                Ok(scalar_query_result("version", Value::String(version)))
             }
+            MongoCommand::Use { database } => Ok(scalar_query_result("database", Value::String(database.clone()))),
             MongoCommand::Find { collection, filter, projection, sort, skip, limit } => {
                 let result = self
                     .request(
@@ -702,7 +814,27 @@ impl DbxBackend for WebBackend {
                     .json::<WebMongoDocuments>()
                     .await
                     .map_err(|error| format!("Invalid MongoDB find response: {error}"))?;
-                Ok(format_mongo_documents(&result.documents))
+                Ok(mongo_documents_query_result(result.documents))
+            }
+            MongoCommand::FindOne { collection, filter, projection, options } => {
+                let result = self
+                    .request(
+                        reqwest::Method::POST,
+                        "/api/mongo/find-one",
+                        Some(json!({
+                            "connectionId": connection_id,
+                            "database": database,
+                            "collection": collection,
+                            "filter": filter,
+                            "projection": projection,
+                            "options": options,
+                        })),
+                    )
+                    .await?
+                    .json::<WebMongoDocuments>()
+                    .await
+                    .map_err(|error| format!("Invalid MongoDB findOne response: {error}"))?;
+                Ok(mongo_documents_query_result(result.documents))
             }
             MongoCommand::Count { collection, filter, accurate } => {
                 let total: u64 = self
@@ -721,7 +853,7 @@ impl DbxBackend for WebBackend {
                     .json()
                     .await
                     .map_err(|error| format!("Invalid MongoDB count response: {error}"))?;
-                Ok(format!("| count |\n| --- |\n| {total} |\n\n1 row(s)"))
+                Ok(scalar_query_result("count", Value::from(total)))
             }
             MongoCommand::Aggregate { collection, pipeline, options } => {
                 let result = self
@@ -741,7 +873,7 @@ impl DbxBackend for WebBackend {
                     .json::<WebMongoDocuments>()
                     .await
                     .map_err(|error| format!("Invalid MongoDB aggregate response: {error}"))?;
-                Ok(format_mongo_documents(&result.documents))
+                Ok(mongo_documents_query_result(result.documents))
             }
             MongoCommand::Distinct { collection, field, filter } => {
                 let result = self
@@ -760,7 +892,7 @@ impl DbxBackend for WebBackend {
                     .json::<WebMongoDocuments>()
                     .await
                     .map_err(|error| format!("Invalid MongoDB distinct response: {error}"))?;
-                Ok(format_mongo_documents(&result.documents))
+                Ok(mongo_documents_query_result(result.documents))
             }
             MongoCommand::GetIndexes { collection } => {
                 let result = self
@@ -779,7 +911,7 @@ impl DbxBackend for WebBackend {
                     .json::<WebMongoDocuments>()
                     .await
                     .map_err(|error| format!("Invalid MongoDB indexes response: {error}"))?;
-                Ok(format_mongo_documents(&result.documents))
+                Ok(mongo_documents_query_result(result.documents))
             }
             MongoCommand::CollectionStats { collection, metric, scale } => {
                 let value: Value = self
@@ -798,7 +930,7 @@ impl DbxBackend for WebBackend {
                     .await
                     .map_err(|error| format!("Invalid MongoDB stats response: {error}"))?;
                 if metric == "stats" {
-                    Ok(serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()))
+                    Ok(mongo_documents_query_result(vec![value]))
                 } else {
                     let key = match metric.as_str() {
                         "dataSize" => "size",
@@ -807,7 +939,7 @@ impl DbxBackend for WebBackend {
                         _ => metric,
                     };
                     let metric_value = value.get(key).cloned().unwrap_or(Value::Null);
-                    Ok(format!("| {metric} |\n| --- |\n| {} |\n\n1 row(s)", format_query_cell(&metric_value)))
+                    Ok(scalar_query_result(metric, metric_value))
                 }
             }
             MongoCommand::Insert { collection, documents } => {
@@ -826,7 +958,7 @@ impl DbxBackend for WebBackend {
                     .json()
                     .await
                     .map_err(|error| format!("Invalid MongoDB insert response: {error}"))?;
-                Ok(format_affected_rows(&value))
+                Ok(affected_query_result(affected_rows_from_value(&value)))
             }
             MongoCommand::Update { collection, filter, update, options, many } => {
                 let value: Value = self
@@ -847,7 +979,7 @@ impl DbxBackend for WebBackend {
                     .json()
                     .await
                     .map_err(|error| format!("Invalid MongoDB update response: {error}"))?;
-                Ok(format_affected_rows(&value))
+                Ok(affected_query_result(affected_rows_from_value(&value)))
             }
             MongoCommand::Delete { collection, filter, many } => {
                 let value: Value = self
@@ -866,7 +998,7 @@ impl DbxBackend for WebBackend {
                     .json()
                     .await
                     .map_err(|error| format!("Invalid MongoDB delete response: {error}"))?;
-                Ok(format_affected_rows(&value))
+                Ok(affected_query_result(affected_rows_from_value(&value)))
             }
             MongoCommand::CreateIndex { collection, keys, options } => {
                 let value: Value = self
@@ -885,9 +1017,9 @@ impl DbxBackend for WebBackend {
                     .json()
                     .await
                     .map_err(|error| format!("Invalid MongoDB create index response: {error}"))?;
-                Ok(format!(
-                    "| name |\n| --- |\n| {} |\n\n1 row(s)",
-                    escape_markdown_cell(value.get("name").and_then(Value::as_str).unwrap_or(""))
+                Ok(scalar_query_result(
+                    "name",
+                    Value::String(value.get("name").and_then(Value::as_str).unwrap_or("").to_string()),
                 ))
             }
             MongoCommand::DropIndexes { collection, indexes, single } => {
@@ -907,7 +1039,20 @@ impl DbxBackend for WebBackend {
                     .json()
                     .await
                     .map_err(|error| format!("Invalid MongoDB drop indexes response: {error}"))?;
-                Ok(format_affected_rows(&value))
+                let dropped_names = value
+                    .get("dropped_names")
+                    .or_else(|| value.get("droppedNames"))
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(|name| vec![Value::String(name.to_string())])
+                    .collect::<Vec<_>>();
+                Ok(query_result(
+                    if dropped_names.is_empty() { Vec::new() } else { vec!["name".to_string()] },
+                    dropped_names,
+                    affected_rows_from_value(&value),
+                ))
             }
             MongoCommand::DropCollection { collection } => {
                 self.request(
@@ -916,7 +1061,66 @@ impl DbxBackend for WebBackend {
                     Some(json!({ "connectionId": connection_id, "database": database, "collection": collection })),
                 )
                 .await?;
-                Ok("Query executed. 1 row(s) affected.".to_string())
+                Ok(affected_query_result(1))
+            }
+            MongoCommand::FindOneAndUpdate { collection, filter, update, options } => {
+                let result = self
+                    .request(
+                        reqwest::Method::POST,
+                        "/api/mongo/find-one-and-update",
+                        Some(json!({
+                            "connectionId": connection_id,
+                            "database": database,
+                            "collection": collection,
+                            "filterJson": filter,
+                            "updateJson": update,
+                            "optionsJson": options,
+                        })),
+                    )
+                    .await?
+                    .json::<WebMongoDocuments>()
+                    .await
+                    .map_err(|error| format!("Invalid MongoDB findOneAndUpdate response: {error}"))?;
+                Ok(mongo_documents_query_result(result.documents))
+            }
+            MongoCommand::FindOneAndReplace { collection, filter, replacement, options } => {
+                let result = self
+                    .request(
+                        reqwest::Method::POST,
+                        "/api/mongo/find-one-and-replace",
+                        Some(json!({
+                            "connectionId": connection_id,
+                            "database": database,
+                            "collection": collection,
+                            "filterJson": filter,
+                            "replacementJson": replacement,
+                            "optionsJson": options,
+                        })),
+                    )
+                    .await?
+                    .json::<WebMongoDocuments>()
+                    .await
+                    .map_err(|error| format!("Invalid MongoDB findOneAndReplace response: {error}"))?;
+                Ok(mongo_documents_query_result(result.documents))
+            }
+            MongoCommand::FindOneAndDelete { collection, filter, options } => {
+                let result = self
+                    .request(
+                        reqwest::Method::POST,
+                        "/api/mongo/find-one-and-delete",
+                        Some(json!({
+                            "connectionId": connection_id,
+                            "database": database,
+                            "collection": collection,
+                            "filterJson": filter,
+                            "optionsJson": options,
+                        })),
+                    )
+                    .await?
+                    .json::<WebMongoDocuments>()
+                    .await
+                    .map_err(|error| format!("Invalid MongoDB findOneAndDelete response: {error}"))?;
+                Ok(mongo_documents_query_result(result.documents))
             }
         }
     }
@@ -938,7 +1142,7 @@ fn url_encode(value: &str) -> String {
     url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
-fn format_query_result(result: &dbx_core::db::QueryResult, max_rows: usize) -> String {
+pub(crate) fn format_query_result(result: &dbx_core::db::QueryResult, max_rows: usize) -> String {
     if result.columns.is_empty() {
         return format!("Query executed. {} row(s) affected.", result.affected_rows);
     }
@@ -953,6 +1157,64 @@ fn format_query_result(result: &dbx_core::db::QueryResult, max_rows: usize) -> S
     output
 }
 
+fn query_result(columns: Vec<String>, rows: Vec<Vec<Value>>, affected_rows: u64) -> dbx_core::db::QueryResult {
+    dbx_core::db::QueryResult {
+        columns,
+        column_types: Vec::new(),
+        column_sortables: Vec::new(),
+        rows,
+        affected_rows,
+        execution_time_ms: 0,
+        truncated: false,
+        session_id: None,
+        has_more: false,
+    }
+}
+
+fn scalar_query_result(column: impl Into<String>, value: Value) -> dbx_core::db::QueryResult {
+    query_result(vec![column.into()], vec![vec![value]], 0)
+}
+
+fn affected_query_result(affected_rows: u64) -> dbx_core::db::QueryResult {
+    query_result(Vec::new(), Vec::new(), affected_rows)
+}
+
+fn mongo_documents_query_result(documents: Vec<Value>) -> dbx_core::db::QueryResult {
+    if documents.is_empty() {
+        return query_result(Vec::new(), Vec::new(), 0);
+    }
+    let mut columns = std::collections::BTreeSet::new();
+    for document in &documents {
+        if let Some(object) = document.as_object() {
+            columns.extend(object.keys().cloned());
+        } else {
+            columns.insert("value".to_string());
+        }
+    }
+    let columns = columns.into_iter().collect::<Vec<_>>();
+    let rows = documents
+        .into_iter()
+        .map(|document| {
+            columns
+                .iter()
+                .map(|column| {
+                    document
+                        .as_object()
+                        .and_then(|object| object.get(column))
+                        .cloned()
+                        .or_else(|| (column == "value").then(|| document.clone()))
+                        .unwrap_or(Value::Null)
+                })
+                .collect()
+        })
+        .collect();
+    query_result(columns, rows, 0)
+}
+
+fn affected_rows_from_value(value: &Value) -> u64 {
+    value.get("affected_rows").or_else(|| value.get("affectedRows")).and_then(Value::as_u64).unwrap_or(0)
+}
+
 fn format_query_cell(value: &Value) -> String {
     match value {
         Value::Null => "NULL".to_string(),
@@ -960,44 +1222,6 @@ fn format_query_cell(value: &Value) -> String {
         Value::Array(_) | Value::Object(_) => serde_json::to_string(value).unwrap_or_else(|_| value.to_string()),
         value => value.to_string(),
     }
-}
-
-fn format_mongo_documents(documents: &[Value]) -> String {
-    if documents.is_empty() {
-        return "Query returned 0 rows.".to_string();
-    }
-    let mut headers = std::collections::BTreeSet::new();
-    for document in documents {
-        if let Some(object) = document.as_object() {
-            headers.extend(object.keys().cloned());
-        } else {
-            headers.insert("value".to_string());
-        }
-    }
-    let headers = headers.into_iter().collect::<Vec<_>>();
-    let rows = documents
-        .iter()
-        .map(|document| {
-            headers
-                .iter()
-                .map(|header| {
-                    document
-                        .as_object()
-                        .and_then(|object| object.get(header))
-                        .or_else(|| (header == "value").then_some(document))
-                        .map(format_query_cell)
-                        .unwrap_or_else(|| "NULL".to_string())
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    format!("{}\n\n{} row(s)", markdown_table(&headers, &rows), documents.len())
-}
-
-fn format_affected_rows(value: &Value) -> String {
-    let affected =
-        value.get("affected_rows").or_else(|| value.get("affectedRows")).and_then(Value::as_u64).unwrap_or(0);
-    format!("Query executed. {affected} row(s) affected.")
 }
 
 fn markdown_table(headers: &[String], rows: &[Vec<String>]) -> String {

@@ -78,7 +78,7 @@ async fn executes_mongo_shell_commands_without_desktop_process() {
     std::env::set_var("DBX_MCP_ALLOW_WRITES", "1");
 
     call_query(&client, "db.items.deleteOne({_id: 'rust-mcp-e2e'})").await;
-    call_query(&client, "db.items.insertOne({_id: 'rust-mcp-e2e', name: 'Ada'})").await;
+    call_query(&client, "db.items.insert({_id: 'rust-mcp-e2e', name: 'Ada'})").await;
     let result = call_query(&client, "db.items.find({_id: 'rust-mcp-e2e'}).limit(1)").await;
     assert!(result.contains("Ada"), "unexpected MongoDB result: {result}");
     call_query(&client, "db.items.deleteOne({_id: 'rust-mcp-e2e'})").await;
