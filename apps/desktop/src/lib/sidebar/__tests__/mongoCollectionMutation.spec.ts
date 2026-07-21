@@ -1,15 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { isRenamableMongoCollectionKind, mongoCollectionKindFromNode, mongoDropAllIndexesPreview, mongoDropCollectionPreview, mongoDropIndexPreview, mongoRenameCollectionPreview, toMongoCollectionKind } from "../mongoCollectionMutation";
+import { isRenamableMongoCollection, mongoCollectionKindFromNode, mongoDropAllIndexesPreview, mongoDropCollectionPreview, mongoDropIndexPreview, mongoRenameCollectionPreview, toMongoCollectionKind } from "../mongoCollectionMutation";
 
-describe("isRenamableMongoCollectionKind", () => {
+describe("isRenamableMongoCollection", () => {
   it("allows ordinary collections and defaults", () => {
-    expect(isRenamableMongoCollectionKind()).toBe(true);
-    expect(isRenamableMongoCollectionKind("collection")).toBe(true);
+    expect(isRenamableMongoCollection("users")).toBe(true);
+    expect(isRenamableMongoCollection("users", "collection")).toBe(true);
   });
 
-  it("rejects views and time-series collections", () => {
-    expect(isRenamableMongoCollectionKind("view")).toBe(false);
-    expect(isRenamableMongoCollectionKind("timeseries")).toBe(false);
+  it("rejects views, time-series collections, and system namespaces", () => {
+    expect(isRenamableMongoCollection("users_view", "view")).toBe(false);
+    expect(isRenamableMongoCollection("metrics", "timeseries")).toBe(false);
+    expect(isRenamableMongoCollection("system.views", "collection")).toBe(false);
   });
 });
 

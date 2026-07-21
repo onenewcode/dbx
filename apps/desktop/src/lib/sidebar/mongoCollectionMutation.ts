@@ -1,12 +1,12 @@
 import type { MongoCollectionKind, TreeNode } from "@/types/database";
 
 /**
- * MongoDB only supports renameCollection for ordinary collections.
- * Views and time-series collections must not expose a rename action.
+ * MongoDB only supports renameCollection for ordinary, non-system collections.
+ * Views, time-series collections, and reserved system namespaces must not expose a rename action.
  * @see https://www.mongodb.com/docs/manual/reference/command/renameCollection/
  */
-export function isRenamableMongoCollectionKind(kind: MongoCollectionKind = "collection"): boolean {
-  return kind === "collection";
+export function isRenamableMongoCollection(name: string, kind: MongoCollectionKind = "collection"): boolean {
+  return kind === "collection" && !name.startsWith("system.");
 }
 
 export function mongoCollectionKindFromNode(node: Pick<TreeNode, "meta">): MongoCollectionKind {

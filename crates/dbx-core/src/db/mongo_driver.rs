@@ -570,6 +570,10 @@ pub fn rename_collection_command_document(database: &str, old_name: &str, new_na
     if old_name == new_name {
         return Err("New collection name must differ from the current name".to_string());
     }
+    // MongoDB reserves system.* namespaces; reject them before exposing a rename that the server cannot perform.
+    if old_name.starts_with("system.") || new_name.starts_with("system.") {
+        return Err("System collections cannot be renamed".to_string());
+    }
     Ok(doc! {
         "renameCollection": format!("{database}.{old_name}"),
         "to": format!("{database}.{new_name}"),
@@ -2043,6 +2047,12 @@ mod tests {
         assert!(rename_collection_command_document("app", "", "accounts").unwrap_err().contains("Collection"));
         assert!(rename_collection_command_document("app", "users", "").unwrap_err().contains("New collection"));
         assert!(rename_collection_command_document("app", "users", "users").unwrap_err().contains("differ"));
+        assert!(rename_collection_command_document("app", "system.views", "views_backup")
+            .unwrap_err()
+            .contains("System collections"));
+        assert!(rename_collection_command_document("app", "users", "system.users")
+            .unwrap_err()
+            .contains("System collections"));
     }
 
     #[test]

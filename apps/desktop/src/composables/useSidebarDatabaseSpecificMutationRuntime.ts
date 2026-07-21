@@ -6,7 +6,7 @@ import type { TreeNode } from "@/types/database";
 import * as api from "@/lib/backend/api";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { findSidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
-import { isRenamableMongoCollectionKind, mongoCollectionKindFromNode, mongoDropAllIndexesPreview, mongoDropCollectionPreview, mongoDropDatabasePreview, mongoDropIndexPreview, mongoRenameCollectionPreview } from "@/lib/sidebar/mongoCollectionMutation";
+import { isRenamableMongoCollection, mongoCollectionKindFromNode, mongoDropAllIndexesPreview, mongoDropCollectionPreview, mongoDropDatabasePreview, mongoDropIndexPreview, mongoRenameCollectionPreview } from "@/lib/sidebar/mongoCollectionMutation";
 import { runMongoSidebarMutation } from "@/lib/sidebar/runMongoSidebarMutation";
 import {
   sidebarDangerTarget,
@@ -65,7 +65,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
   }
 
   function canRenameMongoCollectionNode(node: TreeNode): boolean {
-    return canMutateMongoCollectionNode(node) && isRenamableMongoCollectionKind(mongoCollectionKindFromNode(node));
+    return canMutateMongoCollectionNode(node) && isRenamableMongoCollection(node.label, mongoCollectionKindFromNode(node));
   }
 
   const canDropMongoCollection = computed(() => canMutateMongoCollectionNode(activeNode.value));
