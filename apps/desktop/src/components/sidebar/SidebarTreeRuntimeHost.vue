@@ -391,6 +391,7 @@ const {
   dropAllMongoIndexes,
   flushRedisDb,
   confirmFlushRedisDb,
+  confirmDropMongoDatabase,
   confirmDropMongoCollection,
   confirmDropMongoIndex,
   confirmDropAllMongoIndexes,
@@ -2649,26 +2650,26 @@ function dropDatabase() {
 
 async function confirmDropDatabase() {
   const node = sidebarDangerTarget.value ?? activeNode.value;
-  if (!node.connectionId || dropDatabaseLoading.value) return;
+  if (node.type === "mongo-db") {
+    await confirmDropMongoDatabase();
+    return;
+  }
+
+  const connectionId = node.connectionId;
+  if (!connectionId || dropDatabaseLoading.value) return;
   dropDatabaseLoading.value = true;
   try {
-    await connectionStore.ensureConnected(node.connectionId);
-    if (node.type === "mongo-db" && node.database) {
-      await api.mongoDropDatabase(node.connectionId, node.database);
-      toast(t("contextMenu.dropDatabaseSuccess", { name: node.label }), 3000);
-      await connectionStore.loadMongoDatabases(node.connectionId);
-      showDropDatabaseConfirm.value = false;
-      return;
-    }
+    await connectionStore.ensureConnected(connectionId);
     const sql =
       dropDatabasePreviewSql.value ||
       (await buildDropDatabaseSql({
         databaseType: databaseTypeForNode(node),
         name: node.label,
       }));
-    await executeTreeNodeSqlWithProductionGuard(node, sql, { database: "" });
+    const executed = await executeTreeNodeSqlWithProductionGuard(node, sql, { database: "" });
+    if (!executed) return;
     toast(t("contextMenu.dropDatabaseSuccess", { name: node.label }), 3000);
-    await connectionStore.loadDatabases(node.connectionId, { force: true });
+    await connectionStore.loadDatabases(connectionId, { force: true });
     showDropDatabaseConfirm.value = false;
   } catch (e: any) {
     toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);

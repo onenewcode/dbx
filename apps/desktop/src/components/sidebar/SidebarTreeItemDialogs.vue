@@ -241,7 +241,7 @@ watch(
       </div>
       <DialogFooter>
         <Button variant="outline" :disabled="renameMongoCollectionLoading" @click="showRenameMongoCollectionDialog = false">{{ t("dangerDialog.cancel") }}</Button>
-        <Button :disabled="renameMongoCollectionLoading || !renameMongoCollectionName.trim() || renameMongoCollectionName.trim() === node.label" @click="confirmRenameMongoCollection">
+        <Button :disabled="renameMongoCollectionLoading || !renameMongoCollectionName || renameMongoCollectionName === node.label" @click="confirmRenameMongoCollection">
           <Loader2 v-if="renameMongoCollectionLoading" class="mr-2 h-4 w-4 animate-spin" />
           {{ t("contextMenu.renameObject") }}
         </Button>

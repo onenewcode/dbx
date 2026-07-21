@@ -203,6 +203,54 @@ pub async fn list_databases(client: &Client) -> Result<Vec<String>, String> {
     client.list_database_names().await.map_err(|e| e.to_string())
 }
 
+/// MongoDB collection kind from `listCollections` (not GridFS buckets).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MongoCollectionKind {
+    Collection,
+    View,
+    Timeseries,
+}
+
+impl MongoCollectionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Collection => "collection",
+            Self::View => "view",
+            Self::Timeseries => "timeseries",
+        }
+    }
+
+    pub fn from_driver_type(collection_type: &mongodb::results::CollectionType) -> Self {
+        match collection_type {
+            mongodb::results::CollectionType::View => Self::View,
+            mongodb::results::CollectionType::Timeseries => Self::Timeseries,
+            // Collection and any future non_exhaustive variants default to a renamable collection.
+            _ => Self::Collection,
+        }
+    }
+}
+
+/// Name + kind for a MongoDB collection/view/timeseries returned by full `listCollections`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MongoCollectionSpec {
+    pub name: String,
+    pub kind: MongoCollectionKind,
+}
+
+/// Full `listCollections` with type metadata (for sidebar rename gating, etc.).
+pub async fn list_collection_specs(client: &Client, database: &str) -> Result<Vec<MongoCollectionSpec>, String> {
+    let mut cursor = client.database(database).list_collections().await.map_err(|e| e.to_string())?;
+    let mut specs = Vec::new();
+    while let Some(spec) = cursor.try_next().await.map_err(|e| e.to_string())? {
+        specs.push(MongoCollectionSpec {
+            name: spec.name,
+            kind: MongoCollectionKind::from_driver_type(&spec.collection_type),
+        });
+    }
+    Ok(specs)
+}
+
+/// Name-only listing (schema, GridFS helpers, and other callers that do not need type).
 pub async fn list_collections(client: &Client, database: &str) -> Result<Vec<String>, String> {
     client.database(database).list_collection_names().await.map_err(|e| e.to_string())
 }
@@ -506,10 +554,10 @@ pub async fn drop_collection(client: &Client, database: &str, collection: &str) 
 }
 
 /// Build the admin `renameCollection` command document for a same-database rename.
+///
+/// Collection (and database) names are identifiers and must be passed exactly as provided —
+/// do not trim or otherwise normalize them before building the namespace.
 pub fn rename_collection_command_document(database: &str, old_name: &str, new_name: &str) -> Result<Document, String> {
-    let database = database.trim();
-    let old_name = old_name.trim();
-    let new_name = new_name.trim();
     if database.is_empty() {
         return Err("Database name is required".to_string());
     }
@@ -1995,7 +2043,27 @@ mod tests {
         assert!(rename_collection_command_document("app", "", "accounts").unwrap_err().contains("Collection"));
         assert!(rename_collection_command_document("app", "users", "").unwrap_err().contains("New collection"));
         assert!(rename_collection_command_document("app", "users", "users").unwrap_err().contains("differ"));
-        assert!(rename_collection_command_document(" app ", " users ", " accounts ").is_ok());
+    }
+
+    #[test]
+    fn rename_collection_command_preserves_identifier_whitespace() {
+        let command = rename_collection_command_document("app", " users ", " renamed ").unwrap();
+        assert_eq!(command.get_str("renameCollection").unwrap(), "app. users ");
+        assert_eq!(command.get_str("to").unwrap(), "app. renamed ");
+    }
+
+    #[test]
+    fn rename_collection_command_does_not_drop_existing_target() {
+        // Existing target names must fail at the server instead of being overwritten.
+        let command = rename_collection_command_document("app", "users", "accounts").unwrap();
+        assert!(!command.contains_key("dropTarget"));
+    }
+
+    #[test]
+    fn mongo_collection_kind_as_str_is_stable_wire_value() {
+        assert_eq!(MongoCollectionKind::Collection.as_str(), "collection");
+        assert_eq!(MongoCollectionKind::View.as_str(), "view");
+        assert_eq!(MongoCollectionKind::Timeseries.as_str(), "timeseries");
     }
 
     #[test]

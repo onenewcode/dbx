@@ -718,7 +718,7 @@ export interface TreeNode {
   tableSearchParentId?: string;
   savedSqlId?: string;
   savedSqlFolderId?: string;
-  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ExtensionInfo | VectorCollectionMeta;
+  meta?: ColumnInfo | IndexInfo | ForeignKeyInfo | TriggerInfo | ExtensionInfo | VectorCollectionMeta | MongoCollectionMeta;
   loadMore?: {
     parentId: string;
     offset: number;
@@ -954,10 +954,17 @@ export interface VectorCollectionMeta {
   collectionId?: string;
 }
 
+/** Mongo collection node metadata (not SQL tableType). */
+export type MongoCollectionKind = "collection" | "view" | "timeseries";
+
+export interface MongoCollectionMeta {
+  collectionKind: MongoCollectionKind;
+}
+
 export interface CollectionInfo {
   name: string;
   id: string;
   dimension?: number;
-  kind?: "collection" | "bucket";
+  kind?: MongoCollectionKind | "bucket";
   bucketName?: string;
 }
