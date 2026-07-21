@@ -368,6 +368,14 @@ const {
 const {
   canDropMongoDatabase,
   canDropMongoCollection,
+  canRenameMongoCollection,
+  prepareRenameMongoCollectionDialog,
+  confirmRenameMongoCollection,
+  showRenameMongoCollectionDialog,
+  renameMongoCollectionName,
+  renameMongoCollectionError,
+  renameMongoCollectionPreview,
+  renameMongoCollectionLoading,
   mongoIndexNameForNode,
   canDropMongoIndexNode,
   canDropMongoIndex,
@@ -839,6 +847,10 @@ function requestRenameSelectedNode(): boolean {
     connectionStore.startEditing(editTarget.connectionId);
     return true;
   }
+  if (canRenameMongoCollection.value) {
+    openRenameMongoCollectionDialog();
+    return true;
+  }
   if (canRenameObject.value) {
     openRenameObjectDialog();
     return true;
@@ -848,6 +860,12 @@ function requestRenameSelectedNode(): boolean {
     return true;
   }
   return false;
+}
+
+function openRenameMongoCollectionDialog() {
+  claimTreeItemDialogOwnership();
+  routeTreeItemDialogController();
+  prepareRenameMongoCollectionDialog();
 }
 
 function requestEditSelectedConnection(): boolean {
@@ -3309,6 +3327,12 @@ function databaseSpecificDialogCapabilities() {
     editNacosNamespaceDesc,
     editNacosNamespaceLoading,
     confirmEditNacosNamespace,
+    showRenameMongoCollectionDialog,
+    renameMongoCollectionName,
+    renameMongoCollectionError,
+    renameMongoCollectionPreview,
+    renameMongoCollectionLoading,
+    confirmRenameMongoCollection,
     showCreateSchemaDialog,
     createSchemaName,
     confirmCreateSchema,
@@ -3785,6 +3809,14 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
     items.push({ label: "", separator: true });
     items.push({ label: t("contextMenu.viewData"), action: toggle, icon: TableProperties });
     items.push({ label: t("contextMenu.newQuery"), action: newQuery, icon: TerminalSquare });
+    if (canRenameMongoCollection.value) {
+      items.push({
+        label: t("contextMenu.renameObject"),
+        action: openRenameMongoCollectionDialog,
+        icon: Pencil,
+        shortcut: shortcutRename,
+      });
+    }
     if (canDropAllMongoIndexes.value || canDropMongoCollection.value) {
       items.push({ label: "", separator: true });
       if (canDropAllMongoIndexes.value) {

@@ -1,4 +1,4 @@
-import { computed, type ShallowRef } from "vue";
+import { computed, watch, type ShallowRef } from "vue";
 import { useI18n } from "vue-i18n";
 import { useToast } from "@/composables/useToast";
 import { useConnectionStore } from "@/stores/connectionStore";
@@ -25,6 +25,11 @@ import {
   showDropAllMongoIndexesConfirm,
   dropAllMongoIndexesLoading,
   showFlushRedisDbConfirm,
+  showRenameMongoCollectionDialog,
+  renameMongoCollectionName,
+  renameMongoCollectionError,
+  renameMongoCollectionPreview,
+  renameMongoCollectionLoading,
 } from "@/components/sidebar/sidebarTreeDialogState";
 
 interface SidebarDatabaseSpecificMutationRuntimeOptions {
@@ -42,10 +47,62 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     return activeNode.value.type === "mongo-db" && !!activeNode.value.database && config?.driver_profile !== "mongodb-legacy";
   });
 
-  const canDropMongoCollection = computed(() => {
-    const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
-    return activeNode.value.type === "mongo-collection" && !!activeNode.value.database && config?.driver_profile !== "mongodb-legacy";
+  function canMutateMongoCollectionNode(node: TreeNode): boolean {
+    if (node.type !== "mongo-collection" || !node.connectionId || !node.database) return false;
+    const config = connectionStore.getConfig(node.connectionId);
+    return config?.db_type === "mongodb" && config.driver_profile !== "mongodb-legacy";
+  }
+
+  const canDropMongoCollection = computed(() => canMutateMongoCollectionNode(activeNode.value));
+  const canRenameMongoCollection = canDropMongoCollection;
+
+  function mongoRenameCollectionPreview(database: string, oldName: string, newName: string): string {
+    return `db.getSiblingDB(${JSON.stringify(database)}).getCollection(${JSON.stringify(oldName)}).renameCollection(${JSON.stringify(newName)})`;
+  }
+
+  function prepareRenameMongoCollectionDialog() {
+    renameMongoCollectionName.value = activeNode.value.label;
+    renameMongoCollectionError.value = "";
+    renameMongoCollectionPreview.value = "";
+    renameMongoCollectionLoading.value = false;
+    showRenameMongoCollectionDialog.value = true;
+  }
+
+  function refreshRenameMongoCollectionPreview() {
+    const node = sidebarFormTarget.value ?? activeNode.value;
+    const newName = renameMongoCollectionName.value.trim();
+    if (!showRenameMongoCollectionDialog.value || !canMutateMongoCollectionNode(node) || !node.database || !newName || newName === node.label) {
+      renameMongoCollectionPreview.value = "";
+      return;
+    }
+    renameMongoCollectionPreview.value = mongoRenameCollectionPreview(node.database, node.label, newName);
+  }
+
+  watch([showRenameMongoCollectionDialog, renameMongoCollectionName, () => activeNode.value.label, () => activeNode.value.database], () => {
+    refreshRenameMongoCollectionPreview();
   });
+
+  async function confirmRenameMongoCollection() {
+    const node = sidebarFormTarget.value ?? activeNode.value;
+    const newName = renameMongoCollectionName.value.trim();
+    if (!canMutateMongoCollectionNode(node) || !node.connectionId || !node.database || !newName || newName === node.label || renameMongoCollectionLoading.value) {
+      return;
+    }
+    renameMongoCollectionError.value = "";
+    renameMongoCollectionLoading.value = true;
+    const oldName = node.label;
+    try {
+      await connectionStore.ensureConnected(node.connectionId);
+      await api.mongoRenameCollection(node.connectionId, node.database, oldName, newName);
+      await connectionStore.loadMongoCollections(node.connectionId, node.database);
+      toast(t("contextMenu.renameObjectSuccess", { oldName, newName }), 3000);
+      showRenameMongoCollectionDialog.value = false;
+    } catch (error: any) {
+      renameMongoCollectionError.value = translateBackendError(t, error?.message || String(error));
+    } finally {
+      renameMongoCollectionLoading.value = false;
+    }
+  }
 
   function mongoIndexNameForNode(node: TreeNode): string {
     if (node.type !== "index") return "";
@@ -64,10 +121,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     return `db.getCollection(${JSON.stringify(node.tableName || "")}).dropIndex(${JSON.stringify(indexName)})`;
   }
 
-  const canDropAllMongoIndexes = computed(() => {
-    const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
-    return activeNode.value.type === "mongo-collection" && !!activeNode.value.database && config?.db_type === "mongodb" && config.driver_profile !== "mongodb-legacy";
-  });
+  const canDropAllMongoIndexes = computed(() => canMutateMongoCollectionNode(activeNode.value));
 
   function mongoDropAllIndexesPreview(node: Pick<TreeNode, "label">): string {
     return `db.getCollection(${JSON.stringify(node.label)}).dropIndexes()`;
@@ -170,7 +224,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
 
   async function confirmDropMongoCollection() {
     const node = sidebarDangerTarget.value ?? activeNode.value;
-    if (node.type !== "mongo-collection" || !node.connectionId || !node.database || dropMongoCollectionLoading.value) return;
+    if (!canMutateMongoCollectionNode(node) || !node.connectionId || !node.database || dropMongoCollectionLoading.value) return;
     dropMongoCollectionLoading.value = true;
     try {
       await connectionStore.ensureConnected(node.connectionId);
@@ -217,7 +271,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
 
   async function confirmDropAllMongoIndexes() {
     const node = sidebarDangerTarget.value ?? activeNode.value;
-    if (node.type !== "mongo-collection" || !node.connectionId || !node.database || dropAllMongoIndexesLoading.value) return;
+    if (!canMutateMongoCollectionNode(node) || !node.connectionId || !node.database || dropAllMongoIndexesLoading.value) return;
     dropAllMongoIndexesLoading.value = true;
     try {
       await connectionStore.ensureConnected(node.connectionId);
@@ -235,6 +289,14 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
   return {
     canDropMongoDatabase,
     canDropMongoCollection,
+    canRenameMongoCollection,
+    prepareRenameMongoCollectionDialog,
+    confirmRenameMongoCollection,
+    showRenameMongoCollectionDialog,
+    renameMongoCollectionName,
+    renameMongoCollectionError,
+    renameMongoCollectionPreview,
+    renameMongoCollectionLoading,
     mongoIndexNameForNode,
     canDropMongoIndexNode,
     canDropMongoIndex,

@@ -505,6 +505,35 @@ pub async fn drop_collection(client: &Client, database: &str, collection: &str) 
     client.database(database).collection::<Document>(collection).drop().await.map_err(|e| e.to_string())
 }
 
+/// Build the admin `renameCollection` command document for a same-database rename.
+pub fn rename_collection_command_document(database: &str, old_name: &str, new_name: &str) -> Result<Document, String> {
+    let database = database.trim();
+    let old_name = old_name.trim();
+    let new_name = new_name.trim();
+    if database.is_empty() {
+        return Err("Database name is required".to_string());
+    }
+    if old_name.is_empty() {
+        return Err("Collection name is required".to_string());
+    }
+    if new_name.is_empty() {
+        return Err("New collection name is required".to_string());
+    }
+    if old_name == new_name {
+        return Err("New collection name must differ from the current name".to_string());
+    }
+    Ok(doc! {
+        "renameCollection": format!("{database}.{old_name}"),
+        "to": format!("{database}.{new_name}"),
+    })
+}
+
+pub async fn rename_collection(client: &Client, database: &str, old_name: &str, new_name: &str) -> Result<(), String> {
+    let command = rename_collection_command_document(database, old_name, new_name)?;
+    client.database("admin").run_command(command).await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub async fn list_indexes(client: &Client, database: &str, collection: &str) -> Result<Vec<IndexInfo>, String> {
     let col = client.database(database).collection::<Document>(collection);
     let mut cursor = col.list_indexes().await.map_err(|e| e.to_string())?;
@@ -1951,6 +1980,22 @@ mod tests {
 
         assert!(error.starts_with("Invalid update options:"));
         assert!(error.contains("unknown field `upsert`"));
+    }
+
+    #[test]
+    fn rename_collection_command_uses_fully_qualified_names() {
+        let command = rename_collection_command_document("app", "users", "accounts").unwrap();
+        assert_eq!(command.get_str("renameCollection").unwrap(), "app.users");
+        assert_eq!(command.get_str("to").unwrap(), "app.accounts");
+    }
+
+    #[test]
+    fn rename_collection_command_rejects_invalid_names() {
+        assert!(rename_collection_command_document("", "users", "accounts").unwrap_err().contains("Database"));
+        assert!(rename_collection_command_document("app", "", "accounts").unwrap_err().contains("Collection"));
+        assert!(rename_collection_command_document("app", "users", "").unwrap_err().contains("New collection"));
+        assert!(rename_collection_command_document("app", "users", "users").unwrap_err().contains("differ"));
+        assert!(rename_collection_command_document(" app ", " users ", " accounts ").is_ok());
     }
 
     #[test]
