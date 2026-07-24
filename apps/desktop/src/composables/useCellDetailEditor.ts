@@ -230,7 +230,7 @@ export function useCellDetailEditor(options: UseCellDetailEditorOptions): UseCel
           ...defaultKeymap,
           ...historyKeymap,
           ...(options.folding ? foldKeymap : []),
-          // RedisJsonEditor disables this so App.vue → RedisValueViewer.openValueSearch owns Mod+F.
+          // Callers may disable find so a parent surface (e.g. RedisValueViewer) owns Mod+F.
           ...(options.enableBuiltinFind === false
             ? []
             : [

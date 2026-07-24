@@ -14,11 +14,17 @@ const props = withDefaults(
     saveDisabled?: boolean;
     readOnly?: boolean;
     wordWrap?: boolean;
+    /**
+     * When false, Mod+F is left to a parent find surface (RedisValueViewer).
+     * Default true so DocumentBrowser and other callers keep CodeMirror find.
+     */
+    enableBuiltinFind?: boolean;
   }>(),
   {
     saveDisabled: false,
     readOnly: false,
     wordWrap: false,
+    enableBuiltinFind: true,
   },
 );
 
@@ -37,8 +43,7 @@ const editor = useCellDetailEditor({
   folding: true,
   lineWrapping: () => props.wordWrap,
   readOnly: () => props.readOnly,
-  // Let App.vue focusSearch → RedisValueViewer.openValueSearch own Mod+F (unified panel).
-  enableBuiltinFind: false,
+  enableBuiltinFind: props.enableBuiltinFind,
   onChange(value) {
     emit("update:modelValue", value);
   },

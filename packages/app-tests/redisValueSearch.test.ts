@@ -46,22 +46,29 @@ test("drag source allows grip button, blocks input", () => {
   assert.equal(isTextContentSearchDragSource(fake(["input"])), false);
 });
 
-test("content find is for STRING keys + member detail; hash toolbar search stays; no list filter", () => {
+test("content find is for STRING + RedisJSON + member detail; hash toolbar search stays; no list filter", () => {
   const viewer = readFileSync(new URL("../../apps/desktop/src/components/redis/RedisValueViewer.vue", import.meta.url), "utf8");
   const jsonEditor = readFileSync(new URL("../../apps/desktop/src/components/redis/RedisJsonEditor.vue", import.meta.url), "utf8");
   const browser = readFileSync(new URL("../../apps/desktop/src/components/redis/RedisKeyBrowser.vue", import.meta.url), "utf8");
+  const documentBrowser = readFileSync(new URL("../../apps/desktop/src/components/document/DocumentBrowser.vue", import.meta.url), "utf8");
 
   assert.match(viewer, /valueSearchSupported/);
-  assert.match(viewer, /showMemberDetail\.value \|\| isStringLikeKind\.value/);
+  // STRING, RedisJSON, or member detail.
+  assert.match(viewer, /showMemberDetail\.value \|\| isStringLikeKind\.value \|\| redisKind\.value === "json"/);
   assert.match(viewer, /function openValueSearch/);
   assert.match(viewer, /function onHashSearch/);
   assert.match(viewer, /v-model="hashSearchQuery"/);
   assert.match(viewer, /data-redis-member-detail/);
-  // Member find panel is mounted inside DialogContent (not body teleport) so focus trap allows typing.
   assert.match(viewer, /v-if="valueSearchOpen && showMemberDetail"/);
+  assert.match(viewer, /ref="redisJsonEditorRef"/);
   assert.doesNotMatch(viewer, /filterRedisCollectionByQuery/);
   assert.doesNotMatch(viewer, /valueSearchIsCollectionMode/);
-  assert.match(jsonEditor, /enableBuiltinFind:\s*false/);
+  // Builtin find is a prop defaulting to true; only value-viewer owned editors disable it.
+  assert.match(jsonEditor, /enableBuiltinFind\?:/);
+  assert.match(jsonEditor, /enableBuiltinFind:\s*true/);
+  assert.match(viewer, /:enable-builtin-find="false"/);
+  // DocumentBrowser must not pass enable-builtin-find=false (keeps CM find).
+  assert.doesNotMatch(documentBrowser, /enable-builtin-find/);
   assert.match(browser, /valueViewerRef\.value\?\.focusSearch\(\)/);
 });
 

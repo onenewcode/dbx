@@ -177,6 +177,7 @@ const searchLoading = ref(false);
 const valueSearchBarRef = ref<{ focusInput: (select?: boolean) => void } | null>(null);
 type JsonEditorHandle = { openSearch: () => boolean; selectRange?: (from: number, to: number, options?: { focus?: boolean }) => boolean };
 const stringJsonEditorRef = ref<JsonEditorHandle | null>(null);
+const redisJsonEditorRef = ref<JsonEditorHandle | null>(null);
 const memberJsonEditorRef = ref<JsonEditorHandle | null>(null);
 const stringTextareaRef = ref<HTMLTextAreaElement | null>(null);
 const memberTextareaRef = ref<HTMLTextAreaElement | null>(null);
@@ -324,15 +325,16 @@ const zsetRows = computed<RedisCollectionRow<RedisZsetItem>[]>(() =>
     : [],
 );
 
-const usesJsonEditorForMain = computed(() => isStringLikeKind.value && stringValueView.value === "json" && Boolean(stringValueDetail.value?.json));
+const usesJsonEditorForMain = computed(() => (isStringLikeKind.value && stringValueView.value === "json" && Boolean(stringValueDetail.value?.json)) || redisKind.value === "json");
 const usesJsonEditorForMember = computed(() => isEditingHashJson.value);
-/** True when Ctrl+F content find applies (STRING key or open member detail). */
-const valueSearchSupported = computed(() => showMemberDetail.value || isStringLikeKind.value);
+/** True when Ctrl+F content find applies (STRING, RedisJSON, or open member detail). */
+const valueSearchSupported = computed(() => showMemberDetail.value || isStringLikeKind.value || redisKind.value === "json");
 const contentSearchText = computed(() => {
   if (showMemberDetail.value) {
     if (isEditingMember.value || isEditingHashJson.value) return memberEditValue.value;
     return detailTextForFormat(selectedMemberDetail.value, memberValueView.value);
   }
+  if (redisKind.value === "json") return editValue.value;
   if (!isStringLikeKind.value || !stringValueDetail.value) return "";
   if (stringValueView.value === "json" && stringValueDetail.value.json) return editValue.value;
   if (stringValueView.value === "utf8" && canEditCurrentStringFormat.value) return editValue.value;
@@ -1324,6 +1326,8 @@ async function scrollContentSearchMatchIntoView() {
       scrollTextareaToMatch(memberTextareaRef.value, match);
       return;
     }
+  } else if (redisKind.value === "json") {
+    if (redisJsonEditorRef.value?.selectRange?.(match.start, match.end, { focus: false })) return;
   } else {
     if (usesJsonEditorForMain.value && stringJsonEditorRef.value?.selectRange?.(match.start, match.end, { focus: false })) return;
     if (stringValueView.value === "utf8" && canEditCurrentStringFormat.value && stringTextareaRef.value) {
@@ -1486,7 +1490,17 @@ defineExpose({ focusSearch });
             <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
           </label>
         </div>
-        <RedisJsonEditor v-if="stringValueView === 'json' && stringValueDetail.json" ref="stringJsonEditorRef" v-model="editValue" class="min-h-0 flex-1" :save-disabled="savingString || !stringValueChanged" :read-only="savingString" :word-wrap="redisJsonWordWrap" @save="saveString" />
+        <RedisJsonEditor
+          v-if="stringValueView === 'json' && stringValueDetail.json"
+          ref="stringJsonEditorRef"
+          v-model="editValue"
+          class="min-h-0 flex-1"
+          :save-disabled="savingString || !stringValueChanged"
+          :read-only="savingString"
+          :word-wrap="redisJsonWordWrap"
+          :enable-builtin-find="false"
+          @save="saveString"
+        />
         <div v-else-if="stringValueView === 'javaserialize' && stringValueDetail.javaSerialized" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-4 text-sm leading-6">
           <JsonTree :value="stringValueDetail.javaSerialized.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
         </div>
@@ -1531,7 +1545,7 @@ defineExpose({ focusSearch });
             <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
           </label>
         </div>
-        <RedisJsonEditor v-model="editValue" class="min-h-0 flex-1" :save-disabled="savingJson || !redisJsonValueChanged" :read-only="savingJson" :word-wrap="redisJsonWordWrap" @save="saveJson" />
+        <RedisJsonEditor ref="redisJsonEditorRef" v-model="editValue" class="min-h-0 flex-1" :save-disabled="savingJson || !redisJsonValueChanged" :read-only="savingJson" :word-wrap="redisJsonWordWrap" :enable-builtin-find="false" @save="saveJson" />
         <div v-if="redisJsonValueChanged" class="px-4 py-2 border-t flex justify-end gap-2 shrink-0">
           <Button variant="ghost" size="sm" :disabled="savingJson" @click="discardRedisJsonEdit">{{ t("grid.discard") }}</Button>
           <Button size="sm" :disabled="savingJson" @click="saveJson"><Loader2 v-if="savingJson" class="w-3 h-3 mr-1 animate-spin" /><Save v-else class="w-3 h-3 mr-1" /> {{ t("grid.save") }}</Button>
@@ -1847,7 +1861,7 @@ defineExpose({ focusSearch });
               <Switch size="sm" :model-value="redisJsonWordWrap" @update:model-value="setRedisJsonWordWrap(Boolean($event))" />
             </label>
           </div>
-          <RedisJsonEditor v-if="isEditingHashJson" ref="memberJsonEditorRef" v-model="memberEditValue" class="min-h-0 flex-1" :save-disabled="savingMember || !memberValueChanged" :read-only="savingMember" :word-wrap="redisJsonWordWrap" @save="saveMemberEdit" />
+          <RedisJsonEditor v-if="isEditingHashJson" ref="memberJsonEditorRef" v-model="memberEditValue" class="min-h-0 flex-1" :save-disabled="savingMember || !memberValueChanged" :read-only="savingMember" :word-wrap="redisJsonWordWrap" :enable-builtin-find="false" @save="saveMemberEdit" />
           <div v-else-if="memberValueView === 'json' && selectedMemberDetail.json" class="dbx-editor-font-family min-h-0 flex-1 overflow-auto bg-background p-5 text-[13px] leading-6">
             <JsonTree :value="selectedMemberDetail.json.value" :word-wrap="redisJsonWordWrap" :highlight-json="highlightRedisJson" />
           </div>
