@@ -10,15 +10,14 @@ export interface RedisTextMatch {
 
 export function findRedisTextMatches(text: string, query: string, limit = REDIS_VALUE_SEARCH_MATCH_LIMIT): RedisTextMatch[] {
   if (!query || limit <= 0) return [];
-  const haystack = text.toLowerCase();
-  const needle = query.toLowerCase();
+  // Match against the original UTF-16 text so Unicode case folding cannot
+  // change string length and corrupt the offsets used for highlighting.
+  const pattern = new RegExp(escapeRegExp(query), "giu");
   const matches: RedisTextMatch[] = [];
-  let start = 0;
-  while (matches.length < limit && start <= haystack.length - needle.length) {
-    const index = haystack.indexOf(needle, start);
-    if (index < 0) break;
-    matches.push({ start: index, end: index + needle.length });
-    start = index + Math.max(needle.length, 1);
+  for (const match of text.matchAll(pattern)) {
+    const start = match.index;
+    matches.push({ start, end: start + match[0].length });
+    if (matches.length >= limit) break;
   }
   return matches;
 }
@@ -68,4 +67,8 @@ export function isTextContentSearchDragSource(target: EventTarget | null): boole
 
 function escapeHtml(text: string): string {
   return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

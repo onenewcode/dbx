@@ -20,6 +20,16 @@ test("findRedisTextMatches is case-insensitive and limited", () => {
     { start: 11, end: 16 },
   ]);
   assert.equal(findRedisTextMatches(text, "alpha", 1).length, 1);
+  assert.deepEqual(findRedisTextMatches("a+b aab", "a+b"), [{ start: 0, end: 3 }]);
+});
+
+test("findRedisTextMatches preserves offsets across Unicode case folding", () => {
+  const text = "İabc";
+  const matches = findRedisTextMatches(text, "ABC");
+
+  assert.deepEqual(matches, [{ start: 1, end: 4 }]);
+  assert.equal(text.slice(matches[0].start, matches[0].end), "abc");
+  assert.match(renderRedisTextSearchHtml(text, "ABC", 0), />abc<\/mark>/);
 });
 
 test("navigation and status helpers", () => {
