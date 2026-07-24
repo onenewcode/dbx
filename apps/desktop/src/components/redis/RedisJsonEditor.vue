@@ -37,6 +37,8 @@ const editor = useCellDetailEditor({
   folding: true,
   lineWrapping: () => props.wordWrap,
   readOnly: () => props.readOnly,
+  // Let App.vue focusSearch → RedisValueViewer.openValueSearch own Mod+F (unified panel).
+  enableBuiltinFind: false,
   onChange(value) {
     emit("update:modelValue", value);
   },
@@ -65,6 +67,16 @@ watch(
     if (editor.getValue() !== value) editor.setValue(value, "json");
   },
 );
+
+function openSearch(): boolean {
+  return editor.openSearch();
+}
+
+function selectRange(from: number, to: number, options?: { focus?: boolean }): boolean {
+  return editor.selectRange(from, to, options);
+}
+
+defineExpose({ openSearch, selectRange });
 </script>
 
 <template>
