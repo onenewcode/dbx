@@ -71,21 +71,24 @@ function applyTheme() {
   // force reflow so the class toggle takes effect before re-enabling transitions
   doc.offsetHeight; // eslint-disable-line @typescript-eslint/no-unused-expressions
   requestAnimationFrame(() => doc.classList.remove("disable-transitions"));
-  // Tao owns the Linux GTK preference. Calling setTheme(null) here forces it
-  // to light, so DBX must leave the native setting untouched on Linux.
-  if (!isTauriRuntime() || isLinuxTauriRuntime()) return;
+  if (!isTauriRuntime()) return;
+
+  const tauriTheme = getTauriThemeForMode(themeMode.value);
+  // Tauri owns the Linux GTK preference. Calling setTheme(null) here forces it
+  // to light, so only skip the native system-theme write and keep explicit modes.
+  if (isLinuxTauriRuntime() && tauriTheme == null) return;
 
   if (cachedTauriWindow) {
     cachedTauriWindow
       .getCurrentWindow()
-      .setTheme(getTauriThemeForMode(themeMode.value))
+      .setTheme(tauriTheme)
       .catch(() => {});
   } else {
     import("@tauri-apps/api/window").then((mod) => {
       cachedTauriWindow = mod;
       mod
         .getCurrentWindow()
-        .setTheme(getTauriThemeForMode(themeMode.value))
+        .setTheme(tauriTheme)
         .catch(() => {});
     });
   }

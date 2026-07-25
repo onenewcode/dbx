@@ -9,6 +9,22 @@ const requestAnimationFrameMock = vi.fn((callback: FrameRequestCallback) => {
 });
 const setTheme = vi.fn(async () => {});
 
+function installLocalStorageStub() {
+  const store = new Map<string, string>();
+  const storage = {
+    get length() {
+      return store.size;
+    },
+    clear: vi.fn(() => store.clear()),
+    getItem: vi.fn((key: string) => store.get(key) ?? null),
+    key: vi.fn((index: number) => [...store.keys()][index] ?? null),
+    removeItem: vi.fn((key: string) => store.delete(key)),
+    setItem: vi.fn((key: string, value: string) => store.set(key, String(value))),
+  } as Storage;
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
+  Object.defineProperty(window, "localStorage", { configurable: true, value: storage });
+}
+
 function installBrowserStubs() {
   const mediaQuery = {
     get matches() {
@@ -24,10 +40,15 @@ function installBrowserStubs() {
   Object.defineProperty(window, "matchMedia", { configurable: true, value: vi.fn(() => mediaQuery) });
 }
 
-async function loadTheme() {
-  localStorage.setItem("dbx-theme", "system");
+async function loadTheme(mode: "light" | "dark" | "system" = "system") {
+  window.localStorage.setItem("dbx-theme", mode);
   const { useTheme } = await import("@/composables/useTheme");
   return useTheme();
+}
+
+async function flushDynamicImport() {
+  await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 describe("useTheme on Linux", () => {
@@ -35,7 +56,8 @@ describe("useTheme on Linux", () => {
     vi.resetModules();
     vi.clearAllMocks();
     vi.unstubAllGlobals();
-    localStorage.clear();
+    installLocalStorageStub();
+    window.localStorage.clear();
     document.documentElement.className = "";
     document.documentElement.style.colorScheme = "";
     mediaQueryChangeListener = undefined;
@@ -71,5 +93,18 @@ describe("useTheme on Linux", () => {
     expect(theme.isDark.value).toBe(true);
     expect(document.documentElement.classList.contains("dark")).toBe(true);
     expect(setTheme).not.toHaveBeenCalled();
+  });
+
+  it("still writes explicit dark and light choices to the native Linux window theme", async () => {
+    const theme = await loadTheme("dark");
+    expect(theme.themeMode.value).toBe("dark");
+
+    theme.applyTheme();
+    await flushDynamicImport();
+    expect(setTheme).toHaveBeenLastCalledWith("dark");
+
+    theme.setThemeMode("light");
+    await flushDynamicImport();
+    expect(setTheme).toHaveBeenLastCalledWith("light");
   });
 });
