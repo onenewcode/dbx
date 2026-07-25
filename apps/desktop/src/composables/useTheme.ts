@@ -18,6 +18,10 @@ import {
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
+function isLinuxTauriRuntime() {
+  return isTauriRuntime() && typeof navigator !== "undefined" && /linux/i.test(navigator.userAgent);
+}
+
 const savedThemeMode = safeLocalStorageGet(APP_THEME_STORAGE_KEY);
 const themeMode = ref<AppThemeMode>(normalizeAppThemeMode(savedThemeMode));
 const savedThemePalette = safeLocalStorageGet(APP_THEME_PALETTE_STORAGE_KEY);
@@ -67,8 +71,10 @@ function applyTheme() {
   // force reflow so the class toggle takes effect before re-enabling transitions
   doc.offsetHeight; // eslint-disable-line @typescript-eslint/no-unused-expressions
   requestAnimationFrame(() => doc.classList.remove("disable-transitions"));
+  // Tao owns the Linux GTK preference. Calling setTheme(null) here forces it
+  // to light, so DBX must leave the native setting untouched on Linux.
+  if (!isTauriRuntime() || isLinuxTauriRuntime()) return;
 
-  if (!isTauriRuntime()) return;
   if (cachedTauriWindow) {
     cachedTauriWindow
       .getCurrentWindow()
