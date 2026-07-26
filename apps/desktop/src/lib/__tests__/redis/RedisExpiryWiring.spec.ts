@@ -158,9 +158,11 @@ describe("Redis expiry mode wiring", () => {
     };
 
     for (const [locale, source] of Object.entries(localeSources)) {
-      expect(source, locale).toMatch(/createKeyTtlPlaceholder: "[^"]+"/);
+      const ttlPlaceholder = source.match(/createKeyTtlPlaceholder: "([^"]+)"/)?.[1];
+
+      expect(ttlPlaceholder, locale).toBeDefined();
       expect(source, locale).toContain("createKeyPartialWrite:");
-      expect(source, locale).not.toContain(obsoletePlaceholders[locale as keyof typeof obsoletePlaceholders]);
+      expect(ttlPlaceholder, locale).not.toBe(obsoletePlaceholders[locale as keyof typeof obsoletePlaceholders]);
     }
     expect(browserSource).toContain("t('redis.createKeyTtlPlaceholder')");
     expect(viewerSource).toContain("t('redis.createKeyTtlPlaceholder')");
