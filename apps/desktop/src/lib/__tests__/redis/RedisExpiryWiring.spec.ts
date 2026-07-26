@@ -108,7 +108,7 @@ describe("Redis expiry mode wiring", () => {
     expect(save).toContain("toast(errorMessage(error), 3000)");
     expect(viewerSource).toContain('"[data-date-time-picker-content]"');
     expect(viewerSource).toContain('"[data-redis-expiry-mode-content]"');
-    expect(viewerSource).toContain('<DateTimePicker v-model="ttlExpireAt" compact');
+    expect(viewerSource).toContain('v-model="ttlExpireAt" compact');
     expect(viewerSource.match(/as="button"/g) ?? []).toHaveLength(2);
     expect(viewerSource).toContain(":aria-label=\"t('redis.expiry')\"");
     expect(viewerSource).toContain(":aria-label=\"t('grid.save')\"");
@@ -139,13 +139,14 @@ describe("Redis expiry mode wiring", () => {
     expect(viewerSource).toContain(':disabled="savingTtl"');
   });
 
-  it("keeps expiry controls aligned while wrapping in a narrow value pane", () => {
-    expect(viewerSource).toContain("flex-1 basis-full flex-wrap items-center");
-    expect(viewerSource).toContain("w-44 max-w-full shrink-0");
-    expect(viewerSource).toContain("min-w-[12rem] flex-1");
-    expect(viewerSource).toContain("compact full-width");
-    expect(viewerSource).toContain("redis-expiry-mode-trigger");
-    expect(viewerSource).toContain("overflow-wrap: anywhere;");
+  it("keeps expiry controls compact and inline in the value header", () => {
+    expect(viewerSource).toContain("flex min-w-0 max-w-full flex-wrap items-center gap-1");
+    expect(viewerSource).toContain('SelectTrigger size="sm"');
+    expect(viewerSource).toContain("max-w-[min(100%,14rem)]");
+    expect(viewerSource).toContain('v-model="ttlExpireAt" compact');
+    expect(viewerSource).not.toContain("full-width");
+    expect(viewerSource).not.toContain("basis-full");
+    expect(viewerSource).not.toContain("redis-expiry-mode-trigger");
     expect(viewerSource).not.toContain('class="h-6 w-30 text-xs"');
   });
 
