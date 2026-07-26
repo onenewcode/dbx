@@ -1570,7 +1570,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             </label>
             <label v-else-if="createKeyExpiryMode === 'at'" class="grid gap-1.5 text-xs font-medium">
               <span>{{ t("redis.expiryAt") }}</span>
-              <DateTimePicker v-model="createKeyExpireAt" :locale="locale" :disabled="creatingKey" />
+              <DateTimePicker v-model="createKeyExpireAt" full-width :locale="locale" :disabled="creatingKey" />
             </label>
           </div>
 

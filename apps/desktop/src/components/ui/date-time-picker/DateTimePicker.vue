@@ -19,6 +19,7 @@ const props = withDefaults(
     defaultOpen?: boolean;
     disabled?: boolean;
     compact?: boolean;
+    fullWidth?: boolean;
     locale?: string;
     min?: CalendarDateTimeLike | null;
     max?: CalendarDateTimeLike | null;
@@ -31,6 +32,7 @@ const props = withDefaults(
     defaultOpen: false,
     disabled: false,
     compact: false,
+    fullWidth: false,
     placeholder: undefined,
     labels: () => ({}),
   },
@@ -338,14 +340,14 @@ if (isOpen.value) beginDraft();
 
 <template>
   <Popover :open="isOpen" :modal="false" @update:open="onPopoverOpenChange">
-    <div data-date-time-picker class="inline-flex max-w-full min-w-0">
+    <div data-date-time-picker class="max-w-full min-w-0" :class="fullWidth ? 'w-full' : 'inline-flex'">
       <PopoverTrigger as-child>
         <slot name="trigger" :open="isOpen" :value="modelValue ?? null">
           <button
             type="button"
             data-date-time-picker-trigger
             class="flex min-w-0 items-center gap-1.5 rounded-md border border-input bg-background text-left tabular-nums outline-none transition-colors hover:bg-muted/50 focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50"
-            :class="compact ? 'h-6 px-1.5 text-xs' : 'h-8 px-2.5 text-sm'"
+            :class="[compact ? 'h-6 px-1.5 text-xs' : 'h-8 px-2.5 text-sm', fullWidth ? 'w-full' : '']"
             :disabled="disabled"
             :aria-label="label('open', 'Open date and time picker')"
           >

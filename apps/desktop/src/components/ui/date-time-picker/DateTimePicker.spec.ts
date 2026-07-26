@@ -131,6 +131,15 @@ describe("DateTimePicker", () => {
     expect(content.props.class).toContain("max-w-[calc(100vw-1rem)]");
   });
 
+  it("can fill the available width when used as a form control", () => {
+    const mounted = picker({ fullWidth: true });
+    const control = findOne(mounted.root, (node) => node.props["data-date-time-picker"] !== undefined);
+    const trigger = findOne(mounted.root, (node) => node.props["data-date-time-picker-trigger"] !== undefined);
+
+    expect(control.props.class).toContain("w-full");
+    expect(trigger.props.class).toContain("w-full");
+  });
+
   it("keeps selectable adjacent-month dates at muted semantic contrast", () => {
     const mounted = picker();
     const adjacentDay = findOne(mounted.root, (node) => node.props["data-date-time-picker-day"] === "2024-01-28");

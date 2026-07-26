@@ -1579,26 +1579,24 @@ defineExpose({ focusSearch });
               {{ t("redis.noExpiry") }}
             </Badge>
           </template>
-          <div ref="editTtlWrapper" v-else class="flex min-w-0 flex-1 basis-full flex-col gap-1">
-            <div class="flex min-w-0 items-start gap-1">
-              <div class="min-w-0 flex-1">
-                <Select v-model="ttlExpiryMode" :disabled="savingTtl">
-                  <SelectTrigger class="redis-expiry-mode-trigger !h-auto min-h-6 w-full py-1 text-[11px]" :aria-label="t('redis.expiry')">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent data-redis-expiry-mode-content>
-                    <SelectItem value="none">{{ t("redis.expiryNone") }}</SelectItem>
-                    <SelectItem value="ttl">{{ t("redis.expiryTtl") }}</SelectItem>
-                    <SelectItem value="at">{{ t("redis.expiryAt") }}</SelectItem>
-                  </SelectContent>
-                </Select>
-              </div>
-              <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="savingTtl" :title="t('grid.save')" :aria-label="t('grid.save')" @click="saveTtl"><Save class="h-3 w-3" /></Button>
+          <div ref="editTtlWrapper" v-else class="flex min-w-0 flex-1 basis-full flex-wrap items-center gap-1">
+            <div class="w-44 max-w-full shrink-0">
+              <Select v-model="ttlExpiryMode" :disabled="savingTtl">
+                <SelectTrigger class="redis-expiry-mode-trigger !h-auto min-h-6 w-full py-1 text-[11px]" :aria-label="t('redis.expiry')">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent data-redis-expiry-mode-content>
+                  <SelectItem value="none">{{ t("redis.expiryNone") }}</SelectItem>
+                  <SelectItem value="ttl">{{ t("redis.expiryTtl") }}</SelectItem>
+                  <SelectItem value="at">{{ t("redis.expiryAt") }}</SelectItem>
+                </SelectContent>
+              </Select>
             </div>
-            <Input v-if="ttlExpiryMode === 'ttl'" ref="ttlInputEl" v-model="ttlInput" class="h-6 w-full text-xs" :disabled="savingTtl" inputmode="numeric" :placeholder="t('redis.createKeyTtlPlaceholder')" @keydown.enter="saveTtl" @keydown.escape="cancelEditTtl" />
-            <div v-else-if="ttlExpiryMode === 'at'" class="min-w-0">
-              <DateTimePicker v-model="ttlExpireAt" compact :locale="locale" :disabled="savingTtl" />
+            <Input v-if="ttlExpiryMode === 'ttl'" ref="ttlInputEl" v-model="ttlInput" class="h-6 min-w-[10rem] flex-1 text-xs" :disabled="savingTtl" inputmode="numeric" :placeholder="t('redis.createKeyTtlPlaceholder')" @keydown.enter="saveTtl" @keydown.escape="cancelEditTtl" />
+            <div v-else-if="ttlExpiryMode === 'at'" class="min-w-[12rem] flex-1">
+              <DateTimePicker v-model="ttlExpireAt" compact full-width :locale="locale" :disabled="savingTtl" />
             </div>
+            <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="savingTtl" :title="t('grid.save')" :aria-label="t('grid.save')" @click="saveTtl"><Save class="h-3 w-3" /></Button>
           </div>
           <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :class="{ 'text-primary bg-accent': autoRefreshEnabled }" :title="t('redis.autoRefresh')" @click="toggleAutoRefresh">
             <Clock class="h-3.5 w-3.5" />

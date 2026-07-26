@@ -139,8 +139,11 @@ describe("Redis expiry mode wiring", () => {
     expect(viewerSource).toContain(':disabled="savingTtl"');
   });
 
-  it("lets the localized expiry mode control wrap in a narrow value pane", () => {
-    expect(viewerSource).toContain("flex-1 basis-full flex-col");
+  it("keeps expiry controls aligned while wrapping in a narrow value pane", () => {
+    expect(viewerSource).toContain("flex-1 basis-full flex-wrap items-center");
+    expect(viewerSource).toContain("w-44 max-w-full shrink-0");
+    expect(viewerSource).toContain("min-w-[12rem] flex-1");
+    expect(viewerSource).toContain("compact full-width");
     expect(viewerSource).toContain("redis-expiry-mode-trigger");
     expect(viewerSource).toContain("overflow-wrap: anywhere;");
     expect(viewerSource).not.toContain('class="h-6 w-30 text-xs"');
