@@ -331,10 +331,12 @@ function redisKeyInfo(keyType = "json") {
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>((next) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((next, fail) => {
     resolve = next;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function resetApiMocks() {
@@ -624,6 +626,38 @@ describe("RedisKeyBrowser expiry creation", () => {
 });
 
 describe("RedisKeyBrowser fuzzy key hierarchy", () => {
+  it("keeps NUL-containing fuzzy groups isolated when selecting keys to delete", async () => {
+    const firstKeyRaw = "cmF3LWZpcnN0";
+    const secondKeyRaw = "cmF3LXNlY29uZA==";
+    const keys = [
+      { key_display: `a\0b:c:x`, key_raw: firstKeyRaw, key_type: "string", ttl: -1 },
+      { key_display: `a:b\0c:y`, key_raw: secondKeyRaw, key_type: "string", ttl: -1 },
+    ];
+    mocks.redisScanKeysBatch.mockResolvedValue({ cursor: 0, keys, total_keys: keys.length });
+    mocks.redisDeleteKeys.mockResolvedValue(1);
+    mountBrowser();
+    await settle();
+
+    await submitKeySearch("a");
+    clickButtonWithText("redis.fuzzyMatch");
+    await settle();
+
+    const firstGroupCheckbox = groupCheckbox(`a\0b`);
+    firstGroupCheckbox.checked = true;
+    firstGroupCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    const deleteButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "1");
+    expect(deleteButton).toBeDefined();
+    deleteButton!.click();
+    await settle();
+    requiredElement<HTMLButtonElement>("[data-test-danger-confirm]").click();
+    await settle();
+
+    expect(mocks.redisDeleteKeys).toHaveBeenCalledTimes(1);
+    expect(mocks.redisDeleteKeys).toHaveBeenCalledWith("connection", 0, [firstKeyRaw]);
+    expect(mocks.redisDeleteKeys.mock.calls[0]?.[2]).not.toContain(secondKeyRaw);
+  });
+
   it("keeps regular key searches flat, then selects and deletes a loaded fuzzy branch", async () => {
     const keys = [
       { key_display: "user:profile:email", key_raw: "cmF3LWVtYWls", key_type: "string", ttl: -1 },
@@ -797,6 +831,52 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
 
     expect(mocks.redisDeleteKeys.mock.calls.map((call) => call[2]?.length)).toEqual([1_000, 1]);
     expect(mocks.toast).toHaveBeenCalledWith("second batch failed", 5000);
+    expect(document.body.textContent).toContain("fresh");
+    expect(document.body.textContent).not.toContain("0000");
+  });
+
+  it("reloads after a later delete batch fails while the browser is deactivated", async () => {
+    const keys = Array.from({ length: 1_001 }, (_, index) => ({
+      key_display: `batch:${String(index).padStart(4, "0")}`,
+      key_raw: `cmF3LWJhdGNoLS${index}`,
+      key_type: "string",
+      ttl: -1,
+    }));
+    const freshKeys = [{ key_display: "fresh:remaining", key_raw: "ZnJlc2gtcmVtYWluaW5n", key_type: "string", ttl: -1 }];
+    const laterDelete = deferred<number>();
+    let returnFreshResults = false;
+    mocks.redisScanKeysBatch.mockImplementation(() => Promise.resolve(returnFreshResults ? { cursor: 0, keys: freshKeys, total_keys: 1 } : { cursor: 0, keys, total_keys: keys.length }));
+    mocks.redisDeleteKeys.mockResolvedValueOnce(1_000).mockImplementationOnce(() => laterDelete.promise);
+    const browser = mountKeptAliveBrowser();
+    await settle();
+
+    await submitKeySearch("batch");
+    clickButtonWithText("redis.fuzzyMatch");
+    await settle();
+
+    const batchCheckbox = groupCheckbox("batch");
+    batchCheckbox.checked = true;
+    batchCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
+    await settle();
+    const deleteButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === String(keys.length));
+    expect(deleteButton).toBeDefined();
+    deleteButton!.click();
+    await settle();
+    requiredElement<HTMLButtonElement>("[data-test-danger-confirm]").click();
+    await settle();
+
+    expect(mocks.redisDeleteKeys.mock.calls.map((call) => call[2]?.length)).toEqual([1_000, 1]);
+    await browser.deactivate();
+    returnFreshResults = true;
+    laterDelete.reject(new Error("second batch failed while inactive"));
+    await settle();
+    const scanCountBeforeActivation = mocks.redisScanKeysBatch.mock.calls.length;
+
+    await browser.activate();
+    await settle();
+
+    expect(mocks.toast).toHaveBeenCalledWith("second batch failed while inactive", 5000);
+    expect(mocks.redisScanKeysBatch.mock.calls.length).toBeGreaterThan(scanCountBeforeActivation);
     expect(document.body.textContent).toContain("fresh");
     expect(document.body.textContent).not.toContain("0000");
   });

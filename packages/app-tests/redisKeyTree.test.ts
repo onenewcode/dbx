@@ -153,6 +153,24 @@ test("collectRedisGroupKeyRaws returns every leaf key under a group", () => {
   assert.deepEqual(collectRedisGroupKeyRaws(userGroup), ["k2", "k1", "k3"]);
 });
 
+test("group identity keeps NUL-containing path segments isolated", () => {
+  const firstKeyRaw = "raw-first";
+  const secondKeyRaw = "raw-second";
+  const index = createRedisKeyTreeIndex([makeKey(`a\0b:c:x`, firstKeyRaw), makeKey(`a:b\0c:y`, secondKeyRaw)], 0);
+
+  const firstRoot = findGroup(index.root, `a\0b`);
+  const firstBranch = findGroup(firstRoot.children, "c");
+  const secondRoot = findGroup(index.root, "a");
+  const secondBranch = findGroup(secondRoot.children, `b\0c`);
+
+  assert.notEqual(firstBranch.id, secondBranch.id);
+  assert.equal(index.groupById.size, 4);
+  assert.deepEqual(collectRedisGroupKeyRaws(firstRoot), [firstKeyRaw]);
+  assert.deepEqual(collectRedisGroupKeyRaws(secondRoot), [secondKeyRaw]);
+  assert.deepEqual(index.ancestorGroupIdsByKeyRaw.get(firstKeyRaw), [firstRoot.id, firstBranch.id]);
+  assert.deepEqual(index.ancestorGroupIdsByKeyRaw.get(secondKeyRaw), [secondRoot.id, secondBranch.id]);
+});
+
 test("tree index incrementally merges SCAN pages with loaded counts and selection ancestry", () => {
   const index = createRedisKeyTreeIndex([makeKey("team:api:v1", "k1"), makeKey("team:web:home", "k2")], 0);
   const team = findGroup(index.root, "team");

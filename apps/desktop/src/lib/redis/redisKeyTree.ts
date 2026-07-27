@@ -58,7 +58,7 @@ export function redisKeyNameCopyText(node: RedisKeyTreeNode): string | null {
 }
 
 function buildGroupId(db: number, pathSegments: string[]): string {
-  return `group:${db}:${pathSegments.join("\u0000")}`;
+  return `group:${db}:${JSON.stringify(pathSegments)}`;
 }
 
 function buildLeafId(db: number, keyRaw: string): string {

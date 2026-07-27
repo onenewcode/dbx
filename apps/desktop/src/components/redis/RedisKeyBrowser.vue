@@ -142,6 +142,7 @@ const createKeyTypeHelpOffsetTop = ref(0);
 let nextEntryId = 0;
 let searchRequestId = 0;
 let redisBrowserIsActive = true;
+let reloadKeysOnActivation = false;
 let redisDbFlushedListenerRegistered = false;
 const loadedKeyRaws = new Set<string>();
 let treeIndex: RedisKeyTreeIndex | null = null;
@@ -763,6 +764,7 @@ async function deleteKeyRaws(keys: string[]) {
     // A Cluster request may have deleted an earlier shard before a later error.
     // Reload instead of leaving a potentially stale partial result in the tree.
     if (redisBrowserIsActive) await loadKeys();
+    else reloadKeysOnActivation = true;
   } finally {
     deletingKeys.value = false;
   }
@@ -1411,6 +1413,8 @@ onMounted(async () => {
 onActivated(async () => {
   resumeRedisBrowserBackgroundWork();
   void autofocusSearchOnce();
+  const shouldReload = reloadKeysOnActivation;
+  reloadKeysOnActivation = false;
   // Ensure the connection is still alive after reactivation (e.g. tab switch).
   // If keys failed to load previously (empty list), retry loading.
   try {
@@ -1418,7 +1422,7 @@ onActivated(async () => {
   } catch (e) {
     console.warn("[DBX] ensureConnected failed for", props.connectionId, e);
   }
-  if (flatKeys.value.length === 0 && !loading.value) {
+  if ((shouldReload || flatKeys.value.length === 0) && !loading.value) {
     void loadKeys();
   }
 });
