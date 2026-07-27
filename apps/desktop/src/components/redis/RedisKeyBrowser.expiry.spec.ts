@@ -282,11 +282,14 @@ vi.mock("vue-virtual-scroller", async () => {
       inheritAttrs: false,
       props: { items: { type: Array, default: () => [] } },
       setup(props, { attrs, slots }) {
+        // Mirror the real scroller: interaction tests should render a viewport,
+        // not every row in a deliberately large result set.
+        const visibleItemCount = 50;
         return () =>
           h(
             "div",
             attrs,
-            props.items.map((item) => slots.default?.({ item })),
+            props.items.slice(0, visibleItemCount).map((item) => slots.default?.({ item })),
           );
       },
     }),
