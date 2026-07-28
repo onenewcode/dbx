@@ -2455,16 +2455,24 @@ pub async fn get_stream_pending_page<C>(
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
-    let start =
-        cursor.filter(|value| !value.is_empty()).map(|value| format!("({value}")).unwrap_or_else(|| "-".to_string());
+    let cursor = cursor.filter(|value| !value.is_empty());
+    let start = cursor.unwrap_or("-");
+    // Redis before 6.2 has no exclusive XPENDING ranges. A cursor page needs
+    // a duplicate candidate and a lookahead row to page without skipping IDs.
+    let requested_count = STREAM_PENDING_PAGE_SIZE + 1 + usize::from(cursor.is_some());
     let mut command = redis::cmd("XPENDING");
-    command.arg(key).arg(group).arg(start).arg("+").arg(STREAM_PENDING_PAGE_SIZE + 1);
+    command.arg(key).arg(group).arg(start).arg("+").arg(requested_count);
     if let Some(consumer) = consumer {
         command.arg(consumer);
     }
     let raw: RedisRawValue = command.query_async(con).await.map_err(|e| e.to_string())?;
 
     let mut entries = parse_stream_pending_entries(raw);
+    if let Some(cursor) = cursor {
+        if entries.first().is_some_and(|entry| entry.id == cursor) {
+            entries.remove(0);
+        }
+    }
     let next_cursor = if entries.len() > STREAM_PENDING_PAGE_SIZE {
         entries.truncate(STREAM_PENDING_PAGE_SIZE);
         entries.last().map(|entry| entry.id.clone())
@@ -3507,7 +3515,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stream_monitoring_commands_are_read_only_and_pending_paginates_exclusively() {
+    async fn stream_monitoring_commands_are_read_only_and_pending_pagination_supports_redis_5() {
         let groups = RedisRawValue::Array(vec![RedisRawValue::Array(vec![
             bulk("name"),
             bulk("payments"),
@@ -3527,7 +3535,7 @@ mod tests {
             RedisRawValue::Int(10),
         ])]);
         let pending = RedisRawValue::Array(
-            (0..=100)
+            (17..=118)
                 .map(|index| {
                     RedisRawValue::Array(vec![
                         bulk(&format!("1714470000000-{index}")),
@@ -3549,7 +3557,9 @@ mod tests {
         assert_eq!(groups.len(), 1);
         assert_eq!(consumers.len(), 1);
         assert_eq!(page.entries.len(), 100);
-        assert_eq!(page.next_cursor.as_deref(), Some("1714470000000-99"));
+        assert_eq!(page.entries.first().map(|entry| entry.id.as_str()), Some("1714470000000-18"));
+        assert_eq!(page.entries.last().map(|entry| entry.id.as_str()), Some("1714470000000-117"));
+        assert_eq!(page.next_cursor.as_deref(), Some("1714470000000-117"));
         assert_eq!(con.command_count("XINFO"), 2);
         assert_eq!(con.command_count("XPENDING"), 1);
         assert_eq!(con.command_count("XGROUP"), 0);
@@ -3557,8 +3567,38 @@ mod tests {
         assert_eq!(con.command_count("XCLAIM"), 0);
         assert!(con.commands[0].contains("\r\nGROUPS\r\n"));
         assert!(con.commands[1].contains("\r\nCONSUMERS\r\n"));
-        assert!(con.commands[2].contains("\r\n(1714470000000-17\r\n"));
-        assert!(con.commands[2].contains("\r\n101\r\n"));
+        assert!(con.commands[2].contains("\r\n1714470000000-17\r\n"));
+        assert!(!con.commands[2].contains("\r\n(1714470000000-17\r\n"));
+        assert!(con.commands[2].contains("\r\n102\r\n"));
+    }
+
+    #[tokio::test]
+    async fn stream_pending_pagination_keeps_the_first_entry_when_cursor_is_acknowledged() {
+        let pending = RedisRawValue::Array(
+            (18..=118)
+                .map(|index| {
+                    RedisRawValue::Array(vec![
+                        bulk(&format!("1714470000000-{index}")),
+                        bulk("worker-a"),
+                        RedisRawValue::Int(index),
+                        RedisRawValue::Int(1),
+                    ])
+                })
+                .collect(),
+        );
+        let mut con = FakeRedisConnection::new(vec![pending]);
+
+        let page = super::get_stream_pending_page(&mut con, b"orders", b"payments", Some("1714470000000-17"), None)
+            .await
+            .unwrap();
+
+        assert_eq!(page.entries.len(), 100);
+        assert_eq!(page.entries.first().map(|entry| entry.id.as_str()), Some("1714470000000-18"));
+        assert_eq!(page.entries.last().map(|entry| entry.id.as_str()), Some("1714470000000-117"));
+        assert_eq!(page.next_cursor.as_deref(), Some("1714470000000-117"));
+        assert!(con.commands[0].contains("\r\n1714470000000-17\r\n"));
+        assert!(!con.commands[0].contains("\r\n(1714470000000-17\r\n"));
+        assert!(con.commands[0].contains("\r\n102\r\n"));
     }
 
     #[tokio::test]
@@ -3576,6 +3616,9 @@ mod tests {
 
         assert_eq!(page.entries.len(), 1);
         assert_eq!(con.command_count("XPENDING"), 1);
+        assert!(con.commands[0].contains("\r\n-\r\n"));
+        assert!(con.commands[0].contains("\r\n+\r\n"));
+        assert!(con.commands[0].contains("\r\n101\r\n"));
         assert!(con.commands[0].contains("\r\nworker-a\r\n"));
     }
 

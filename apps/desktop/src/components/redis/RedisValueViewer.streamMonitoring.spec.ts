@@ -369,4 +369,58 @@ describe("RedisValueViewer stream monitoring", () => {
     expect(host.querySelector("[data-redis-stream-consumer-crumb]")).toBeNull();
     expect(host.querySelector("[data-redis-stream-pending]")).toBeNull();
   });
+
+  it("returns to the group list when refresh removes the selected group", async () => {
+    mocks.redisGetValue.mockResolvedValue(streamValue());
+    mocks.redisGetStreamGroups.mockResolvedValueOnce([group()]).mockResolvedValueOnce([]);
+    mocks.redisGetStreamConsumers.mockResolvedValue([{ name: blob("d29ya2VyLWE="), pending: 1, idle_ms: 1_200, inactive_ms: 800 }]);
+    const host = mountViewer();
+    await settle();
+
+    openGroups(host);
+    await settle();
+    host.querySelector<HTMLElement>("[data-redis-stream-group-row]")!.click();
+    await settle();
+
+    host.querySelector<HTMLButtonElement>("[data-redis-value-refresh]")!.click();
+    await settle();
+
+    expect(mocks.redisGetStreamGroups).toHaveBeenCalledTimes(2);
+    expect(host.querySelector("[data-redis-stream-group-detail]")).toBeNull();
+    expect(host.querySelector("[data-redis-stream-groups]")).toBeNull();
+    expect(host.textContent).toContain("No consumer groups");
+  });
+
+  it("retries failed consumer and pending reads without retaining stale data", async () => {
+    mocks.redisGetValue.mockResolvedValue(streamValue());
+    mocks.redisGetStreamGroups.mockResolvedValue([group()]);
+    mocks.redisGetStreamConsumers.mockRejectedValueOnce(new Error("NOPERM XINFO is not allowed")).mockResolvedValueOnce([{ name: blob("d29ya2VyLWE="), pending: 1, idle_ms: 1_200, inactive_ms: 800 }]);
+    mocks.redisGetStreamPending.mockRejectedValueOnce(new Error("NOPERM XPENDING is not allowed")).mockResolvedValueOnce({
+      entries: [{ id: "1714470000000-0", consumer: blob("d29ya2VyLWE="), idle_ms: 2_400, deliveries: 2 }],
+    });
+    const host = mountViewer();
+    await settle();
+
+    openGroups(host);
+    await settle();
+    host.querySelector<HTMLElement>("[data-redis-stream-group-row]")!.click();
+    await settle();
+
+    expect(host.querySelector("[data-redis-stream-consumers-retry]")).not.toBeNull();
+    expect(host.textContent).toContain("NOPERM XINFO is not allowed");
+    host.querySelector<HTMLButtonElement>("[data-redis-stream-consumers-retry]")!.click();
+    await settle();
+
+    expect(mocks.redisGetStreamConsumers).toHaveBeenCalledTimes(2);
+    host.querySelector<HTMLButtonElement>("[data-redis-stream-consumer-row]")!.click();
+    await settle();
+
+    expect(host.querySelector("[data-redis-stream-pending-retry]")).not.toBeNull();
+    expect(host.textContent).toContain("NOPERM XPENDING is not allowed");
+    host.querySelector<HTMLButtonElement>("[data-redis-stream-pending-retry]")!.click();
+    await settle();
+
+    expect(mocks.redisGetStreamPending).toHaveBeenCalledTimes(2);
+    expect(host.querySelector("[data-redis-stream-pending]")?.textContent).toContain("1714470000000-0");
+  });
 });
