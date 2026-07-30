@@ -2007,7 +2007,7 @@ export type RedisValueData =
       total: number;
       scan_cursor?: number;
     }
-  | { kind: "stream"; entries: RedisStreamEntry[]; total: number; next_cursor?: string }
+  | { kind: "stream"; entries: RedisStreamEntry[]; total?: number; next_cursor?: string }
   | { kind: "unknown" };
 
 export interface RedisValue {

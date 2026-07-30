@@ -231,7 +231,12 @@ pub enum RedisValueData {
     },
     Stream {
         entries: Vec<RedisStreamEntry>,
-        total: u64,
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "serialize_optional_redis_u64_for_js"
+        )]
+        total: Option<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         next_cursor: Option<String>,
     },
@@ -2423,7 +2428,7 @@ fn redis_search_value_size(value: &RedisValue) -> u64 {
         | RedisValueData::Set { total, .. }
         | RedisValueData::Hash { total, .. }
         | RedisValueData::Zset { total, .. } => *total,
-        RedisValueData::Stream { total, .. } => *total,
+        RedisValueData::Stream { entries, total, .. } => total.unwrap_or(entries.len() as u64),
         RedisValueData::Unknown => 0,
     }
 }
@@ -2454,7 +2459,7 @@ where
     Ok(stream_entries_page_from_raw(raw, cursor))
 }
 
-async fn get_stream_initial_page<C>(con: &mut C, key: &[u8]) -> Result<(i64, u64, RedisStreamPage), String>
+async fn get_stream_initial_page<C>(con: &mut C, key: &[u8]) -> Result<(i64, Option<u64>, RedisStreamPage), String>
 where
     C: ConnectionLike + Send + Sync + Unpin,
 {
@@ -2463,12 +2468,12 @@ where
     pipe.cmd("XLEN").arg(key);
     pipe.cmd("XRANGE").arg(key).arg("-").arg("+").arg("COUNT").arg(stream_entry_page_request_count(None));
     match pipe.query_async::<(i64, u64, RedisRawValue)>(con).await {
-        Ok((ttl, total, raw)) => Ok((ttl, total, stream_entries_page_from_raw(raw, None))),
+        Ok((ttl, total, raw)) => Ok((ttl, Some(total), stream_entries_page_from_raw(raw, None))),
         Err(_) => {
             // An ACL may allow XRANGE while rejecting the optional XLEN
             // metadata. Keep the Stream readable and omit the unknown size.
             let ttl: i64 = redis::cmd("TTL").arg(key).query_async(con).await.unwrap_or(-1);
-            let total: u64 = redis::cmd("XLEN").arg(key).query_async(con).await.unwrap_or(0);
+            let total = redis::cmd("XLEN").arg(key).query_async::<u64>(con).await.ok();
             let page = get_stream_entries_page(con, key, None).await?;
             Ok((ttl, total, page))
         }
@@ -3607,7 +3612,7 @@ mod tests {
         let RedisValueData::Stream { entries, total, next_cursor } = &value.data else {
             panic!("expected a Stream value");
         };
-        assert_eq!(*total, 177);
+        assert_eq!(*total, Some(177));
         assert_eq!(entries.len(), 1);
         assert!(next_cursor.is_none());
         assert_eq!(super::redis_search_value_size(&value), 177);
@@ -3645,7 +3650,9 @@ mod tests {
             panic!("expected a Stream value");
         };
         assert_eq!(entries.len(), 1);
-        assert_eq!(*total, 0);
+        assert_eq!(*total, None);
+        assert_eq!(super::redis_search_value_size(&value), 1);
+        assert!(serde_json::to_value(&value).unwrap()["data"].get("total").is_none());
         assert_eq!(con.command_count("XLEN"), 2);
         assert_eq!(con.command_count("XRANGE"), 2);
     }

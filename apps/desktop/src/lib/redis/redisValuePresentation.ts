@@ -327,7 +327,7 @@ export function redisValueSize(value: RedisValue): number {
     case "zset":
       return value.data.total;
     case "stream":
-      return value.data.total;
+      return value.data.total ?? value.data.entries.length;
     default:
       return 0;
   }
