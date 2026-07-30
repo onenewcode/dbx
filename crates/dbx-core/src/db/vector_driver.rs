@@ -394,8 +394,8 @@ fn milvus_dimension(field: &Value) -> Option<u32> {
     value.as_u64().and_then(|dimension| dimension.try_into().ok()).or_else(|| value.as_str()?.parse().ok())
 }
 
-fn milvus_flag(field: &Value, name: &str, old_name: &str) -> bool {
-    field.get(name).or_else(|| field.get(old_name)).and_then(Value::as_bool).unwrap_or(false)
+fn milvus_flag(field: &Value, names: &[&str]) -> bool {
+    names.iter().find_map(|name| field.get(name)).and_then(Value::as_bool).unwrap_or(false)
 }
 
 fn is_milvus_vector_data_type(data_type: &str) -> bool {
@@ -409,11 +409,11 @@ fn milvus_field_info(field: &Value) -> Option<MilvusFieldInfo> {
         name,
         dimension: is_milvus_vector_data_type(&data_type).then(|| milvus_dimension(field)).flatten(),
         data_type,
-        primary_key: milvus_flag(field, "isPrimaryKey", "is_primary_key"),
-        auto_id: milvus_flag(field, "autoId", "auto_id"),
+        primary_key: milvus_flag(field, &["primaryKey", "isPrimaryKey", "is_primary_key"]),
+        auto_id: milvus_flag(field, &["autoId", "auto_id"]),
         nullable: field.get("nullable").and_then(Value::as_bool).unwrap_or(false),
         has_default_value: field.get("defaultValue").is_some_and(|value| !value.is_null()),
-        is_function_output: milvus_flag(field, "isFunctionOutput", "is_function_output"),
+        is_function_output: milvus_flag(field, &["isFunctionOutput", "is_function_output"]),
     })
 }
 
@@ -942,7 +942,7 @@ mod tests {
     #[test]
     fn retains_milvus_fields_needed_for_schema_driven_upsert() {
         let fields = vec![
-            json!({ "fieldName": "doc_id", "dataType": "VarChar", "isPrimaryKey": true }),
+            json!({ "name": "doc_id", "type": "VarChar", "primaryKey": true, "autoId": true }),
             json!({ "fieldName": "embedding", "dataType": "FloatVector", "elementTypeParams": { "dim": "4" } }),
             json!({ "fieldName": "score", "dataType": "Double" }),
             json!({ "fieldName": "optional_note", "dataType": "VarChar", "nullable": true }),
@@ -954,6 +954,7 @@ mod tests {
         assert_eq!(schema.fields.len(), 6);
         let primary_key = schema.fields.iter().find(|field| field.name == "doc_id").unwrap();
         assert!(primary_key.primary_key);
+        assert!(primary_key.auto_id);
         let vector = schema.fields.iter().find(|field| field.name == "embedding").unwrap();
         assert_eq!(vector.dimension, Some(4));
         assert_eq!(vector.data_type, "FloatVector");

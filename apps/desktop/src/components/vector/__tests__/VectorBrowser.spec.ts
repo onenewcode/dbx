@@ -194,6 +194,63 @@ describe("VectorBrowser default requests", () => {
     });
   });
 
+  it("keeps an auto-generated primary key in the default upsert entity", async () => {
+    backend.vectorGetCollectionDetail.mockResolvedValue({
+      name: "documents",
+      id: "documents",
+      milvusSchema: {
+        fields: [field("document_id", "Int64", { primaryKey: true, autoId: true }), field("embedding", "FloatVector", { dimension: 3 })],
+      },
+    });
+
+    app = createApp(VectorBrowser, {
+      connectionId: "milvus-1",
+      database: "default",
+      collection: "documents",
+      databaseType: "milvus",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    buttonWithText("vector.upsert").click();
+    await nextTick();
+
+    expect(requestBody().data[0]).toEqual({ document_id: 1, embedding: [0.1, 0.2, 0.3] });
+  });
+
+  it("uses a BM25 function output field for full-text search", async () => {
+    backend.vectorGetCollectionDetail.mockResolvedValue({
+      name: "documents",
+      id: "documents",
+      milvusSchema: {
+        fields: [
+          field("document_id", "Int64", { primaryKey: true }),
+          field("text", "VarChar"),
+          field("sparse", "SparseFloatVector", { isFunctionOutput: true }),
+        ],
+      },
+    });
+
+    app = createApp(VectorBrowser, {
+      connectionId: "milvus-1",
+      database: "default",
+      collection: "documents",
+      databaseType: "milvus",
+    });
+    app.mount(root!);
+    await flushUi();
+
+    buttonWithText("vector.search").click();
+    await nextTick();
+
+    expect(requestBody()).toMatchObject({ annsField: "sparse", data: ["x"] });
+
+    const searchButtons = [...root!.querySelectorAll<HTMLButtonElement>("button")].filter((button) => button.textContent?.trim() === "vector.search");
+    searchButtons[searchButtons.length - 1].click();
+    await flushUi();
+    expect(backend.executeMulti).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps a custom request when the schema arrives", async () => {
     let resolveDetail: (value: CollectionInfo) => void;
     backend.vectorGetCollectionDetail.mockReturnValue(

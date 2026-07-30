@@ -42,7 +42,9 @@ let milvusDetailGeneration = 0;
 let milvusDetailLoad: Promise<void> | undefined;
 
 const milvusFields = computed(() => milvusSchema.value?.fields ?? []);
-const milvusSearchField = computed(() => milvusFields.value.find((field) => isMilvusVectorField(field) && !field.isFunctionOutput));
+const milvusSearchField = computed(
+  () => milvusFields.value.find((field) => isMilvusVectorField(field) && !field.isFunctionOutput) ?? milvusFields.value.find(isMilvusVectorField),
+);
 const collectionDimension = computed(() => milvusSearchField.value?.dimension ?? props.dimension);
 const dim = computed(() => collectionDimension.value ?? 4);
 function sampleVector(dimension = dim.value): number[] {
@@ -164,7 +166,11 @@ function defaultMilvusValue(field: MilvusFieldInfo): unknown {
 }
 
 function defaultMilvusUpsertEntity(): Record<string, unknown> {
-  return Object.fromEntries(milvusFields.value.filter((field) => !field.autoId && !field.isFunctionOutput && (isMilvusVectorField(field) || (!field.nullable && !field.hasDefaultValue))).map((field) => [field.name, defaultMilvusValue(field)]));
+  return Object.fromEntries(
+    milvusFields.value
+      .filter((field) => !field.isFunctionOutput && (!field.autoId || field.primaryKey) && (isMilvusVectorField(field) || (!field.nullable && !field.hasDefaultValue)))
+      .map((field) => [field.name, defaultMilvusValue(field)]),
+  );
 }
 
 function defaultMilvusPrimaryKeyFilter(): string {
@@ -182,9 +188,10 @@ function parseJsonValue(input: string): unknown | undefined {
 }
 
 function tryParseMilvusSearchVector(input: string): unknown {
-  const parsed = parseJsonValue(input);
-  if (Array.isArray(parsed) || (parsed && typeof parsed === "object")) return parsed;
   const field = milvusSearchField.value;
+  const parsed = parseJsonValue(input);
+  if (field?.isFunctionOutput) return typeof parsed === "string" ? parsed : input.trim() || "x";
+  if (Array.isArray(parsed) || (parsed && typeof parsed === "object")) return parsed;
   return field ? defaultMilvusValue(field) : [];
 }
 
@@ -303,10 +310,7 @@ function loadMilvusCollectionDetail(): Promise<void> {
     .then((info) => {
       if (generation !== milvusDetailGeneration) return;
       milvusSchema.value = info.milvusSchema;
-      if (!milvusSearchField.value) {
-        milvusDetailError.value = "Milvus collection schema did not return a supported vector field.";
-        return;
-      }
+      if (!milvusSearchField.value) milvusDetailError.value = "Milvus collection schema did not return a supported vector field.";
       if (requestIsDefault.value) resetRequest();
     })
     .catch((reason: unknown) => {
@@ -320,7 +324,10 @@ function loadMilvusCollectionDetail(): Promise<void> {
 async function ensureMilvusDefaultSchema() {
   if (props.databaseType !== "milvus" || operationMode.value === "browse" || !requestIsDefault.value) return;
   if (!milvusSchema.value) await loadMilvusCollectionDetail();
-  if (!milvusSearchField.value) {
+  if (!milvusSchema.value) {
+    throw new Error(milvusDetailError.value || "Unable to load the Milvus collection schema for the default request.");
+  }
+  if (operationMode.value === "search" && !milvusSearchField.value) {
     throw new Error(milvusDetailError.value || "Unable to determine the Milvus vector field for the default request.");
   }
 }
