@@ -223,11 +223,7 @@ describe("VectorBrowser default requests", () => {
       name: "documents",
       id: "documents",
       milvusSchema: {
-        fields: [
-          field("document_id", "Int64", { primaryKey: true }),
-          field("text", "VarChar"),
-          field("sparse", "SparseFloatVector", { isFunctionOutput: true }),
-        ],
+        fields: [field("document_id", "Int64", { primaryKey: true }), field("text", "VarChar"), field("sparse", "SparseFloatVector", { isFunctionOutput: true })],
       },
     });
 

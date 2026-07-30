@@ -42,9 +42,7 @@ let milvusDetailGeneration = 0;
 let milvusDetailLoad: Promise<void> | undefined;
 
 const milvusFields = computed(() => milvusSchema.value?.fields ?? []);
-const milvusSearchField = computed(
-  () => milvusFields.value.find((field) => isMilvusVectorField(field) && !field.isFunctionOutput) ?? milvusFields.value.find(isMilvusVectorField),
-);
+const milvusSearchField = computed(() => milvusFields.value.find((field) => isMilvusVectorField(field) && !field.isFunctionOutput) ?? milvusFields.value.find(isMilvusVectorField));
 const collectionDimension = computed(() => milvusSearchField.value?.dimension ?? props.dimension);
 const dim = computed(() => collectionDimension.value ?? 4);
 function sampleVector(dimension = dim.value): number[] {
@@ -166,11 +164,7 @@ function defaultMilvusValue(field: MilvusFieldInfo): unknown {
 }
 
 function defaultMilvusUpsertEntity(): Record<string, unknown> {
-  return Object.fromEntries(
-    milvusFields.value
-      .filter((field) => !field.isFunctionOutput && (!field.autoId || field.primaryKey) && (isMilvusVectorField(field) || (!field.nullable && !field.hasDefaultValue)))
-      .map((field) => [field.name, defaultMilvusValue(field)]),
-  );
+  return Object.fromEntries(milvusFields.value.filter((field) => !field.isFunctionOutput && (!field.autoId || field.primaryKey) && (isMilvusVectorField(field) || (!field.nullable && !field.hasDefaultValue))).map((field) => [field.name, defaultMilvusValue(field)]));
 }
 
 function defaultMilvusPrimaryKeyFilter(): string {
