@@ -2296,6 +2296,41 @@ impl Storage {
         .await
     }
 
+    /// Update only the persisted driver identity for an existing connection.
+    /// This is used after runtime driver fallback and deliberately leaves all
+    /// other connection metadata and separately stored secrets untouched.
+    pub async fn save_connection_driver_profile(
+        &self,
+        connection_id: &str,
+        expected_db_type: DatabaseType,
+        driver_profile: Option<String>,
+        driver_label: Option<String>,
+    ) -> Result<bool, String> {
+        let connection_id = connection_id.to_string();
+        self.with_conn(move |conn| {
+            let Some(json) = conn
+                .query_row("SELECT config_json FROM connections WHERE id = ?1", [&connection_id], |row| {
+                    row.get::<_, String>(0)
+                })
+                .optional()
+                .map_err(|error| error.to_string())?
+            else {
+                return Ok(false);
+            };
+            let mut config: ConnectionConfig = serde_json::from_str(&json).map_err(|error| error.to_string())?;
+            if config.db_type != expected_db_type {
+                return Ok(false);
+            }
+            config.driver_profile = driver_profile;
+            config.driver_label = driver_label;
+            let json = serde_json::to_string(&config).map_err(|error| error.to_string())?;
+            conn.execute("UPDATE connections SET config_json = ?1 WHERE id = ?2", params![json, connection_id])
+                .map(|updated| updated > 0)
+                .map_err(|error| error.to_string())
+        })
+        .await
+    }
+
     pub async fn load_connections(&self) -> Result<Vec<ConnectionConfig>, String> {
         let rows: Vec<(String, String)> = self
             .with_conn(|conn| {
@@ -4216,6 +4251,47 @@ mod tests {
         let loaded = storage.load_connections().await.unwrap();
         assert_eq!(loaded[0].database_info, Some(updated_info));
         assert_eq!(mq_token(&loaded[0]), Some("mq-secret"));
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn save_connection_driver_profile_updates_only_the_target_metadata() {
+        let path = temp_db_path("connection-driver-profile");
+        let storage = Storage::open(&path).await.unwrap();
+        let target = mq_connection("target", "target-secret");
+        let untouched = mq_connection("untouched", "untouched-secret");
+        storage.save_connections(&[target, untouched.clone()]).await.unwrap();
+
+        assert!(storage
+            .save_connection_driver_profile(
+                "target",
+                DatabaseType::MessageQueue,
+                Some("mongodb-legacy".to_string()),
+                Some("MongoDB (Legacy)".to_string()),
+            )
+            .await
+            .unwrap());
+        assert!(!storage
+            .save_connection_driver_profile(
+                "untouched",
+                DatabaseType::MongoDb,
+                Some("mongodb-legacy".to_string()),
+                None,
+            )
+            .await
+            .unwrap());
+        assert!(!storage
+            .save_connection_driver_profile("missing", DatabaseType::MongoDb, Some("mongodb-legacy".to_string()), None,)
+            .await
+            .unwrap());
+
+        let loaded = storage.load_connections().await.unwrap();
+        let target = loaded.iter().find(|config| config.id == "target").unwrap();
+        assert_eq!(target.driver_profile.as_deref(), Some("mongodb-legacy"));
+        assert_eq!(target.driver_label.as_deref(), Some("MongoDB (Legacy)"));
+        assert_eq!(mq_token(target), Some("target-secret"));
+        assert_eq!(loaded.iter().find(|config| config.id == "untouched"), Some(&untouched));
 
         let _ = std::fs::remove_file(path);
     }

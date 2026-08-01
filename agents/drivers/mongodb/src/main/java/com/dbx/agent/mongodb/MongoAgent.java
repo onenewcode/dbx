@@ -21,6 +21,7 @@ import java.io.BufferedReader;
 import java.io.FileInputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.math.BigDecimal;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -56,6 +57,7 @@ import javax.net.ssl.TrustManagerFactory;
 import org.bson.Document;
 import org.bson.json.JsonMode;
 import org.bson.json.JsonWriterSettings;
+import org.bson.types.Decimal128;
 import org.bson.types.ObjectId;
 
 public final class MongoAgent {
@@ -66,6 +68,7 @@ public final class MongoAgent {
         .outputMode(JsonMode.RELAXED)
         .build();
     private static final String LEGACY_SESSION_ID = "__legacy__";
+    private static final String DEFAULT_ID_INDEX_NAME = "_id_";
     private static final int MAX_SESSIONS = 256;
     private static final ThreadLocal<MongoClient> CURRENT_CLIENT = new ThreadLocal<>();
     private static MongoClient legacyClient;
@@ -321,11 +324,47 @@ public final class MongoAgent {
     private static Object listCollections(JsonObject params) {
         MongoClient c = requireClient();
         String database = params.get("database").getAsString();
+        boolean includeTypes = params.has("include_types")
+            && !params.get("include_types").isJsonNull()
+            && params.get("include_types").getAsBoolean();
+        // Older DBX clients expect a simple string array. Opt into collection
+        // metadata so this RPC remains compatible with already-installed agents.
+        if (includeTypes) {
+            List<Map<String, String>> result = new ArrayList<>();
+            for (Document spec : c.getDatabase(database).listCollections()) {
+                String name = spec.getString("name");
+                // Collection identifiers are passed through verbatim elsewhere;
+                // only an impossible empty listCollections name is discarded.
+                if (name == null || name.isEmpty()) {
+                    continue;
+                }
+                result.add(collectionSpec(name, spec.getString("type")));
+            }
+            return result;
+        }
+
         List<String> result = new ArrayList<>();
         for (String name : c.getDatabase(database).listCollectionNames()) {
             result.add(name);
         }
         return result;
+    }
+
+    static Map<String, String> collectionSpec(String name, String type) {
+        Map<String, String> result = new LinkedHashMap<>();
+        result.put("name", name);
+        result.put("kind", collectionKind(type));
+        return result;
+    }
+
+    static String collectionKind(String type) {
+        if ("view".equalsIgnoreCase(type)) {
+            return "view";
+        }
+        if ("timeseries".equalsIgnoreCase(type)) {
+            return "timeseries";
+        }
+        return "collection";
     }
 
     private static Object listIndexes(JsonObject params) {
@@ -509,12 +548,22 @@ public final class MongoAgent {
         Document index = new Document("key", keys);
         Document options = documentOrNull(params, "options_json");
         if (options != null) {
+            if (options.containsKey("key")) {
+                throw new IllegalArgumentException("Index options cannot contain \"key\"; specify index fields in keys JSON");
+            }
             index.putAll(options);
         }
-        String name = index.getString("name");
-        if (name == null || name.isBlank()) {
+        String name;
+        if (!index.containsKey("name")) {
             name = defaultIndexName(keys);
             index.put("name", name);
+        } else if (!(index.get("name") instanceof String)) {
+            throw new IllegalArgumentException("Index option \"name\" must be a non-empty string");
+        } else {
+            name = (String) index.get("name");
+            if (name.isBlank()) {
+                throw new IllegalArgumentException("Index option \"name\" must be a non-empty string");
+            }
         }
 
         c.getDatabase(database).runCommand(
@@ -532,12 +581,22 @@ public final class MongoAgent {
         return document;
     }
 
-    private static String defaultIndexName(Document keys) {
+    static String defaultIndexName(Document keys) {
         List<String> parts = new ArrayList<>();
         for (Map.Entry<String, Object> entry : keys.entrySet()) {
-            parts.add(entry.getKey() + "_" + String.valueOf(entry.getValue()));
+            parts.add(entry.getKey() + "_" + defaultIndexNameValue(entry.getValue()));
         }
         return String.join("_", parts);
+    }
+
+    private static String defaultIndexNameValue(Object value) {
+        if (value instanceof Double number && Double.isFinite(number)) {
+            // The Rust driver's BSON formatter omits a fractional suffix for
+            // whole doubles (for example, 1.0 becomes 1). Keep unnamed index
+            // names identical on Native and Legacy connections.
+            return BigDecimal.valueOf(number).stripTrailingZeros().toPlainString();
+        }
+        return String.valueOf(value);
     }
 
     private static Object dropIndexes(JsonObject params) {
@@ -549,7 +608,15 @@ public final class MongoAgent {
         Object index = parseDropIndexesValue(indexesJson, single);
 
         List<IndexInfo> before = listIndexInfos(c, database, collection);
-        c.getDatabase(database).runCommand(new Document("dropIndexes", collection).append("index", index));
+        if (index instanceof List<?> indexes) {
+            // MongoDB 3.4 rejects an array in dropIndexes.index, so keep the
+            // legacy protocol portable even when an older caller sends one.
+            for (Object indexName : indexes) {
+                c.getDatabase(database).runCommand(new Document("dropIndexes", collection).append("index", indexName));
+            }
+        } else {
+            c.getDatabase(database).runCommand(new Document("dropIndexes", collection).append("index", index));
+        }
         List<IndexInfo> after = listIndexInfos(c, database, collection);
         List<String> droppedNames = diffDroppedIndexNames(before, after);
         Map<String, Object> result = new LinkedHashMap<>();
@@ -566,7 +633,14 @@ public final class MongoAgent {
         return Collections.singletonMap("ok", true);
     }
 
-    private static Object parseDropIndexesValue(String indexesJson, boolean single) {
+    private static Object dropDatabase(JsonObject params) {
+        MongoClient c = requireClient();
+        String database = params.get("database").getAsString();
+        c.getDatabase(database).drop();
+        return Collections.singletonMap("ok", true);
+    }
+
+    static Object parseDropIndexesValue(String indexesJson, boolean single) {
         if (indexesJson == null || indexesJson.isBlank()) {
             if (single) {
                 throw new IllegalArgumentException("dropIndex requires a string index name or JSON document");
@@ -583,6 +657,9 @@ public final class MongoAgent {
             if (single && "*".equals(name)) {
                 throw new IllegalArgumentException("dropIndex does not accept \"*\"; use dropIndexes() or dropIndexes(\"*\") instead");
             }
+            if (DEFAULT_ID_INDEX_NAME.equals(name)) {
+                throw new IllegalArgumentException("The default MongoDB _id_ index cannot be dropped");
+            }
             return name;
         }
         if (value.isJsonObject()) {
@@ -590,7 +667,11 @@ public final class MongoAgent {
             if (object.size() == 0) {
                 throw new IllegalArgumentException("Index specification is required");
             }
-            return Document.parse(indexesJson);
+            Document specification = Document.parse(indexesJson);
+            if (isDefaultIdIndexSpecification(specification)) {
+                throw new IllegalArgumentException("The default MongoDB _id_ index cannot be dropped");
+            }
+            return specification;
         }
         if (value.isJsonArray()) {
             if (single) {
@@ -606,12 +687,29 @@ public final class MongoAgent {
             if (names.isEmpty()) {
                 throw new IllegalArgumentException("dropIndexes only accepts non-empty string arrays");
             }
+            if (names.contains(DEFAULT_ID_INDEX_NAME)) {
+                throw new IllegalArgumentException("The default MongoDB _id_ index cannot be dropped");
+            }
             return names;
         }
         if (single) {
             throw new IllegalArgumentException("dropIndex only accepts a string index name or JSON document");
         }
         throw new IllegalArgumentException("dropIndexes only accepts a string index name, JSON document, or string array");
+    }
+
+    private static boolean isDefaultIdIndexSpecification(Document specification) {
+        if (specification.size() != 1 || !specification.containsKey("_id")) {
+            return false;
+        }
+        Object direction = specification.get("_id");
+        if (direction instanceof Number number) {
+            return number.doubleValue() == 1.0;
+        }
+        // Document.parse turns Extended JSON $numberDecimal values into
+        // Decimal128, which does not implement Number in the legacy driver.
+        return direction instanceof Decimal128 decimal
+            && decimal.bigDecimalValue().compareTo(BigDecimal.ONE) == 0;
     }
 
     private static List<IndexInfo> listIndexInfos(MongoClient c, String database, String collection) {
@@ -1004,6 +1102,7 @@ public final class MongoAgent {
             case AgentProtocol.MONGO_METHOD_CREATE_INDEX -> createIndex(params);
             case AgentProtocol.MONGO_METHOD_DROP_INDEXES -> dropIndexes(params);
             case AgentProtocol.MONGO_METHOD_DROP_COLLECTION -> dropCollection(params);
+            case AgentProtocol.MONGO_METHOD_DROP_DATABASE -> dropDatabase(params);
             case AgentProtocol.MONGO_METHOD_INSERT_DOCUMENT -> insertDocument(params);
             case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENT -> updateDocument(params);
             case AgentProtocol.MONGO_METHOD_UPDATE_DOCUMENTS -> updateDocuments(params);

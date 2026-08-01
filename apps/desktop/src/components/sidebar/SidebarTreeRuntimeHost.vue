@@ -93,6 +93,7 @@ import {
   isSingleDatabase,
 } from "@/lib/database/databaseCapabilities";
 import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
+import { mongoCollectionTableTypeFromNode } from "@/lib/sidebar/mongoCollectionMutation";
 import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { handleSidebarTreeDeleteShortcut } from "@/lib/sidebar/sidebarTreeDeleteShortcut";
@@ -148,7 +149,7 @@ import { rankSavedSqlHistory, type SavedSqlHistoryScope } from "@/lib/savedSql/s
 import { isSqlServerLinkedNode } from "@/lib/database/sqlServerLinkedServers";
 import { flattenTree } from "@/composables/useFlatTree";
 import { createDatabaseCollationOptionsForCharset, nextCreateDatabaseCollation, normalizeCreateDatabaseCharset, parseCreateDatabaseCharsetMetadata } from "@/lib/database/createDatabaseCharsetOptions";
-import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
+import { executeWithProductionContextGuard, executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import type { SidebarDataOpenRequest } from "@/lib/sidebar/sidebarDataOpenCoordinator";
 import { createSidebarActionTarget, findSidebarActionTarget, releaseRemovedSidebarActionTarget, type SidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
 import { createSidebarMenuContext, normalizeSidebarMenuDescriptors } from "@/lib/sidebar/sidebarTreeMenuDescriptors";
@@ -232,8 +233,11 @@ import {
   dropMongoCollectionLoading,
   showDropMongoIndexConfirm,
   dropMongoIndexLoading,
-  showDropAllMongoIndexesConfirm,
-  dropAllMongoIndexesLoading,
+  showCreateMongoIndexDialog,
+  mongoCreateIndexForm,
+  mongoCreateIndexFieldOptions,
+  mongoCreateIndexError,
+  mongoCreateIndexLoading,
   showFlushRedisDbConfirm,
   showCreateSchemaDialog,
   createSchemaName,
@@ -393,15 +397,20 @@ const {
   canDropMongoIndexNode,
   canDropMongoIndex,
   mongoIndexDropPreview,
-  canDropAllMongoIndexes,
-  mongoDropAllIndexesPreview,
+  canCreateMongoIndex,
+  mongoIndexKeyTypes,
+  mongoCreateIndexCanSubmit,
+  mongoCreateIndexCanAddField,
+  prepareCreateMongoIndexDialog,
+  addMongoCreateIndexField,
+  removeMongoCreateIndexField,
+  confirmCreateMongoIndex,
   openCreateNacosNamespaceDialog,
   confirmCreateNacosNamespace,
   openEditNacosNamespaceDialog,
   confirmEditNacosNamespace,
   dropMongoCollection,
   dropMongoIndex,
-  dropAllMongoIndexes,
   flushRedisDb,
   prepareRedisDatabaseAliasDialog,
   confirmRedisDatabaseAlias,
@@ -413,7 +422,6 @@ const {
   confirmDropMongoDatabase,
   confirmDropMongoCollection,
   confirmDropMongoIndex,
-  confirmDropAllMongoIndexes,
 } = useSidebarDatabaseSpecificMutationRuntime({ activeNode, connectionStore });
 
 const { isTableNotView, supportsTruncate, canDropTableCascade, canTruncateTableCascade, refreshDropTablePreviewSql, refreshTruncateTablePreviewSql, dropTable, refreshTableList, confirmDropTable, emptyTable, confirmEmptyTable, truncateTable, confirmTruncateTable } = useSidebarTableMutationRuntime({
@@ -973,6 +981,12 @@ function openRenameMongoCollectionDialog() {
   prepareRenameMongoCollectionDialog();
 }
 
+function openCreateMongoIndexDialog() {
+  claimTreeItemDialogOwnership();
+  routeTreeItemDialogController();
+  prepareCreateMongoIndexDialog();
+}
+
 function openRedisDatabaseAliasDialog() {
   claimTreeItemDialogOwnership();
   routeTreeItemDialogController();
@@ -1080,6 +1094,13 @@ function openMongoTreeData(node: TreeNode) {
   if (node.type !== "mongo-collection") return;
   const tab = queryStore.createTab(node.connectionId, node.database, tabTitle, "mongo");
   queryStore.updateSql(tab, node.label);
+  queryStore.setTableMeta(tab, {
+    database: node.database,
+    tableName: node.label,
+    tableType: mongoCollectionTableTypeFromNode(node),
+    columns: [],
+    primaryKeys: [],
+  });
 }
 
 async function openSavedSqlFile() {
@@ -2076,22 +2097,39 @@ async function confirmBatchDrop() {
     if (mongoIndexTargets.length) {
       const grouped = new Map<string, TreeNode[]>();
       for (const target of mongoIndexTargets) {
-        const key = `${target.connectionId}:${target.database}:${target.tableName || ""}`;
+        const key = JSON.stringify([target.connectionId, target.database, target.tableName || ""]);
         const list = grouped.get(key) ?? [];
         list.push(target);
         grouped.set(key, list);
       }
+      const mongoIndexGroups = [...grouped.values()];
+      // Confirm every production target before changing any collection so a
+      // cancellation cannot leave a cross-database batch partially applied.
+      for (const groupTargets of mongoIndexGroups) {
+        const groupFirst = groupTargets[0];
+        if (!groupFirst?.connectionId || !groupFirst.database || !groupFirst.tableName) return;
+        const confirmed = await executeWithProductionContextGuard({
+          connection: connectionStore.getConfig(groupFirst.connectionId),
+          database: groupFirst.database,
+          reviewText: groupTargets.map((target) => mongoIndexDropPreview(target, mongoIndexNameForNode(target))).join("\n"),
+          source: t("production.sourceSidebar"),
+          execute: async () => ({ confirmed: true }),
+        });
+        if (confirmed === undefined) return;
+      }
+
       let droppedCount = 0;
-      for (const groupTargets of grouped.values()) {
-        const first = groupTargets[0];
-        if (!first?.connectionId || !first.database || !first.tableName) continue;
-        await connectionStore.ensureConnected(first.connectionId);
+      for (const groupTargets of mongoIndexGroups) {
+        const groupFirst = groupTargets[0];
+        if (!groupFirst?.connectionId || !groupFirst.database || !groupFirst.tableName) continue;
+        await connectionStore.ensureConnected(groupFirst.connectionId);
         const names = groupTargets.map((target) => mongoIndexNameForNode(target));
-        const result = await api.mongoDropIndexes(first.connectionId, first.database, first.tableName, JSON.stringify(names.length === 1 ? names[0] : names), false);
+        const result = await api.mongoDropIndexes(groupFirst.connectionId, groupFirst.database, groupFirst.tableName, JSON.stringify(names.length === 1 ? names[0] : names), names.length === 1);
         const dropped = new Set(result.dropped_names);
         droppedCount += result.dropped_names.length;
         for (const target of groupTargets) {
-          if (!dropped.has(mongoIndexNameForNode(target))) continue;
+          const indexName = mongoIndexNameForNode(target);
+          if (!dropped.has(indexName)) continue;
           connectionStore.removeTreeNode(target.id);
           releaseActiveNodeReference([target.id]);
         }
@@ -3505,21 +3543,6 @@ routeDangerDialog(showDropMongoIndexConfirm, () =>
   }),
 );
 
-routeDangerDialog(showDropAllMongoIndexesConfirm, () =>
-  dangerRequest({
-    title: t("contextMenu.dropAllIndexes"),
-    message: t("contextMenu.confirmDropMongoAllIndexesMessage", { name: activeNode.value.label }),
-    detailsText: t("contextMenu.confirmDropMongoAllIndexesDetails"),
-    sql: mongoDropAllIndexesPreview(activeNode.value),
-    confirmLabel: t("contextMenu.dropAllIndexes"),
-    get loading() {
-      return dropAllMongoIndexesLoading.value;
-    },
-    closeOnConfirm: false,
-    confirm: confirmDropAllMongoIndexes,
-  }),
-);
-
 routeDangerDialog(showFlushRedisDbConfirm, () =>
   dangerRequest({
     title: t("redis.flushDb"),
@@ -3662,6 +3685,17 @@ function databaseSpecificDialogCapabilities() {
     renameMongoCollectionPreview,
     renameMongoCollectionLoading,
     confirmRenameMongoCollection,
+    showCreateMongoIndexDialog,
+    mongoCreateIndexForm,
+    mongoCreateIndexFieldOptions,
+    mongoCreateIndexError,
+    mongoCreateIndexLoading,
+    mongoIndexKeyTypes,
+    mongoCreateIndexCanSubmit,
+    mongoCreateIndexCanAddField,
+    addMongoCreateIndexField,
+    removeMongoCreateIndexField,
+    confirmCreateMongoIndex,
     showRedisDatabaseAliasDialog,
     redisDatabaseAliasInput,
     redisDatabaseAliasSaving,
@@ -4212,10 +4246,10 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         shortcut: shortcutRename,
       });
     }
-    if (canDropAllMongoIndexes.value || canDropMongoCollection.value) {
+    if (canCreateMongoIndex.value || canDropMongoCollection.value) {
       items.push({ label: "", separator: true });
-      if (canDropAllMongoIndexes.value) {
-        items.push({ label: t("contextMenu.dropAllIndexes"), action: dropAllMongoIndexes, icon: Trash2, variant: "destructive" as const });
+      if (canCreateMongoIndex.value) {
+        items.push({ label: t("contextMenu.createMongoIndex"), action: openCreateMongoIndexDialog, icon: Plus });
       }
       if (canDropMongoCollection.value) {
         items.push({ label: t("contextMenu.dropCollection"), action: dropMongoCollection, icon: Trash2, shortcut: shortcutDelete, variant: "destructive" as const });
@@ -4485,7 +4519,8 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
   // 9. Group Labels (group-columns, group-tables, etc.)
   if (isGroupLabel(node)) {
     const mysqlObjectTemplate = node.connectionId ? mysqlObjectTemplateForGroup(connectionStore.getConfig(node.connectionId), node) : null;
-    const hasGroupCreateAction = (node.type === "group-tables" && canCreateTable.value) || (node.type === "group-views" && !!node.connectionId && !!node.database) || !!mysqlObjectTemplate;
+    const hasMongoCreateIndexAction = node.type === "group-indexes" && canCreateMongoIndex.value;
+    const hasGroupCreateAction = (node.type === "group-tables" && canCreateTable.value) || (node.type === "group-views" && !!node.connectionId && !!node.database) || !!mysqlObjectTemplate || hasMongoCreateIndexAction;
     const canLoadAllObjectGroup = node.type === "group-tables" || node.type === "group-views" || node.type === "group-materialized-views";
     if (node.type === "group-tables" && canCreateTable.value) {
       items.push({ label: t("contextMenu.createTable"), action: createTable, icon: Plus });
@@ -4501,6 +4536,9 @@ function buildObjectGroupSidebarMenu(context: SidebarMenuFactoryContext): boolea
     }
     if (mysqlObjectTemplate) {
       items.push({ label: t(mysqlObjectTemplate.titleKey), action: createMysqlObjectTemplate, icon: Plus });
+    }
+    if (hasMongoCreateIndexAction) {
+      items.push({ label: t("contextMenu.createMongoIndex"), action: openCreateMongoIndexDialog, icon: Plus });
     }
     if (hasGroupCreateAction) {
       items.push({ label: "", separator: true });

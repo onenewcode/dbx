@@ -750,6 +750,7 @@ pub enum MongoAgentMethod {
     CreateIndex,
     DropIndexes,
     DropCollection,
+    DropDatabase,
     InsertDocument,
     UpdateDocument,
     UpdateDocuments,
@@ -758,7 +759,7 @@ pub enum MongoAgentMethod {
 }
 
 impl MongoAgentMethod {
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::ListDatabases,
         Self::ListCollections,
         Self::FindDocuments,
@@ -768,6 +769,7 @@ impl MongoAgentMethod {
         Self::CreateIndex,
         Self::DropIndexes,
         Self::DropCollection,
+        Self::DropDatabase,
         Self::InsertDocument,
         Self::UpdateDocument,
         Self::UpdateDocuments,
@@ -786,6 +788,7 @@ impl MongoAgentMethod {
             Self::CreateIndex => "create_index",
             Self::DropIndexes => "drop_indexes",
             Self::DropCollection => "drop_collection",
+            Self::DropDatabase => "drop_database",
             Self::InsertDocument => "insert_document",
             Self::UpdateDocument => "update_document",
             Self::UpdateDocuments => "update_documents",
@@ -1751,6 +1754,19 @@ impl AgentDriverClient {
         self.call_mongo_method(MongoAgentMethod::ListCollections, mongo_database_params(database)).await
     }
 
+    /// Request collection metadata while accepting old Agents that still
+    /// return the historical string array and ignore `include_types`.
+    pub async fn mongo_list_collection_specs<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        database: &str,
+    ) -> Result<T, String> {
+        self.call_mongo_method(
+            MongoAgentMethod::ListCollections,
+            serde_json::json!({ "database": database, "include_types": true }),
+        )
+        .await
+    }
+
     pub async fn mongo_find_documents<T: DeserializeOwned + Send + 'static>(
         &mut self,
         params: Value,
@@ -1799,6 +1815,13 @@ impl AgentDriverClient {
         params: Value,
     ) -> Result<T, String> {
         self.call_mongo_method(MongoAgentMethod::DropCollection, params).await
+    }
+
+    pub async fn mongo_drop_database<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::DropDatabase, params).await
     }
 
     pub async fn mongo_insert_document<T: DeserializeOwned + Send + 'static>(
@@ -3173,6 +3196,7 @@ for line in sys.stdin:
         assert_eq!(MongoAgentMethod::CreateIndex.as_str(), "create_index");
         assert_eq!(MongoAgentMethod::DropIndexes.as_str(), "drop_indexes");
         assert_eq!(MongoAgentMethod::DropCollection.as_str(), "drop_collection");
+        assert_eq!(MongoAgentMethod::DropDatabase.as_str(), "drop_database");
         assert_eq!(MongoAgentMethod::InsertDocument.as_str(), "insert_document");
         assert_eq!(MongoAgentMethod::UpdateDocument.as_str(), "update_document");
         assert_eq!(MongoAgentMethod::UpdateDocuments.as_str(), "update_documents");
@@ -3231,6 +3255,7 @@ for line in sys.stdin:
     fn exposes_mongo_protocol_wrappers() {
         let _mongo_list_databases = AgentDriverClient::mongo_list_databases::<serde_json::Value>;
         let _mongo_list_collections = AgentDriverClient::mongo_list_collections::<serde_json::Value>;
+        let _mongo_list_collection_specs = AgentDriverClient::mongo_list_collection_specs::<serde_json::Value>;
         let _mongo_find_documents = AgentDriverClient::mongo_find_documents::<serde_json::Value>;
         let _mongo_find_documents_extended_json =
             AgentDriverClient::mongo_find_documents_extended_json::<serde_json::Value>;
@@ -3238,6 +3263,7 @@ for line in sys.stdin:
         let _mongo_create_index = AgentDriverClient::mongo_create_index::<serde_json::Value>;
         let _mongo_drop_indexes = AgentDriverClient::mongo_drop_indexes::<serde_json::Value>;
         let _mongo_drop_collection = AgentDriverClient::mongo_drop_collection::<serde_json::Value>;
+        let _mongo_drop_database = AgentDriverClient::mongo_drop_database::<serde_json::Value>;
         let _mongo_insert_document = AgentDriverClient::mongo_insert_document::<serde_json::Value>;
         let _mongo_update_document = AgentDriverClient::mongo_update_document::<serde_json::Value>;
         let _mongo_update_documents = AgentDriverClient::mongo_update_documents::<serde_json::Value>;

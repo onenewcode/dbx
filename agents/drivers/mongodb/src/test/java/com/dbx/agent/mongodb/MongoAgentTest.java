@@ -138,6 +138,14 @@ class MongoAgentTest {
     }
 
     @Test
+    void collectionSpecsPreserveCollectionKindsForTypeAwareClients() {
+        assertEquals(Map.of("name", "orders", "kind", "collection"), MongoAgent.collectionSpec("orders", "collection"));
+        assertEquals(Map.of("name", "report_view", "kind", "view"), MongoAgent.collectionSpec("report_view", "view"));
+        assertEquals(Map.of("name", "metrics", "kind", "timeseries"), MongoAgent.collectionSpec("metrics", "timeseries"));
+        assertEquals("collection", MongoAgent.collectionKind("futureType"));
+    }
+
+    @Test
     void countDocumentsMethodIsRecognizedOverJsonRpc() {
         String response = MongoAgent.handleRequest(
             "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"count_documents\","
@@ -290,6 +298,14 @@ class MongoAgentTest {
     }
 
     @Test
+    void defaultIndexNameMatchesNativeDriverForWholeDoubles() {
+        assertEquals(
+            "email_1_createdAt_-1",
+            MongoAgent.defaultIndexName(Document.parse("{\"email\":1.0,\"createdAt\":-1.0}"))
+        );
+    }
+
+    @Test
     void dropIndexesMethodIsRecognizedOverJsonRpc() {
         String response = MongoAgent.handleRequest(
             "{\"jsonrpc\":\"2.0\",\"id\":13,\"method\":\"drop_indexes\","
@@ -304,6 +320,28 @@ class MongoAgentTest {
     }
 
     @Test
+    void dropIndexesRejectsTheDefaultIdIndex() {
+        for (String indexesJson : List.of(
+            "\"_id_\"",
+            "{\"_id\":1}",
+            "{\"_id\":{\"$numberDecimal\":\"1.0\"}}",
+            "[\"email_1\",\"_id_\"]"
+        )) {
+            IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> MongoAgent.parseDropIndexesValue(indexesJson, false)
+            );
+            assertEquals("The default MongoDB _id_ index cannot be dropped", error.getMessage());
+        }
+
+        assertThrows(
+            IllegalArgumentException.class,
+            () -> MongoAgent.parseDropIndexesValue("\"_id_\"", true)
+        );
+        assertEquals("*", MongoAgent.parseDropIndexesValue("\"*\"", false));
+    }
+
+    @Test
     void dropCollectionMethodIsRecognizedOverJsonRpc() {
         String response = MongoAgent.handleRequest(
             "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"drop_collection\","
@@ -314,6 +352,20 @@ class MongoAgentTest {
         assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
         assertFalse(json.getAsJsonObject("error").get("message").getAsString().contains("Unknown method"));
         assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_DROP_COLLECTION));
+    }
+
+    @Test
+    void dropDatabaseMethodIsRecognizedOverJsonRpc() {
+        String response = MongoAgent.handleRequest(
+            "{\"jsonrpc\":\"2.0\",\"id\":15,\"method\":\"drop_database\","
+                + "\"params\":{\"database\":\"app\"}}"
+        );
+
+        JsonObject json = JsonParser.parseString(response).getAsJsonObject();
+        assertEquals(15, json.get("id").getAsInt());
+        assertEquals("Not connected", json.getAsJsonObject("error").get("message").getAsString());
+        assertFalse(json.getAsJsonObject("error").get("message").getAsString().contains("Unknown method"));
+        assertTrue(AgentProtocol.MONGO_LEGACY_METHODS.contains(AgentProtocol.MONGO_METHOD_DROP_DATABASE));
     }
 
     @Test

@@ -115,10 +115,10 @@ test("mongo sidebar mutations share the production-gated runMongoSidebarMutation
 
   const source = readSource("apps/desktop/src/composables/useSidebarDatabaseSpecificMutationRuntime.ts");
   for (const name of [
+    "confirmCreateMongoIndex",
     "confirmRenameMongoCollection",
     "confirmDropMongoCollection",
     "confirmDropMongoIndex",
-    "confirmDropAllMongoIndexes",
     "confirmDropMongoDatabase",
   ] as const) {
     const body = functionBody(source, name);
@@ -132,4 +132,13 @@ test("mongo sidebar mutations share the production-gated runMongoSidebarMutation
   const dropDatabaseBody = functionBody(readSource("apps/desktop/src/components/sidebar/SidebarTreeRuntimeHost.vue"), "confirmDropDatabase");
   assert.match(dropDatabaseBody, /confirmDropMongoDatabase/, "host drop-database confirm should delegate mongo to the mutation runtime");
   assert.ok(!dropDatabaseBody.includes("api.mongoDropDatabase"), "host drop-database confirm should not call mongo APIs directly");
+});
+
+test("mongo data-grid index deletion stays production-gated", () => {
+  const source = readSource("apps/desktop/src/components/grid/DataGrid.vue");
+  const body = functionBody(source, "confirmDropMongoIndex");
+
+  assert.match(body, /executeWithProductionContextGuard/, "data-grid index deletion must request production confirmation");
+  assert.match(body, /api\.mongoDropIndexes/, "data-grid index deletion should still call the MongoDB API");
+  assert.ok(body.indexOf("executeWithProductionContextGuard") < body.indexOf("api.mongoDropIndexes"), "production confirmation must wrap the index deletion request");
 });

@@ -49,16 +49,16 @@ async fn persist_mongo_legacy_driver_profile(state: &AppState, config: &Connecti
     if config.one_time {
         return Ok(());
     }
-
-    let mut configs: Vec<ConnectionConfig> =
-        state.storage.load_connections().await?.into_iter().map(|config| config.canonicalized()).collect();
-    let Some(saved_config) = configs.iter_mut().find(|saved_config| saved_config.id == config.id) else {
-        return Ok(());
-    };
-    if !mark_mongo_legacy_driver(saved_config) {
-        return Ok(());
-    }
-    save_connection_configs(state, &configs).await
+    state
+        .storage
+        .save_connection_driver_profile(
+            &config.id,
+            DatabaseType::MongoDb,
+            Some(MONGO_LEGACY_DRIVER_PROFILE.to_string()),
+            Some(MONGO_LEGACY_DRIVER_LABEL.to_string()),
+        )
+        .await
+        .map(|_| ())
 }
 
 async fn test_agent_connection(
@@ -171,7 +171,8 @@ mod tests {
     use super::load_connection_configs;
     use super::{
         connect_sqlite_from_config, gaussdb_m_jdbc_command_config, mark_mongo_legacy_driver,
-        mongo_legacy_connect_params, save_connection_configs, MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
+        mongo_legacy_connect_params, persist_mongo_legacy_driver_profile, save_connection_configs,
+        MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
     };
     use dbx_core::connection::{AppState, PoolKind};
     use dbx_core::models::connection::{AttachedDatabaseConfig, ConnectionConfig, DatabaseType};
@@ -406,6 +407,29 @@ mod tests {
         assert_eq!(config.driver_profile.as_deref(), Some(MONGO_LEGACY_DRIVER_PROFILE));
         assert_eq!(config.driver_label.as_deref(), Some(MONGO_LEGACY_DRIVER_LABEL));
         assert!(!mark_mongo_legacy_driver(&mut config));
+    }
+
+    #[tokio::test]
+    async fn persist_mongo_legacy_driver_profile_updates_only_the_target_connection() {
+        let dir = std::env::temp_dir().join(format!("dbx-tauri-mongo-profile-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+        let mongo = mongodb_config();
+        let mut other = mongodb_config();
+        other.id = "other".to_string();
+        other.name = "Other MongoDB".to_string();
+        state.storage.save_connections(&[mongo.clone(), other.clone()]).await.unwrap();
+
+        persist_mongo_legacy_driver_profile(&state, &mongo).await.unwrap();
+
+        let saved = state.storage.load_connections().await.unwrap();
+        let updated = saved.iter().find(|config| config.id == mongo.id).unwrap();
+        assert_eq!(updated.driver_profile.as_deref(), Some(MONGO_LEGACY_DRIVER_PROFILE));
+        assert_eq!(updated.driver_label.as_deref(), Some(MONGO_LEGACY_DRIVER_LABEL));
+        assert_eq!(saved.iter().find(|config| config.id == other.id), Some(&other));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[cfg(feature = "sqlite-sqlcipher")]
