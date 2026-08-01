@@ -7,7 +7,19 @@ import * as api from "@/lib/backend/api";
 import { translateBackendError } from "@/i18n/backend-errors";
 import { notifyNacosNamespacesChanged } from "@/lib/nacos/nacosNamespaceCache";
 import { findSidebarActionTarget } from "@/lib/sidebar/sidebarActionTarget";
-import { isRenamableMongoCollection, mongoCollectionKindFromNode, mongoDropAllIndexesPreview, mongoDropCollectionPreview, mongoDropDatabasePreview, mongoDropIndexPreview, mongoRenameCollectionPreview } from "@/lib/sidebar/mongoCollectionMutation";
+import {
+  isRenamableMongoCollection,
+  mongoCollectionKindFromNode,
+  mongoCreateIndexPreview,
+  mongoDropAllIndexesPreview,
+  mongoDropCollectionPreview,
+  mongoDropDatabasePreview,
+  mongoDropIndexPreview,
+  mongoRenameCollectionPreview,
+  type MongoCreateIndexValidationError,
+  validateMongoCreateIndexInput,
+} from "@/lib/sidebar/mongoCollectionMutation";
+import { supportsMongoAllDriverMutations, supportsNativeMongoDriverMutations } from "@/lib/mongo/mongoCapabilities";
 import { runMongoSidebarMutation } from "@/lib/sidebar/runMongoSidebarMutation";
 import {
   sidebarDangerTarget,
@@ -38,6 +50,13 @@ import {
   renameMongoCollectionError,
   renameMongoCollectionPreview,
   renameMongoCollectionLoading,
+  showCreateMongoIndexDialog,
+  createMongoIndexKeysJson,
+  createMongoIndexOptionsJson,
+  createMongoIndexValidationError,
+  createMongoIndexError,
+  createMongoIndexPreview,
+  createMongoIndexLoading,
 } from "@/components/sidebar/sidebarTreeDialogState";
 
 interface SidebarDatabaseSpecificMutationRuntimeOptions {
@@ -57,23 +76,31 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
   const { toast } = useToast();
   const { activeNode, connectionStore } = options;
 
-  const canDropMongoDatabase = computed(() => {
-    const config = activeNode.value.connectionId ? connectionStore.getConfig(activeNode.value.connectionId) : undefined;
-    return activeNode.value.type === "mongo-db" && !!activeNode.value.database && config?.driver_profile !== "mongodb-legacy";
-  });
+  function usesAnyMongoDriver(node: Pick<TreeNode, "connectionId">): boolean {
+    return !!node.connectionId && supportsMongoAllDriverMutations(connectionStore.getConfig(node.connectionId));
+  }
+
+  function usesNativeMongoDriver(node: Pick<TreeNode, "connectionId">): boolean {
+    return !!node.connectionId && supportsNativeMongoDriverMutations(connectionStore.getConfig(node.connectionId));
+  }
+
+  const canDropMongoDatabase = computed(() => activeNode.value.type === "mongo-db" && !!activeNode.value.database && usesAnyMongoDriver(activeNode.value));
 
   function canMutateMongoCollectionNode(node: TreeNode): boolean {
     if (node.type !== "mongo-collection" || !node.connectionId || !node.database) return false;
-    const config = connectionStore.getConfig(node.connectionId);
-    return config?.db_type === "mongodb" && config.driver_profile !== "mongodb-legacy";
+    return usesAnyMongoDriver(node);
   }
 
   function canRenameMongoCollectionNode(node: TreeNode): boolean {
-    return canMutateMongoCollectionNode(node) && isRenamableMongoCollection(node.label, mongoCollectionKindFromNode(node));
+    return canMutateMongoCollectionNode(node) && usesNativeMongoDriver(node) && isRenamableMongoCollection(node.label, mongoCollectionKindFromNode(node));
   }
 
   const canDropMongoCollection = computed(() => canMutateMongoCollectionNode(activeNode.value));
   const canRenameMongoCollection = computed(() => canRenameMongoCollectionNode(activeNode.value));
+
+  function canManageMongoIndexesForCollectionNode(node: TreeNode): boolean {
+    return canMutateMongoCollectionNode(node) && mongoCollectionKindFromNode(node) !== "view";
+  }
 
   function toastMutationError(error: unknown) {
     toast(t("contextMenu.tableOperationFailed", { message: errorMessage(error) }), 5000);
@@ -138,10 +165,13 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     return node.meta && "name" in node.meta ? node.meta.name : node.label.replace(/\s+\(.+\)$/, "");
   }
 
+  function isDefaultMongoIndexNode(node: TreeNode): boolean {
+    return mongoIndexNameForNode(node) === "_id_" || !!(node.meta && "is_primary" in node.meta && node.meta.is_primary);
+  }
+
   function canDropMongoIndexNode(node: TreeNode): boolean {
     if (node.type !== "index" || !node.connectionId || !node.database || !node.tableName) return false;
-    const config = connectionStore.getConfig(node.connectionId);
-    return config?.db_type === "mongodb" && config.driver_profile !== "mongodb-legacy" && mongoIndexNameForNode(node) !== "_id_";
+    return usesAnyMongoDriver(node) && mongoCollectionKindFromNode(node) !== "view" && !isDefaultMongoIndexNode(node);
   }
 
   const canDropMongoIndex = computed(() => canDropMongoIndexNode(activeNode.value));
@@ -150,7 +180,71 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     return mongoDropIndexPreview(node.database || "", node.tableName || "", indexName);
   }
 
-  const canDropAllMongoIndexes = computed(() => canMutateMongoCollectionNode(activeNode.value));
+  const canDropAllMongoIndexes = computed(() => canManageMongoIndexesForCollectionNode(activeNode.value));
+
+  function canCreateMongoIndexNode(node: TreeNode): boolean {
+    return node.type === "group-indexes" && !!node.connectionId && !!node.database && !!node.tableName && usesAnyMongoDriver(node) && mongoCollectionKindFromNode(node) !== "view";
+  }
+
+  const canCreateMongoIndex = computed(() => canCreateMongoIndexNode(activeNode.value));
+
+  function mongoCreateIndexValidationMessage(error: MongoCreateIndexValidationError): string {
+    const key =
+      error === "keys-required"
+        ? "contextMenu.createMongoIndexKeysRequired"
+        : error === "keys-invalid-json"
+          ? "contextMenu.createMongoIndexKeysInvalidJson"
+          : error === "keys-not-object"
+            ? "contextMenu.createMongoIndexKeysObject"
+            : error === "keys-empty"
+              ? "contextMenu.createMongoIndexKeysEmpty"
+              : error === "options-invalid-json"
+                ? "contextMenu.createMongoIndexOptionsInvalidJson"
+                : error === "options-not-object"
+                  ? "contextMenu.createMongoIndexOptionsObject"
+                  : error === "options-name-invalid"
+                    ? "contextMenu.createMongoIndexOptionsNameInvalid"
+                    : "contextMenu.createMongoIndexOptionsKeyReserved";
+    return t(key);
+  }
+
+  function refreshCreateMongoIndexPreview() {
+    const node = sidebarFormTarget.value ?? activeNode.value;
+    if (!showCreateMongoIndexDialog.value || !canCreateMongoIndexNode(node) || !node.database || !node.tableName) {
+      createMongoIndexValidationError.value = "";
+      createMongoIndexPreview.value = "";
+      return;
+    }
+    const validation = validateMongoCreateIndexInput(createMongoIndexKeysJson.value, createMongoIndexOptionsJson.value);
+    if (!validation.valid) {
+      createMongoIndexValidationError.value = mongoCreateIndexValidationMessage(validation.error);
+      createMongoIndexPreview.value = "";
+      return;
+    }
+    createMongoIndexValidationError.value = "";
+    createMongoIndexPreview.value = mongoCreateIndexPreview(node.database, node.tableName, validation.keysJson, validation.optionsJson);
+  }
+
+  watch([showCreateMongoIndexDialog, createMongoIndexKeysJson, createMongoIndexOptionsJson, () => activeNode.value.type, () => activeNode.value.tableName, () => activeNode.value.database], () => {
+    createMongoIndexError.value = "";
+    refreshCreateMongoIndexPreview();
+  });
+
+  const canSubmitCreateMongoIndex = computed(() => {
+    const node = sidebarFormTarget.value ?? activeNode.value;
+    return canCreateMongoIndexNode(node) && validateMongoCreateIndexInput(createMongoIndexKeysJson.value, createMongoIndexOptionsJson.value).valid;
+  });
+
+  function prepareCreateMongoIndexDialog() {
+    if (!canCreateMongoIndexNode(activeNode.value)) return;
+    createMongoIndexKeysJson.value = "";
+    createMongoIndexOptionsJson.value = "";
+    createMongoIndexValidationError.value = "";
+    createMongoIndexError.value = "";
+    createMongoIndexPreview.value = "";
+    createMongoIndexLoading.value = false;
+    showCreateMongoIndexDialog.value = true;
+  }
 
   function mongoDropAllIndexesPreviewForNode(node: Pick<TreeNode, "database" | "label">): string {
     return mongoDropAllIndexesPreview(node.database || "", node.label);
@@ -288,7 +382,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     const node = sidebarDangerTarget.value ?? activeNode.value;
     const connectionId = node.connectionId;
     const database = node.database;
-    if (node.type !== "mongo-db" || !connectionId || !database) return;
+    if (node.type !== "mongo-db" || !connectionId || !database || !usesAnyMongoDriver(node)) return;
     await runMongoSidebarMutation({
       connection: connectionStore.getConfig(connectionId),
       database,
@@ -345,6 +439,48 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     await connectionStore.loadIndexes(node.connectionId, node.database, node.tableName || node.label, node.schema, nodeId);
   }
 
+  async function refreshMongoIndexTreeAfterMutation(node: Pick<TreeNode, "connectionId" | "database" | "schema" | "tableName" | "label">) {
+    try {
+      await refreshMongoIndexTree(node);
+    } catch (error) {
+      toast(t("contextMenu.mongoIndexRefreshFailed", { message: translateBackendError(t, errorMessage(error)) }), 5000);
+    }
+  }
+
+  async function confirmCreateMongoIndex() {
+    const node = sidebarFormTarget.value ?? activeNode.value;
+    const connectionId = node.connectionId;
+    const database = node.database;
+    const collectionName = node.tableName;
+    if (!canCreateMongoIndexNode(node) || !connectionId || !database || !collectionName) return;
+
+    const validation = validateMongoCreateIndexInput(createMongoIndexKeysJson.value, createMongoIndexOptionsJson.value);
+    if (!validation.valid) {
+      createMongoIndexValidationError.value = mongoCreateIndexValidationMessage(validation.error);
+      createMongoIndexPreview.value = "";
+      return;
+    }
+
+    createMongoIndexError.value = "";
+    await runMongoSidebarMutation({
+      connection: connectionStore.getConfig(connectionId),
+      database,
+      reviewText: mongoCreateIndexPreview(database, collectionName, validation.keysJson, validation.optionsJson),
+      source: t("production.sourceSidebar"),
+      loading: createMongoIndexLoading,
+      beforeExecute: () => connectionStore.ensureConnected(connectionId),
+      execute: () => api.mongoCreateIndex(connectionId, database, collectionName, validation.keysJson, validation.optionsJson),
+      onSuccess: async (result) => {
+        toast(t("contextMenu.createMongoIndexSuccess", { name: result.name, collection: collectionName }), 3000);
+        showCreateMongoIndexDialog.value = false;
+        await refreshMongoIndexTreeAfterMutation(node);
+      },
+      onError: (error) => {
+        createMongoIndexError.value = translateBackendError(t, errorMessage(error));
+      },
+    });
+  }
+
   async function confirmDropMongoIndex() {
     const node = sidebarDangerTarget.value ?? activeNode.value;
     const connectionId = node.connectionId;
@@ -359,13 +495,11 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       source: t("production.sourceSidebar"),
       loading: dropMongoIndexLoading,
       beforeExecute: () => connectionStore.ensureConnected(connectionId),
-      execute: async () => {
-        await api.mongoDropIndexes(connectionId, database, tableName, JSON.stringify(indexName), true);
-        await refreshMongoIndexTree(node);
-      },
-      onSuccess: () => {
+      execute: () => api.mongoDropIndexes(connectionId, database, tableName, JSON.stringify(indexName), true),
+      onSuccess: async () => {
         toast(t("contextMenu.dropTableChildObjectSuccess", { name: indexName }), 3000);
         showDropMongoIndexConfirm.value = false;
+        await refreshMongoIndexTreeAfterMutation(node);
       },
       onError: toastMutationError,
     });
@@ -375,7 +509,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     const node = sidebarDangerTarget.value ?? activeNode.value;
     const connectionId = node.connectionId;
     const database = node.database;
-    if (!canMutateMongoCollectionNode(node) || !connectionId || !database) return;
+    if (!canManageMongoIndexesForCollectionNode(node) || !connectionId || !database) return;
     const collectionName = node.label;
     await runMongoSidebarMutation({
       connection: connectionStore.getConfig(connectionId),
@@ -384,14 +518,11 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       source: t("production.sourceSidebar"),
       loading: dropAllMongoIndexesLoading,
       beforeExecute: () => connectionStore.ensureConnected(connectionId),
-      execute: async () => {
-        const result = await api.mongoDropIndexes(connectionId, database, collectionName, undefined, false);
-        await refreshMongoIndexTree(node);
-        return result;
-      },
-      onSuccess: (result) => {
+      execute: () => api.mongoDropIndexes(connectionId, database, collectionName, undefined, false),
+      onSuccess: async (result) => {
         toast(t("contextMenu.dropAllIndexesSuccess", { count: result.dropped_names.length, name: collectionName }), 3000);
         showDropAllMongoIndexesConfirm.value = false;
+        await refreshMongoIndexTreeAfterMutation(node);
       },
       onError: toastMutationError,
     });
@@ -414,6 +545,17 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     mongoIndexDropPreview,
     canDropAllMongoIndexes,
     mongoDropAllIndexesPreview: mongoDropAllIndexesPreviewForNode,
+    canCreateMongoIndex,
+    prepareCreateMongoIndexDialog,
+    confirmCreateMongoIndex,
+    showCreateMongoIndexDialog,
+    createMongoIndexKeysJson,
+    createMongoIndexOptionsJson,
+    createMongoIndexValidationError,
+    createMongoIndexError,
+    createMongoIndexPreview,
+    createMongoIndexLoading,
+    canSubmitCreateMongoIndex,
     openCreateNacosNamespaceDialog,
     confirmCreateNacosNamespace,
     openEditNacosNamespaceDialog,

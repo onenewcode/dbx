@@ -94,6 +94,15 @@ const {
   renameMongoCollectionPreview,
   renameMongoCollectionLoading,
   confirmRenameMongoCollection,
+  showCreateMongoIndexDialog,
+  createMongoIndexKeysJson,
+  createMongoIndexOptionsJson,
+  createMongoIndexValidationError,
+  createMongoIndexError,
+  createMongoIndexPreview,
+  createMongoIndexLoading,
+  canSubmitCreateMongoIndex,
+  confirmCreateMongoIndex,
   showRedisDatabaseAliasDialog,
   redisDatabaseAliasInput,
   redisDatabaseAliasSaving,
@@ -155,6 +164,7 @@ watch(
     showCreateNacosNamespaceDialog,
     showEditNacosNamespaceDialog,
     showRenameMongoCollectionDialog,
+    showCreateMongoIndexDialog,
     showRedisDatabaseAliasDialog,
     showCreateSchemaDialog,
     showEditSchemaCommentDialog,
@@ -250,6 +260,54 @@ watch(
         <Button :disabled="renameMongoCollectionLoading || !renameMongoCollectionName || renameMongoCollectionName === node.label" @click="confirmRenameMongoCollection">
           <Loader2 v-if="renameMongoCollectionLoading" class="mr-2 h-4 w-4 animate-spin" />
           {{ t("contextMenu.renameObject") }}
+        </Button>
+      </DialogFooter>
+    </DialogContent>
+  </Dialog>
+
+  <Dialog v-model:open="showCreateMongoIndexDialog">
+    <DialogContent class="sm:max-w-[600px]">
+      <DialogHeader>
+        <DialogTitle>{{ t("contextMenu.createMongoIndexTitle", { collection: node.tableName }) }}</DialogTitle>
+      </DialogHeader>
+      <div class="grid gap-3">
+        <div class="grid gap-1.5">
+          <label class="text-xs font-medium text-muted-foreground">{{ t("contextMenu.createMongoIndexKeys") }}</label>
+          <textarea
+            v-model="createMongoIndexKeysJson"
+            rows="5"
+            spellcheck="false"
+            :disabled="createMongoIndexLoading"
+            :placeholder="t('contextMenu.createMongoIndexKeysPlaceholder')"
+            class="w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-xs leading-5 outline-none transition-colors focus:border-ring focus:ring-1 focus:ring-ring/40"
+            @keydown.meta.enter.prevent="confirmCreateMongoIndex"
+            @keydown.ctrl.enter.prevent="confirmCreateMongoIndex"
+          ></textarea>
+          <p class="text-xs text-muted-foreground">{{ t("contextMenu.createMongoIndexKeysHint") }}</p>
+        </div>
+        <div class="grid gap-1.5">
+          <label class="text-xs font-medium text-muted-foreground">{{ t("contextMenu.createMongoIndexOptions") }}</label>
+          <textarea
+            v-model="createMongoIndexOptionsJson"
+            rows="4"
+            spellcheck="false"
+            :disabled="createMongoIndexLoading"
+            :placeholder="t('contextMenu.createMongoIndexOptionsPlaceholder')"
+            class="w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-xs leading-5 outline-none transition-colors focus:border-ring focus:ring-1 focus:ring-ring/40"
+            @keydown.meta.enter.prevent="confirmCreateMongoIndex"
+            @keydown.ctrl.enter.prevent="confirmCreateMongoIndex"
+          ></textarea>
+          <p class="text-xs text-muted-foreground">{{ t("contextMenu.createMongoIndexOptionsHint") }}</p>
+        </div>
+        <pre v-if="createMongoIndexPreview" class="max-h-40 overflow-auto rounded bg-muted p-3 font-mono text-xs whitespace-pre-wrap">{{ createMongoIndexPreview }}</pre>
+        <p v-if="createMongoIndexValidationError" class="text-sm text-destructive">{{ createMongoIndexValidationError }}</p>
+        <p v-if="createMongoIndexError" class="text-sm text-destructive">{{ createMongoIndexError }}</p>
+      </div>
+      <DialogFooter>
+        <Button variant="outline" :disabled="createMongoIndexLoading" @click="showCreateMongoIndexDialog = false">{{ t("dangerDialog.cancel") }}</Button>
+        <Button :disabled="createMongoIndexLoading || !canSubmitCreateMongoIndex" @click="confirmCreateMongoIndex">
+          <Loader2 v-if="createMongoIndexLoading" class="mr-2 h-4 w-4 animate-spin" />
+          {{ t("contextMenu.createMongoIndex") }}
         </Button>
       </DialogFooter>
     </DialogContent>

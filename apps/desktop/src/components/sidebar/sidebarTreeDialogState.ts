@@ -92,6 +92,13 @@ export const renameMongoCollectionName = ref("");
 export const renameMongoCollectionError = ref("");
 export const renameMongoCollectionPreview = ref("");
 export const renameMongoCollectionLoading = ref(false);
+export const showCreateMongoIndexDialog = ref(false);
+export const createMongoIndexKeysJson = ref("");
+export const createMongoIndexOptionsJson = ref("");
+export const createMongoIndexValidationError = ref("");
+export const createMongoIndexError = ref("");
+export const createMongoIndexPreview = ref("");
+export const createMongoIndexLoading = ref(false);
 export const showDropMongoIndexConfirm = ref(false);
 export const dropMongoIndexLoading = ref(false);
 export const showDropAllMongoIndexesConfirm = ref(false);
@@ -139,6 +146,7 @@ const openFlags = [
   showDropDatabaseConfirm,
   showDropMongoCollectionConfirm,
   showRenameMongoCollectionDialog,
+  showCreateMongoIndexDialog,
   showDropMongoIndexConfirm,
   showDropAllMongoIndexesConfirm,
   showFlushRedisDbConfirm,
@@ -162,6 +170,12 @@ export function resetSidebarTreeDialogState() {
   createDatabaseAuthorizationApplying.value = false;
   redisDatabaseAliasInput.value = "";
   redisDatabaseAliasSaving.value = false;
+  createMongoIndexKeysJson.value = "";
+  createMongoIndexOptionsJson.value = "";
+  createMongoIndexValidationError.value = "";
+  createMongoIndexError.value = "";
+  createMongoIndexPreview.value = "";
+  createMongoIndexLoading.value = false;
   sidebarTreeDialogOwner.value = null;
   sidebarDangerTarget.value = null;
   sidebarFormTarget.value = null;
