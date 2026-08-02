@@ -1,5 +1,8 @@
 use crate::connection::{AppState, PoolKind};
-use crate::db::mongo_driver::{self, MongoCollectionStatsResult, MongoDocumentResult, MongoDropIndexesResult};
+use crate::db::agent_driver::AgentCapability;
+use crate::db::mongo_driver::{
+    self, MongoCollectionStatsResult, MongoDocumentResult, MongoDropIndexFailure, MongoDropIndexesResult,
+};
 use crate::document_ops::CollectionInfo;
 
 async fn ensure_document_pool(state: &AppState, connection_id: &str) -> Result<(), String> {
@@ -36,6 +39,12 @@ pub async fn mongo_drop_database_core(state: &AppState, connection_id: &str, dat
         PoolKind::MongoDb(client) => mongo_driver::drop_database(client, database).await,
         PoolKind::Agent(client) => {
             let mut client = client.lock().await;
+            if !client.supports_capability(AgentCapability::MongoDropDatabase) {
+                return Err(
+                    "MongoDB Legacy Agent does not support drop database; upgrade or reinstall the MongoDB Legacy driver"
+                        .to_string(),
+                );
+            }
             let _: serde_json::Value = client.mongo_drop_database(serde_json::json!({ "database": database })).await?;
             Ok(())
         }
@@ -352,14 +361,20 @@ pub async fn mongo_drop_indexes_core(
     let serial_names = mongo_driver::serial_drop_index_names(indexes_json, single)?;
     if let Some(names) = serial_names {
         let mut dropped_names = Vec::new();
+        let mut failures = Vec::new();
         for name in names {
             let index_json = serde_json::to_string(&name).map_err(|error| error.to_string())?;
-            let result =
-                mongo_drop_indexes_once_core(state, connection_id, database, collection, Some(&index_json), true)
-                    .await?;
-            dropped_names.extend(result.dropped_names);
+            match mongo_drop_indexes_once_core(state, connection_id, database, collection, Some(&index_json), true)
+                .await
+            {
+                Ok(result) => {
+                    dropped_names.extend(result.dropped_names);
+                    failures.extend(result.failures);
+                }
+                Err(message) => failures.push(MongoDropIndexFailure { name, message }),
+            }
         }
-        return Ok(MongoDropIndexesResult { affected_rows: dropped_names.len() as u64, dropped_names });
+        return Ok(MongoDropIndexesResult { affected_rows: dropped_names.len() as u64, dropped_names, failures });
     }
 
     mongo_drop_indexes_once_core(state, connection_id, database, collection, indexes_json, single).await
@@ -614,6 +629,22 @@ mod tests {
         expected_params: serde_json::Value,
         expected_result: serde_json::Value,
     ) -> (AppState, tempfile::TempDir) {
+        legacy_mongo_state_with_capabilities(
+            expected_method,
+            expected_params,
+            expected_result,
+            &[AgentCapability::MongoDropDatabase.as_str()],
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    async fn legacy_mongo_state_with_capabilities(
+        expected_method: &str,
+        expected_params: serde_json::Value,
+        expected_result: serde_json::Value,
+        capabilities: &[&str],
+    ) -> (AppState, tempfile::TempDir) {
         use std::io::Write;
 
         let directory = tempfile::tempdir().unwrap();
@@ -621,6 +652,7 @@ mod tests {
         let expected_method = serde_json::to_string(expected_method).unwrap();
         let expected_params = serde_json::to_string(&serde_json::to_string(&expected_params).unwrap()).unwrap();
         let expected_result = serde_json::to_string(&serde_json::to_string(&expected_result).unwrap()).unwrap();
+        let capabilities = serde_json::to_string(capabilities).unwrap();
         write!(
             script,
             r#"import json
@@ -629,10 +661,15 @@ import sys
 EXPECTED_METHOD = {expected_method}
 EXPECTED_PARAMS = json.loads({expected_params})
 EXPECTED_RESULT = json.loads({expected_result})
+CAPABILITIES = {capabilities}
 
 print(json.dumps({{"ready": True}}), flush=True)
 for line in sys.stdin:
     request = json.loads(line)
+    if request.get("method") == "handshake":
+        result = {{"protocolVersion": 1, "agentProtocolVersion": 1, "capabilities": CAPABILITIES}}
+        print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": result}}), flush=True)
+        continue
     if request.get("method") == "validate_connection":
         print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": {{"ok": True}}}}), flush=True)
         continue
@@ -647,11 +684,12 @@ for line in sys.stdin:
         // Keep the script available until the spawned interpreter has opened it.
         let (_, script_path) = script.keep().unwrap();
 
-        let client = AgentDriverClient::spawn(
+        let mut client = AgentDriverClient::spawn(
             AgentLaunchSpec::new("python3").with_args([script_path.to_string_lossy().to_string()]),
         )
         .await
         .unwrap();
+        client.try_optional_handshake("test").await.unwrap();
         let storage = Storage::open(&directory.path().join("storage.db")).await.unwrap();
         let state = AppState::new(storage);
         let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
@@ -682,6 +720,23 @@ for line in sys.stdin:
         .await;
 
         mongo_drop_database_core(&state, "legacy", "app").await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_drop_database_requires_an_explicit_legacy_agent_capability() {
+        let (state, _directory) = legacy_mongo_state_with_capabilities(
+            "drop_database",
+            serde_json::json!({ "database": "app" }),
+            serde_json::json!({ "ok": true }),
+            &[],
+        )
+        .await;
+
+        let error = mongo_drop_database_core(&state, "legacy", "app").await.unwrap_err();
+
+        assert!(error.contains("upgrade or reinstall"), "{error}");
+        assert!(!error.contains("Unknown method"), "{error}");
     }
 
     #[cfg(unix)]
@@ -815,6 +870,34 @@ for line in sys.stdin:
 
         assert_eq!(result.dropped_names, ["email_1"]);
         assert_eq!(result.affected_rows, 1);
+        assert!(result.failures.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_drop_indexes_returns_partial_results_from_legacy_agents() {
+        let (state, _directory) = legacy_mongo_state(
+            "drop_indexes",
+            serde_json::json!({
+                "database": "app",
+                "collection": "users",
+                "indexes_json": "\"email_1\"",
+                "single": true,
+            }),
+            serde_json::json!({ "affected_rows": 1, "dropped_names": ["email_1"] }),
+        )
+        .await;
+
+        let result =
+            mongo_drop_indexes_core(&state, "legacy", "app", "users", Some(r#"["email_1","missing_1"]"#), false)
+                .await
+                .unwrap();
+
+        assert_eq!(result.dropped_names, ["email_1"]);
+        assert_eq!(result.affected_rows, 1);
+        assert_eq!(result.failures.len(), 1);
+        assert_eq!(result.failures[0].name, "missing_1");
+        assert!(result.failures[0].message.contains("unexpected MongoDB RPC"));
     }
 
     #[cfg(unix)]

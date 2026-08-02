@@ -74,6 +74,14 @@ export function mongoDropIndexPreview(database: string, collection: string, inde
   return `db.getSiblingDB(${JSON.stringify(database)}).getCollection(${JSON.stringify(collection)}).dropIndex(${JSON.stringify(indexName)})`;
 }
 
+export function mongoDropAllIndexesPreview(database: string, collection: string): string {
+  return `db.getSiblingDB(${JSON.stringify(database)}).getCollection(${JSON.stringify(collection)}).dropIndexes()`;
+}
+
+export function mongoDropIndexFailureCount(result: { failures?: readonly unknown[] }): number {
+  return result.failures?.length ?? 0;
+}
+
 /** MongoDB always protects its default _id index, even when metadata is incomplete. */
 export function isProtectedMongoIndex(index: { name: string; is_primary?: boolean }): boolean {
   return index.name === "_id_" || !!index.is_primary;

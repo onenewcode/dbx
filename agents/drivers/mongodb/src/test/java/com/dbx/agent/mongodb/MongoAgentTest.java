@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.dbx.agent.AgentProtocol;
 import com.dbx.agent.IndexInfo;
+import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -113,6 +114,7 @@ class MongoAgentTest {
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_CONNECT));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_QUERY));
         assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_METADATA));
+        assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_DROP_DATABASE));
     }
 
     @Test
@@ -123,6 +125,15 @@ class MongoAgentTest {
 
         assertEquals(1, result.get("protocolVersion").getAsInt());
         assertFalse(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MULTI_SESSION));
+    }
+
+    @Test
+    void runtimeHandshakeAdvertisesDropDatabaseForMultiSessionConnections() {
+        JsonObject result = new Gson().toJsonTree(MongoAgent.runtimeHandshakeResult()).getAsJsonObject();
+
+        assertEquals(AgentProtocol.MULTI_SESSION_PROTOCOL_VERSION, result.get("protocolVersion").getAsInt());
+        assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MULTI_SESSION));
+        assertTrue(containsCapability(result.getAsJsonArray("capabilities"), AgentProtocol.CAPABILITY_MONGO_DROP_DATABASE));
     }
 
     @Test
@@ -339,6 +350,26 @@ class MongoAgentTest {
             () -> MongoAgent.parseDropIndexesValue("\"_id_\"", true)
         );
         assertEquals("*", MongoAgent.parseDropIndexesValue("\"*\"", false));
+    }
+
+    @Test
+    void batchDropIndexesReportsPartialFailuresAndContinues() {
+        List<String> calls = new ArrayList<>();
+
+        Map<String, Object> result = MongoAgent.dropNamedIndexes(List.of("email_1", "missing_1", "created_at_-1"), name -> {
+            calls.add(String.valueOf(name));
+            if ("missing_1".equals(name)) {
+                throw new IllegalStateException("index not found");
+            }
+        });
+
+        assertEquals(List.of("email_1", "missing_1", "created_at_-1"), calls);
+        assertEquals(List.of("email_1", "created_at_-1"), result.get("dropped_names"));
+        assertEquals(2, result.get("affected_rows"));
+        assertEquals(
+            List.of(Map.of("name", "missing_1", "message", "index not found")),
+            result.get("failures")
+        );
     }
 
     @Test

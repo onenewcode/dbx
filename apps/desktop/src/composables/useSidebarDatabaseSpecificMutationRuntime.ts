@@ -14,13 +14,16 @@ import {
   isRenamableMongoCollection,
   mongoCollectionKindFromNode,
   mongoCreateIndexPreview,
+  mongoDropAllIndexesPreview,
   mongoDropCollectionPreview,
+  mongoDropIndexFailureCount,
   mongoDropDatabasePreview,
   mongoDropIndexPreview,
   mongoRenameCollectionPreview,
 } from "@/lib/sidebar/mongoCollectionMutation";
 import { supportsMongoAllDriverMutations, supportsMongoIndexMutations, supportsNativeMongoDriverMutations } from "@/lib/mongo/mongoCapabilities";
 import { runMongoSidebarMutation } from "@/lib/sidebar/runMongoSidebarMutation";
+import { refreshLoadedMongoIndexes } from "@/lib/mongo/mongoIndexMetadata";
 import {
   sidebarDangerTarget,
   sidebarFormTarget,
@@ -37,6 +40,8 @@ import {
   dropMongoCollectionLoading,
   showDropMongoIndexConfirm,
   dropMongoIndexLoading,
+  showDropAllMongoIndexesConfirm,
+  dropAllMongoIndexesLoading,
   showDropDatabaseConfirm,
   dropDatabaseLoading,
   showFlushRedisDbConfirm,
@@ -170,8 +175,14 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
 
   const canDropMongoIndex = computed(() => canDropMongoIndexNode(activeNode.value));
 
+  const canDropAllMongoIndexes = computed(() => activeNode.value.type === "mongo-collection" && canMutateMongoIndexes(activeNode.value));
+
   function mongoIndexDropPreview(node: Pick<TreeNode, "database" | "tableName">, indexName: string): string {
     return mongoDropIndexPreview(node.database || "", node.tableName || "", indexName);
+  }
+
+  function mongoDropAllIndexesPreviewForNode(node: Pick<TreeNode, "database" | "label">): string {
+    return mongoDropAllIndexesPreview(node.database || "", node.label);
   }
 
   function canCreateMongoIndexNode(node: TreeNode): boolean {
@@ -325,6 +336,11 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     showDropMongoIndexConfirm.value = true;
   }
 
+  function dropAllMongoIndexes() {
+    dropAllMongoIndexesLoading.value = false;
+    showDropAllMongoIndexesConfirm.value = true;
+  }
+
   function flushRedisDb() {
     showFlushRedisDbConfirm.value = true;
   }
@@ -438,21 +454,14 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     }
   }
 
-  function mongoIndexesGroupNodeId(node: Pick<TreeNode, "connectionId" | "database" | "schema" | "tableName" | "label">): string | null {
-    if (!node.connectionId || !node.database) return null;
-    const tableName = node.tableName || node.label;
-    return node.schema ? `${node.connectionId}:${node.database}:${node.schema}:${tableName}:__indexes` : `${node.connectionId}:${node.database}:${tableName}:__indexes`;
-  }
-
-  async function refreshMongoIndexTree(node: Pick<TreeNode, "connectionId" | "database" | "schema" | "tableName" | "label">) {
-    const nodeId = mongoIndexesGroupNodeId(node);
-    if (!node.connectionId || !node.database || !nodeId) return;
-    await connectionStore.loadIndexes(node.connectionId, node.database, node.tableName || node.label, node.schema, nodeId);
-  }
-
-  async function refreshMongoIndexTreeAfterMutation(node: Pick<TreeNode, "connectionId" | "database" | "schema" | "tableName" | "label">) {
+  async function refreshMongoIndexTreeAfterMutation(node: Pick<TreeNode, "connectionId" | "database" | "tableName" | "label">) {
+    if (!node.connectionId || !node.database) return;
     try {
-      await refreshMongoIndexTree(node);
+      await refreshLoadedMongoIndexes(connectionStore, {
+        connectionId: node.connectionId,
+        database: node.database,
+        collection: node.tableName || node.label,
+      });
     } catch (error) {
       toast(t("contextMenu.mongoIndexRefreshFailed", { message: translateBackendError(t, errorMessage(error)) }), 5000);
     }
@@ -472,11 +481,54 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       source: t("production.sourceSidebar"),
       loading: dropMongoIndexLoading,
       beforeExecute: () => connectionStore.ensureConnected(connectionId),
-      execute: () => api.mongoDropIndexes(connectionId, database, tableName, JSON.stringify(indexName), true),
-      onSuccess: async () => {
-        toast(t("contextMenu.dropTableChildObjectSuccess", { name: indexName }), 3000);
+      execute: async () => {
+        try {
+          return await api.mongoDropIndexes(connectionId, database, tableName, JSON.stringify(indexName), true);
+        } finally {
+          await refreshMongoIndexTreeAfterMutation(node);
+        }
+      },
+      onSuccess: (result) => {
+        const failed = mongoDropIndexFailureCount(result);
+        if (failed > 0) {
+          toast(t("contextMenu.dropIndexesPartialFailure", { success: result.dropped_names.length, failed }), 5000);
+        } else {
+          toast(t("contextMenu.dropTableChildObjectSuccess", { name: indexName }), 3000);
+        }
         showDropMongoIndexConfirm.value = false;
-        await refreshMongoIndexTreeAfterMutation(node);
+      },
+      onError: toastMutationError,
+    });
+  }
+
+  async function confirmDropAllMongoIndexes() {
+    const node = sidebarDangerTarget.value ?? activeNode.value;
+    const connectionId = node.connectionId;
+    const database = node.database;
+    if (node.type !== "mongo-collection" || !canMutateMongoIndexes(node) || !connectionId || !database) return;
+    const collectionName = node.label;
+    await runMongoSidebarMutation({
+      connection: connectionStore.getConfig(connectionId),
+      database,
+      reviewText: mongoDropAllIndexesPreview(database, collectionName),
+      source: t("production.sourceSidebar"),
+      loading: dropAllMongoIndexesLoading,
+      beforeExecute: () => connectionStore.ensureConnected(connectionId),
+      execute: async () => {
+        try {
+          return await api.mongoDropIndexes(connectionId, database, collectionName, undefined, false);
+        } finally {
+          await refreshMongoIndexTreeAfterMutation(node);
+        }
+      },
+      onSuccess: (result) => {
+        const failed = mongoDropIndexFailureCount(result);
+        if (failed > 0) {
+          toast(t("contextMenu.dropIndexesPartialFailure", { success: result.dropped_names.length, failed }), 5000);
+        } else {
+          toast(t("contextMenu.dropAllIndexesSuccess", { count: result.dropped_names.length, name: collectionName }), 3000);
+        }
+        showDropAllMongoIndexesConfirm.value = false;
       },
       onError: toastMutationError,
     });
@@ -496,7 +548,10 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     mongoIndexNameForNode,
     canDropMongoIndexNode,
     canDropMongoIndex,
+    canDropAllMongoIndexes,
     mongoIndexDropPreview,
+    mongoDropAllIndexesPreview: mongoDropAllIndexesPreviewForNode,
+    refreshMongoIndexTreeAfterMutation,
     canCreateMongoIndex,
     mongoIndexKeyTypes: MONGO_INDEX_KEY_TYPES,
     mongoCreateIndexCanSubmit,
@@ -511,6 +566,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     confirmEditNacosNamespace,
     dropMongoCollection,
     dropMongoIndex,
+    dropAllMongoIndexes,
     flushRedisDb,
     prepareRedisDatabaseAliasDialog,
     confirmRedisDatabaseAlias,
@@ -522,5 +578,6 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     confirmDropMongoDatabase,
     confirmDropMongoCollection,
     confirmDropMongoIndex,
+    confirmDropAllMongoIndexes,
   };
 }

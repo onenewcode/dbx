@@ -526,11 +526,12 @@ pub enum AgentCapability {
     EtcdWatch,
     EtcdLease,
     EtcdAuth,
+    MongoDropDatabase,
     MultiSession,
 }
 
 impl AgentCapability {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::Connect,
         Self::TestConnection,
         Self::Metadata,
@@ -549,6 +550,7 @@ impl AgentCapability {
         Self::EtcdWatch,
         Self::EtcdLease,
         Self::EtcdAuth,
+        Self::MongoDropDatabase,
         Self::MultiSession,
     ];
 
@@ -572,6 +574,7 @@ impl AgentCapability {
             Self::EtcdWatch => "etcd_watch",
             Self::EtcdLease => "etcd_lease",
             Self::EtcdAuth => "etcd_auth",
+            Self::MongoDropDatabase => "mongo_drop_database",
             Self::MultiSession => "multi_session",
         }
     }
@@ -1996,6 +1999,7 @@ pub fn agent_supports_capability(handshake: Option<&AgentHandshake>, capability:
             | AgentCapability::EtcdWatch
             | AgentCapability::EtcdLease
             | AgentCapability::EtcdAuth
+            | AgentCapability::MongoDropDatabase
     ) {
         return handshake.map(|value| value.supports(capability)).unwrap_or(false);
     }
@@ -3147,8 +3151,9 @@ for line in sys.stdin:
         assert_eq!(AgentCapability::EtcdWatch.as_str(), "etcd_watch");
         assert_eq!(AgentCapability::EtcdLease.as_str(), "etcd_lease");
         assert_eq!(AgentCapability::EtcdAuth.as_str(), "etcd_auth");
+        assert_eq!(AgentCapability::MongoDropDatabase.as_str(), "mongo_drop_database");
         assert_eq!(AgentCapability::MultiSession.as_str(), "multi_session");
-        assert_eq!(AgentCapability::ALL.len(), 19);
+        assert_eq!(AgentCapability::ALL.len(), 20);
     }
 
     #[test]
@@ -3494,6 +3499,12 @@ for line in sys.stdin:
         assert!(!agent_supports_capability(Some(&handshake), AgentCapability::KvStatus));
         assert!(!agent_supports_capability(None, AgentCapability::KvHistory));
         assert!(!agent_supports_capability(Some(&handshake), AgentCapability::KvHistory));
+        assert!(!agent_supports_capability(None, AgentCapability::MongoDropDatabase));
+        assert!(!agent_supports_capability(Some(&handshake), AgentCapability::MongoDropDatabase));
+
+        let mongo_handshake =
+            AgentHandshake { capabilities: vec![AgentCapability::MongoDropDatabase.as_str().to_string()], ..handshake };
+        assert!(agent_supports_capability(Some(&mongo_handshake), AgentCapability::MongoDropDatabase));
     }
 
     #[test]

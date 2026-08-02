@@ -49,6 +49,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.function.Consumer;
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
@@ -607,21 +608,50 @@ public final class MongoAgent {
         boolean single = params.has("single") && !params.get("single").isJsonNull() && params.get("single").getAsBoolean();
         Object index = parseDropIndexesValue(indexesJson, single);
 
-        List<IndexInfo> before = listIndexInfos(c, database, collection);
         if (index instanceof List<?> indexes) {
             // MongoDB 3.4 rejects an array in dropIndexes.index, so keep the
             // legacy protocol portable even when an older caller sends one.
-            for (Object indexName : indexes) {
-                c.getDatabase(database).runCommand(new Document("dropIndexes", collection).append("index", indexName));
-            }
-        } else {
-            c.getDatabase(database).runCommand(new Document("dropIndexes", collection).append("index", index));
+            return dropNamedIndexes(
+                indexes,
+                indexName -> c.getDatabase(database).runCommand(
+                    new Document("dropIndexes", collection).append("index", indexName)
+                )
+            );
         }
+
+        List<IndexInfo> before = listIndexInfos(c, database, collection);
+        c.getDatabase(database).runCommand(new Document("dropIndexes", collection).append("index", index));
         List<IndexInfo> after = listIndexInfos(c, database, collection);
         List<String> droppedNames = diffDroppedIndexNames(before, after);
+        return dropIndexesResult(droppedNames, Collections.emptyList());
+    }
+
+    static Map<String, Object> dropNamedIndexes(List<?> indexes, Consumer<Object> dropCommand) {
+        List<String> droppedNames = new ArrayList<>();
+        List<Map<String, String>> failures = new ArrayList<>();
+        for (Object indexName : indexes) {
+            String name = String.valueOf(indexName);
+            try {
+                dropCommand.accept(indexName);
+                droppedNames.add(name);
+            } catch (RuntimeException error) {
+                String message = error.getMessage() == null ? error.toString() : error.getMessage();
+                failures.add(Map.of("name", name, "message", message));
+            }
+        }
+        return dropIndexesResult(droppedNames, failures);
+    }
+
+    private static Map<String, Object> dropIndexesResult(
+        List<String> droppedNames,
+        List<Map<String, String>> failures
+    ) {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("dropped_names", droppedNames);
         result.put("affected_rows", droppedNames.size());
+        if (!failures.isEmpty()) {
+            result.put("failures", failures);
+        }
         return result;
     }
 
@@ -1090,7 +1120,7 @@ public final class MongoAgent {
 
     private static Object dispatch(String method, JsonObject params) {
         return switch (method) {
-            case AgentProtocol.METHOD_HANDSHAKE -> AgentProtocol.handshakeResult();
+            case AgentProtocol.METHOD_HANDSHAKE -> AgentProtocol.mongoLegacyHandshakeResult();
             case AgentProtocol.METHOD_CONNECT -> connect(params);
             case AgentProtocol.MONGO_METHOD_LIST_DATABASES -> listDatabases();
             case AgentProtocol.MONGO_METHOD_LIST_COLLECTIONS -> listCollections(params);
@@ -1117,6 +1147,10 @@ public final class MongoAgent {
             }
             default -> throw new IllegalArgumentException("Unknown method: " + method);
         };
+    }
+
+    static AgentProtocol.HandshakeResult runtimeHandshakeResult() {
+        return AgentProtocol.mongoLegacyMultiSessionHandshakeResult();
     }
 
     private static MongoClient requireClient() {
@@ -1218,7 +1252,7 @@ public final class MongoAgent {
             try {
                 Object result;
                 if (AgentProtocol.METHOD_HANDSHAKE.equals(method)) {
-                    result = AgentProtocol.multiSessionHandshakeResult();
+                    result = runtimeHandshakeResult();
                 } else if (AgentProtocol.METHOD_OPEN_SESSION.equals(method)) {
                     result = openSession(requiredSessionId(params), params);
                 } else if (AgentProtocol.METHOD_CLOSE_SESSION.equals(method)) {

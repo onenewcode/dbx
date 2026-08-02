@@ -95,6 +95,8 @@ export const renameMongoCollectionPreview = ref("");
 export const renameMongoCollectionLoading = ref(false);
 export const showDropMongoIndexConfirm = ref(false);
 export const dropMongoIndexLoading = ref(false);
+export const showDropAllMongoIndexesConfirm = ref(false);
+export const dropAllMongoIndexesLoading = ref(false);
 export const showCreateMongoIndexDialog = ref(false);
 export const mongoCreateIndexForm = ref<MongoCreateIndexForm>({ name: "", fields: [{ id: 1, path: "", type: "1" }], unique: false, sparse: false });
 export const mongoCreateIndexFieldOptions = ref<string[]>([]);
@@ -151,6 +153,7 @@ const openFlags = [
   showDropMongoCollectionConfirm,
   showRenameMongoCollectionDialog,
   showDropMongoIndexConfirm,
+  showDropAllMongoIndexesConfirm,
   showCreateMongoIndexDialog,
   showFlushRedisDbConfirm,
   showRedisDatabaseAliasDialog,

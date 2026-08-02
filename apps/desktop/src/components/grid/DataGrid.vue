@@ -217,12 +217,13 @@ import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabil
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { reserveDataGridHeaderLine } from "@/lib/dataGrid/dataGridHeaderLayout";
 import { supportsTableStructureEditing } from "@/lib/database/databaseCapabilities";
-import { executeWithProductionContextGuard } from "@/lib/database/productionExecutionGuard";
 import { rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
 import { restoreDataGridLocalColumnFilters, serializeDataGridLocalColumnFilters } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
 import { effectiveDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { mongoCollectionSupportsIndexes, supportsMongoIndexMutations } from "@/lib/mongo/mongoCapabilities";
-import { isProtectedMongoIndex, mongoDropIndexPreview } from "@/lib/sidebar/mongoCollectionMutation";
+import { refreshLoadedMongoIndexes } from "@/lib/mongo/mongoIndexMetadata";
+import { isProtectedMongoIndex, mongoDropAllIndexesPreview, mongoDropIndexFailureCount, mongoDropIndexPreview } from "@/lib/sidebar/mongoCollectionMutation";
+import { runMongoMutation } from "@/lib/sidebar/runMongoSidebarMutation";
 import { dataGridConditionColumnOptions, dataGridConditionIdentifierQuote } from "@/lib/dataGrid/dataGridConditionCompletion";
 import { isMacOS } from "@/lib/backend/platform";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
@@ -7219,6 +7220,8 @@ const indexesError = ref("");
 const showDropMongoIndexConfirm = ref(false);
 const dropMongoIndexLoading = ref(false);
 const pendingDropMongoIndex = ref<IndexInfo | null>(null);
+const showDropAllMongoIndexesConfirm = ref(false);
+const dropAllMongoIndexesLoading = ref(false);
 const foreignKeys = ref<ForeignKeyInfo[]>([]);
 const foreignKeysLoaded = ref(false);
 const foreignKeysLoading = ref(false);
@@ -7423,6 +7426,19 @@ async function fetchIndexes() {
 async function reloadIndexes() {
   indexesLoaded.value = false;
   await fetchIndexes();
+}
+
+async function refreshMongoIndexMetadataAfterMutation() {
+  await reloadIndexes();
+  const connectionId = props.connectionId;
+  const database = props.database;
+  const collection = props.tableMeta?.tableName;
+  if (!connectionId || !database || !collection) return;
+  try {
+    await refreshLoadedMongoIndexes(connectionStore, { connectionId, database, collection });
+  } catch (e: any) {
+    toast(t("contextMenu.mongoIndexRefreshFailed", { message: String(e?.message || e) }), 5000);
+  }
 }
 
 async function fetchForeignKeys() {
@@ -7765,6 +7781,8 @@ const filteredIndexes = computed(() => {
   return indexes.value.filter((i) => i.name.toLowerCase().includes(q) || i.columns.some((c) => c.toLowerCase().includes(q)));
 });
 
+const droppableMongoIndexes = computed(() => indexes.value.filter((index) => !isProtectedMongoIndex(index)));
+
 const dropMongoIndexConfirmMessage = computed(() =>
   pendingDropMongoIndex.value
     ? t("contextMenu.confirmDropMongoIndexMessage", {
@@ -7774,11 +7792,19 @@ const dropMongoIndexConfirmMessage = computed(() =>
     : "",
 );
 const dropMongoIndexPreview = computed(() => (pendingDropMongoIndex.value ? mongoDropIndexPreview(props.database || "", props.tableMeta?.tableName || "", pendingDropMongoIndex.value.name) : ""));
+const dropAllMongoIndexesConfirmMessage = computed(() => t("contextMenu.confirmDropMongoAllIndexesMessage", { name: props.tableMeta?.tableName || "" }));
+const dropAllMongoIndexesConfirmDetails = computed(() => t("contextMenu.confirmDropMongoAllIndexesDetails"));
+const dropAllMongoIndexesPreview = computed(() => mongoDropAllIndexesPreview(props.database || "", props.tableMeta?.tableName || ""));
 
 function requestDropMongoIndex(index: IndexInfo) {
   if (!canManageMongoIndexes.value || isProtectedMongoIndex(index)) return;
   pendingDropMongoIndex.value = index;
   showDropMongoIndexConfirm.value = true;
+}
+
+function requestDropAllMongoIndexes() {
+  if (!canManageMongoIndexes.value || droppableMongoIndexes.value.length === 0) return;
+  showDropAllMongoIndexesConfirm.value = true;
 }
 
 async function confirmDropMongoIndex() {
@@ -7787,29 +7813,64 @@ async function confirmDropMongoIndex() {
   const database = props.database;
   const tableName = props.tableMeta?.tableName;
   if (!connectionId || !database || !tableName || !index || !canManageMongoIndexes.value || isProtectedMongoIndex(index) || dropMongoIndexLoading.value) return;
-  try {
-    const executed = await executeWithProductionContextGuard({
-      connection: connectionStore.getConfig(connectionId),
-      database,
-      reviewText: dropMongoIndexPreview.value,
-      source: t("production.sourceDataGrid"),
-      execute: async () => {
-        dropMongoIndexLoading.value = true;
-        await connectionStore.ensureConnected(connectionId);
-        await api.mongoDropIndexes(connectionId, database, tableName, JSON.stringify(index.name), true);
-        return { executed: true };
-      },
-    });
-    if (!executed) return;
-    toast(t("contextMenu.dropTableChildObjectSuccess", { name: index.name }), 3000);
-    showDropMongoIndexConfirm.value = false;
-    pendingDropMongoIndex.value = null;
-    await reloadIndexes();
-  } catch (e: any) {
-    toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000);
-  } finally {
-    dropMongoIndexLoading.value = false;
-  }
+  await runMongoMutation({
+    connection: connectionStore.getConfig(connectionId),
+    database,
+    reviewText: dropMongoIndexPreview.value,
+    source: t("production.sourceDataGrid"),
+    loading: dropMongoIndexLoading,
+    beforeExecute: () => connectionStore.ensureConnected(connectionId),
+    execute: async () => {
+      try {
+        return await api.mongoDropIndexes(connectionId, database, tableName, JSON.stringify(index.name), true);
+      } finally {
+        await refreshMongoIndexMetadataAfterMutation();
+      }
+    },
+    onSuccess: (result) => {
+      const failed = mongoDropIndexFailureCount(result);
+      if (failed > 0) {
+        toast(t("contextMenu.dropIndexesPartialFailure", { success: result.dropped_names.length, failed }), 5000);
+      } else {
+        toast(t("contextMenu.dropTableChildObjectSuccess", { name: index.name }), 3000);
+      }
+      showDropMongoIndexConfirm.value = false;
+      pendingDropMongoIndex.value = null;
+    },
+    onError: (e: any) => toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000),
+  });
+}
+
+async function confirmDropAllMongoIndexes() {
+  const connectionId = props.connectionId;
+  const database = props.database;
+  const tableName = props.tableMeta?.tableName;
+  if (!connectionId || !database || !tableName || !canManageMongoIndexes.value || dropAllMongoIndexesLoading.value) return;
+  await runMongoMutation({
+    connection: connectionStore.getConfig(connectionId),
+    database,
+    reviewText: dropAllMongoIndexesPreview.value,
+    source: t("production.sourceDataGrid"),
+    loading: dropAllMongoIndexesLoading,
+    beforeExecute: () => connectionStore.ensureConnected(connectionId),
+    execute: async () => {
+      try {
+        return await api.mongoDropIndexes(connectionId, database, tableName, undefined, false);
+      } finally {
+        await refreshMongoIndexMetadataAfterMutation();
+      }
+    },
+    onSuccess: (result) => {
+      const failed = mongoDropIndexFailureCount(result);
+      if (failed > 0) {
+        toast(t("contextMenu.dropIndexesPartialFailure", { success: result.dropped_names.length, failed }), 5000);
+      } else {
+        toast(t("contextMenu.dropAllIndexesSuccess", { count: result.dropped_names.length, name: tableName }), 3000);
+      }
+      showDropAllMongoIndexesConfirm.value = false;
+    },
+    onError: (e: any) => toast(t("contextMenu.tableOperationFailed", { message: e?.message || String(e) }), 5000),
+  });
 }
 
 const filteredForeignKeys = computed(() => {
@@ -9232,6 +9293,12 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <WrapText class="w-3 h-3" />
                 </Button>
               </div>
+              <div v-else-if="activeTableInfoTab === 'indexes' && canManageMongoIndexes" class="table-info-actions flex min-w-0 shrink-0 items-center gap-1">
+                <Button variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs text-destructive hover:text-destructive" :disabled="indexesLoading || dropAllMongoIndexesLoading || droppableMongoIndexes.length === 0" @click="requestDropAllMongoIndexes">
+                  <Trash2 class="w-3 h-3" />
+                  <span class="table-info-action-label">{{ t("contextMenu.dropAllIndexes") }}</span>
+                </Button>
+              </div>
               <Button v-if="canOpenTableStructureEditor" variant="ghost" size="sm" class="table-info-action-button h-6 px-2 text-xs" :title="t('contextMenu.editStructure')" :aria-label="t('contextMenu.editStructure')" @click="openTableStructureEditor">
                 <PencilRuler class="w-3 h-3" />
                 <span class="table-info-action-label">{{ t("contextMenu.editStructure") }}</span>
@@ -9714,6 +9781,17 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
       :loading="dropMongoIndexLoading"
       :close-on-confirm="false"
       @confirm="confirmDropMongoIndex"
+    />
+    <DangerConfirmDialog
+      v-model:open="showDropAllMongoIndexesConfirm"
+      :title="t('contextMenu.dropAllIndexes')"
+      :message="dropAllMongoIndexesConfirmMessage"
+      :details-text="dropAllMongoIndexesConfirmDetails"
+      :sql="dropAllMongoIndexesPreview"
+      :confirm-label="t('contextMenu.dropAllIndexes')"
+      :loading="dropAllMongoIndexesLoading"
+      :close-on-confirm="false"
+      @confirm="confirmDropAllMongoIndexes"
     />
     <ImagePreviewDialog v-if="imagePreviewMounted" v-model:open="imagePreviewOpen" :src="imagePreviewSrc" :title="imagePreviewTitle" />
     <component v-if="previewDialogOpen && previewDialogConfig" :is="previewDialogConfig.component" v-model:open="previewDialogOpen" v-bind="previewDialogConfig.props" />

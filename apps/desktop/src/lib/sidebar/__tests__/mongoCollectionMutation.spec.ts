@@ -7,6 +7,8 @@ import {
   mongoCollectionTableTypeFromNode,
   mongoCreateIndexPreview,
   mongoDropCollectionPreview,
+  mongoDropAllIndexesPreview,
+  mongoDropIndexFailureCount,
   mongoDropIndexPreview,
   mongoRenameCollectionPreview,
   toMongoCollectionKind,
@@ -70,6 +72,12 @@ describe("mongo shell previews", () => {
   it("builds drop previews with database scope", () => {
     expect(mongoDropCollectionPreview("app", "users")).toBe('db.getSiblingDB("app").getCollection("users").drop()');
     expect(mongoDropIndexPreview("app", "users", "idx_name")).toBe('db.getSiblingDB("app").getCollection("users").dropIndex("idx_name")');
+    expect(mongoDropAllIndexesPreview("app", "users")).toBe('db.getSiblingDB("app").getCollection("users").dropIndexes()');
+  });
+
+  it("counts per-index failures in partial batch results", () => {
+    expect(mongoDropIndexFailureCount({})).toBe(0);
+    expect(mongoDropIndexFailureCount({ failures: [{ name: "missing_1", message: "index not found" }] })).toBe(1);
   });
 
   it("builds a create-index request and shell preview from the visual form", () => {

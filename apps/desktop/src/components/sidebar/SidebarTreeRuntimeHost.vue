@@ -93,7 +93,7 @@ import {
   isSingleDatabase,
 } from "@/lib/database/databaseCapabilities";
 import { copyNameForTreeNode, isDocumentBrowserTreeNode, objectSourceKindForTreeNode, shouldRunTreeNodeRowAction, treeNodeRowAction, treeNodeRowDoubleClickAction } from "@/lib/sidebar/treeNodeClick";
-import { mongoCollectionTableTypeFromNode } from "@/lib/sidebar/mongoCollectionMutation";
+import { mongoCollectionTableTypeFromNode, mongoDropIndexFailureCount } from "@/lib/sidebar/mongoCollectionMutation";
 import { dataTabOpenModeFromTreeClick, type DataTabOpenMode } from "@/lib/sidebar/dataTabOpenPolicy";
 import { isCopySidebarSelectionShortcut, isEditSidebarConnectionShortcut, isPasteSidebarSelectionShortcut } from "@/lib/editor/keyboardShortcuts";
 import { handleSidebarTreeDeleteShortcut } from "@/lib/sidebar/sidebarTreeDeleteShortcut";
@@ -233,6 +233,8 @@ import {
   dropMongoCollectionLoading,
   showDropMongoIndexConfirm,
   dropMongoIndexLoading,
+  showDropAllMongoIndexesConfirm,
+  dropAllMongoIndexesLoading,
   showCreateMongoIndexDialog,
   mongoCreateIndexForm,
   mongoCreateIndexFieldOptions,
@@ -396,7 +398,10 @@ const {
   mongoIndexNameForNode,
   canDropMongoIndexNode,
   canDropMongoIndex,
+  canDropAllMongoIndexes,
   mongoIndexDropPreview,
+  mongoDropAllIndexesPreview,
+  refreshMongoIndexTreeAfterMutation,
   canCreateMongoIndex,
   mongoIndexKeyTypes,
   mongoCreateIndexCanSubmit,
@@ -411,6 +416,7 @@ const {
   confirmEditNacosNamespace,
   dropMongoCollection,
   dropMongoIndex,
+  dropAllMongoIndexes,
   flushRedisDb,
   prepareRedisDatabaseAliasDialog,
   confirmRedisDatabaseAlias,
@@ -422,6 +428,7 @@ const {
   confirmDropMongoDatabase,
   confirmDropMongoCollection,
   confirmDropMongoIndex,
+  confirmDropAllMongoIndexes,
 } = useSidebarDatabaseSpecificMutationRuntime({ activeNode, connectionStore });
 
 const { isTableNotView, supportsTruncate, canDropTableCascade, canTruncateTableCascade, refreshDropTablePreviewSql, refreshTruncateTablePreviewSql, dropTable, refreshTableList, confirmDropTable, emptyTable, confirmEmptyTable, truncateTable, confirmTruncateTable } = useSidebarTableMutationRuntime({
@@ -2119,22 +2126,39 @@ async function confirmBatchDrop() {
       }
 
       let droppedCount = 0;
+      let failedCount = 0;
+      let firstGroupError: unknown;
       for (const groupTargets of mongoIndexGroups) {
         const groupFirst = groupTargets[0];
         if (!groupFirst?.connectionId || !groupFirst.database || !groupFirst.tableName) continue;
-        await connectionStore.ensureConnected(groupFirst.connectionId);
         const names = groupTargets.map((target) => mongoIndexNameForNode(target));
-        const result = await api.mongoDropIndexes(groupFirst.connectionId, groupFirst.database, groupFirst.tableName, JSON.stringify(names.length === 1 ? names[0] : names), names.length === 1);
-        const dropped = new Set(result.dropped_names);
-        droppedCount += result.dropped_names.length;
-        for (const target of groupTargets) {
-          const indexName = mongoIndexNameForNode(target);
-          if (!dropped.has(indexName)) continue;
-          connectionStore.removeTreeNode(target.id);
-          releaseActiveNodeReference([target.id]);
+        try {
+          await connectionStore.ensureConnected(groupFirst.connectionId);
+          const result = await api.mongoDropIndexes(groupFirst.connectionId, groupFirst.database, groupFirst.tableName, JSON.stringify(names.length === 1 ? names[0] : names), names.length === 1);
+          const dropped = new Set(result.dropped_names);
+          droppedCount += result.dropped_names.length;
+          failedCount += mongoDropIndexFailureCount(result);
+          for (const target of groupTargets) {
+            const indexName = mongoIndexNameForNode(target);
+            if (!dropped.has(indexName)) continue;
+            connectionStore.removeTreeNode(target.id);
+            releaseActiveNodeReference([target.id]);
+          }
+        } catch (error) {
+          // A transport-level failure has no per-index payload; retain prior
+          // successes and continue with independent collection groups.
+          failedCount += groupTargets.length;
+          firstGroupError ??= error;
+        } finally {
+          await refreshMongoIndexTreeAfterMutation(groupFirst);
         }
       }
-      toast(t("contextMenu.batchDropSuccess", { count: droppedCount }), 3000);
+      if (droppedCount === 0 && firstGroupError && failedCount === mongoIndexTargets.length) throw firstGroupError;
+      if (failedCount > 0) {
+        toast(t("contextMenu.dropIndexesPartialFailure", { success: droppedCount, failed: failedCount }), 5000);
+      } else {
+        toast(t("contextMenu.batchDropSuccess", { count: droppedCount }), 3000);
+      }
       showBatchDropConfirm.value = false;
       return;
     }
@@ -3543,6 +3567,21 @@ routeDangerDialog(showDropMongoIndexConfirm, () =>
   }),
 );
 
+routeDangerDialog(showDropAllMongoIndexesConfirm, () =>
+  dangerRequest({
+    title: t("contextMenu.dropAllIndexes"),
+    message: t("contextMenu.confirmDropMongoAllIndexesMessage", { name: activeNode.value.label }),
+    detailsText: t("contextMenu.confirmDropMongoAllIndexesDetails"),
+    sql: mongoDropAllIndexesPreview(activeNode.value),
+    confirmLabel: t("contextMenu.dropAllIndexes"),
+    get loading() {
+      return dropAllMongoIndexesLoading.value;
+    },
+    closeOnConfirm: false,
+    confirm: confirmDropAllMongoIndexes,
+  }),
+);
+
 routeDangerDialog(showFlushRedisDbConfirm, () =>
   dangerRequest({
     title: t("redis.flushDb"),
@@ -4246,10 +4285,13 @@ function buildSpecialSidebarMenu(context: SidebarMenuFactoryContext): boolean {
         shortcut: shortcutRename,
       });
     }
-    if (canCreateMongoIndex.value || canDropMongoCollection.value) {
+    if (canCreateMongoIndex.value || canDropAllMongoIndexes.value || canDropMongoCollection.value) {
       items.push({ label: "", separator: true });
       if (canCreateMongoIndex.value) {
         items.push({ label: t("contextMenu.createMongoIndex"), action: openCreateMongoIndexDialog, icon: Plus });
+      }
+      if (canDropAllMongoIndexes.value) {
+        items.push({ label: t("contextMenu.dropAllIndexes"), action: dropAllMongoIndexes, icon: Trash2, variant: "destructive" as const });
       }
       if (canDropMongoCollection.value) {
         items.push({ label: t("contextMenu.dropCollection"), action: dropMongoCollection, icon: Trash2, shortcut: shortcutDelete, variant: "destructive" as const });

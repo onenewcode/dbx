@@ -20,6 +20,14 @@ pub type MongoDocumentResult = DocumentQueryResult;
 pub struct MongoDropIndexesResult {
     pub dropped_names: Vec<String>,
     pub affected_rows: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub failures: Vec<MongoDropIndexFailure>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MongoDropIndexFailure {
+    pub name: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1101,23 +1109,30 @@ pub async fn drop_indexes(
     let collection = validate_mongo_namespace_name(collection, "Collection")?;
 
     let index = parse_drop_indexes_value(indexes_json, single)?;
-    let before = list_indexes(client, database, collection).await?;
-    let indexes = match index {
-        // MongoDB 3.4 does not accept an array in dropIndexes.index. Applying
-        // each validated name is portable across both supported driver paths.
-        Bson::Array(indexes) => indexes,
-        index => vec![index],
-    };
-    for index in indexes {
-        client
-            .database(database)
-            .run_command(doc! { "dropIndexes": collection, "index": index })
-            .await
-            .map_err(|e| e.to_string())?;
+    if let Bson::Array(indexes) = index {
+        let mut dropped_names = Vec::new();
+        let mut failures = Vec::new();
+        for index in indexes {
+            let Bson::String(name) = index else {
+                return Err("dropIndexes only accepts arrays of string index names".to_string());
+            };
+            match client.database(database).run_command(doc! { "dropIndexes": collection, "index": &name }).await {
+                Ok(_) => dropped_names.push(name),
+                Err(error) => failures.push(MongoDropIndexFailure { name, message: error.to_string() }),
+            }
+        }
+        return Ok(MongoDropIndexesResult { affected_rows: dropped_names.len() as u64, dropped_names, failures });
     }
+
+    let before = list_indexes(client, database, collection).await?;
+    client
+        .database(database)
+        .run_command(doc! { "dropIndexes": collection, "index": index })
+        .await
+        .map_err(|e| e.to_string())?;
     let after = list_indexes(client, database, collection).await?;
     let dropped_names = diff_dropped_index_names(&before, &after);
-    Ok(MongoDropIndexesResult { affected_rows: dropped_names.len() as u64, dropped_names })
+    Ok(MongoDropIndexesResult { affected_rows: dropped_names.len() as u64, dropped_names, failures: Vec::new() })
 }
 
 /// Validate a drop-index request before it is sent to either MongoDB driver.

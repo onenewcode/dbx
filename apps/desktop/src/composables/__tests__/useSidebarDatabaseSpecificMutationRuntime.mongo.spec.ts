@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createPinia, setActivePinia } from "pinia";
 import { shallowRef } from "vue";
 import type { TreeNode } from "@/types/database";
-import { mongoCreateIndexError, mongoCreateIndexForm, resetMongoCreateIndexForm, sidebarDangerTarget, sidebarFormTarget, showCreateMongoIndexDialog, showDropMongoCollectionConfirm } from "@/components/sidebar/sidebarTreeDialogState";
+import { mongoCreateIndexError, mongoCreateIndexForm, resetMongoCreateIndexForm, sidebarDangerTarget, sidebarFormTarget, showCreateMongoIndexDialog, showDropAllMongoIndexesConfirm, showDropMongoCollectionConfirm } from "@/components/sidebar/sidebarTreeDialogState";
 
 const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
@@ -115,6 +115,7 @@ function mongoIndexNode(name: string, kind: "collection" | "view" | "timeseries"
 }
 
 function runtime(activeNode: TreeNode) {
+  const indexesGroup = activeNode.type === "group-indexes" ? activeNode : mongoIndexesGroupNode();
   return useSidebarDatabaseSpecificMutationRuntime({
     activeNode: shallowRef(activeNode),
     connectionStore: {
@@ -125,7 +126,7 @@ function runtime(activeNode: TreeNode) {
       loadMongoCollections: mocks.loadMongoCollections,
       loadMongoDatabases: mocks.loadMongoDatabases,
       removeTreeNode: mocks.removeTreeNode,
-      treeNodes: [],
+      treeNodes: [indexesGroup],
     } as any,
   });
 }
@@ -147,6 +148,7 @@ describe("MongoDB sidebar mutation runtime", () => {
     sidebarDangerTarget.value = null;
     sidebarFormTarget.value = null;
     showCreateMongoIndexDialog.value = false;
+    showDropAllMongoIndexesConfirm.value = false;
     showDropMongoCollectionConfirm.value = false;
     resetMongoCreateIndexForm();
   });
@@ -170,6 +172,7 @@ describe("MongoDB sidebar mutation runtime", () => {
     expect(feature.canDropMongoDatabase.value).toBe(true);
     activeNode.value = mongoCollectionNode();
     expect(feature.canDropMongoCollection.value).toBe(true);
+    expect(feature.canDropAllMongoIndexes.value).toBe(true);
     expect(feature.canRenameMongoCollection.value).toBe(false);
     expect(feature.canCreateMongoIndex.value).toBe(true);
     activeNode.value = mongoIndexesGroupNode();
@@ -196,6 +199,7 @@ describe("MongoDB sidebar mutation runtime", () => {
     });
 
     expect(feature.canDropMongoCollection.value).toBe(true);
+    expect(feature.canDropAllMongoIndexes.value).toBe(false);
     activeNode.value = mongoIndexesGroupNode("view");
     expect(feature.canCreateMongoIndex.value).toBe(false);
     activeNode.value = mongoIndexNode("email_1", "view");
@@ -223,7 +227,7 @@ describe("MongoDB sidebar mutation runtime", () => {
     expect(showCreateMongoIndexDialog.value).toBe(false);
     expect(mocks.ensureConnected).toHaveBeenCalledWith("conn-1");
     expect(mocks.mongoCreateIndex).toHaveBeenCalledWith("conn-1", "app", "users", '{"email":1,"createdAt":-1}', '{"name":"email_created_at","unique":true}');
-    expect(mocks.loadIndexes).toHaveBeenCalledWith("conn-1", "app", "users", undefined, "conn-1:app:users:__indexes");
+    expect(mocks.loadIndexes).toHaveBeenCalledWith("conn-1", "app", "users", undefined, "conn-1:app:users:__indexes", undefined);
     expect(mocks.toast).toHaveBeenCalledWith('contextMenu.createMongoIndexSuccess:{"name":"email_1","collection":"users"}', 3000);
   });
 
@@ -273,7 +277,7 @@ describe("MongoDB sidebar mutation runtime", () => {
         listMongoCompletionFields: mocks.listMongoCompletionFields,
         loadMongoCollections: mocks.loadMongoCollections,
         loadMongoDatabases: mocks.loadMongoDatabases,
-        treeNodes: [],
+        treeNodes: [originalTarget],
       } as any,
     });
 
@@ -288,7 +292,50 @@ describe("MongoDB sidebar mutation runtime", () => {
     await feature.confirmCreateMongoIndex();
 
     expect(mocks.mongoCreateIndex).toHaveBeenCalledWith("conn-1", "app", "users", '{"email":1}', undefined);
-    expect(mocks.loadIndexes).toHaveBeenCalledWith("conn-1", "app", "users", undefined, "conn-1:app:users:__indexes");
+    expect(mocks.loadIndexes).toHaveBeenCalledWith("conn-1", "app", "users", undefined, "conn-1:app:users:__indexes", undefined);
+  });
+
+  it("drops every removable index through the shared mutation and refreshes metadata", async () => {
+    const node = mongoCollectionNode();
+    const feature = runtime(node);
+    sidebarDangerTarget.value = node;
+    showDropAllMongoIndexesConfirm.value = true;
+    mocks.mongoDropIndexes.mockResolvedValueOnce({ dropped_names: ["email_1", "created_at_-1"], affected_rows: 2 });
+
+    await feature.confirmDropAllMongoIndexes();
+
+    expect(mocks.mongoDropIndexes).toHaveBeenCalledWith("conn-1", "app", "users", undefined, false);
+    expect(mocks.loadIndexes).toHaveBeenCalledWith("conn-1", "app", "users", undefined, "conn-1:app:users:__indexes", undefined);
+    expect(showDropAllMongoIndexesConfirm.value).toBe(false);
+    expect(mocks.toast).toHaveBeenCalledWith('contextMenu.dropAllIndexesSuccess:{"count":2,"name":"users"}', 3000);
+  });
+
+  it("refreshes index metadata after a failed delete request", async () => {
+    const node = mongoIndexNode("email_1");
+    const feature = runtime(node);
+    sidebarDangerTarget.value = node;
+    mocks.mongoDropIndexes.mockRejectedValueOnce(new Error("connection lost"));
+
+    await feature.confirmDropMongoIndex();
+
+    expect(mocks.loadIndexes).toHaveBeenCalledWith("conn-1", "app", "users", undefined, "conn-1:app:users:__indexes", undefined);
+    expect(mocks.toast).toHaveBeenCalledWith(expect.stringContaining("contextMenu.tableOperationFailed"), 5000);
+  });
+
+  it("reports partial index deletion after forcing a metadata refresh", async () => {
+    const node = mongoCollectionNode();
+    const feature = runtime(node);
+    sidebarDangerTarget.value = node;
+    mocks.mongoDropIndexes.mockResolvedValueOnce({
+      dropped_names: ["email_1"],
+      affected_rows: 1,
+      failures: [{ name: "missing_1", message: "index not found" }],
+    });
+
+    await feature.confirmDropAllMongoIndexes();
+
+    expect(mocks.loadIndexes).toHaveBeenCalledOnce();
+    expect(mocks.toast).toHaveBeenCalledWith('contextMenu.dropIndexesPartialFailure:{"success":1,"failed":1}', 5000);
   });
 
   it("executes Legacy delete operations and refreshes their MongoDB metadata", async () => {
@@ -317,7 +364,7 @@ describe("MongoDB sidebar mutation runtime", () => {
     await indexFeature.confirmDropMongoIndex();
 
     expect(mocks.mongoDropIndexes).toHaveBeenCalledWith("conn-1", "app", "users", '"email_1"', true);
-    expect(mocks.loadIndexes).toHaveBeenCalledWith("conn-1", "app", "users", undefined, "conn-1:app:users:__indexes");
+    expect(mocks.loadIndexes).toHaveBeenCalledWith("conn-1", "app", "users", undefined, "conn-1:app:users:__indexes", undefined);
   });
 
   it("keeps a completed collection drop successful when metadata refresh fails", async () => {

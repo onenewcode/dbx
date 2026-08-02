@@ -48,3 +48,6 @@ export async function runMongoSidebarMutation<T>(options: RunMongoSidebarMutatio
     options.loading.value = false;
   }
 }
+
+// DataGrid and sidebar mutations intentionally share the same production-gated lifecycle.
+export const runMongoMutation = runMongoSidebarMutation;
