@@ -2456,12 +2456,23 @@ export const useConnectionStore = defineStore("connection", () => {
       return;
     }
 
+    const expectedConfigFingerprint = connectionConfigFingerprint(previousConfig);
+    const current = connections.value.find((connection) => connection.id === connectionId);
+    if (!current || connectionConfigFingerprint(current) !== expectedConfigFingerprint) return;
+
     const savedConnections = await api.loadConnections().catch(() => null);
     const savedConfig = savedConnections?.map((connection) => normalizeConnection(connection)).find((connection) => connection.id === connectionId && connection.driver_profile === MONGO_LEGACY_DRIVER_PROFILE);
     if (!savedConfig) return;
 
+    const savedOriginalIdentity = {
+      ...savedConfig,
+      driver_profile: previousConfig.driver_profile,
+      driver_label: previousConfig.driver_label,
+    };
+    if (connectionConfigFingerprint(savedOriginalIdentity) !== expectedConfigFingerprint) return;
+
     const idx = connections.value.findIndex((connection) => connection.id === connectionId);
-    if (idx < 0 || connections.value[idx].db_type !== "mongodb") return;
+    if (idx < 0 || connectionConfigFingerprint(connections.value[idx]) !== expectedConfigFingerprint) return;
     const nextConnections = [...connections.value];
     nextConnections[idx] = {
       ...nextConnections[idx],

@@ -45,20 +45,18 @@ fn mark_mongo_legacy_driver(config: &mut ConnectionConfig) -> bool {
     changed
 }
 
-async fn persist_mongo_legacy_driver_profile(state: &AppState, config: &ConnectionConfig) -> Result<(), String> {
+async fn persist_mongo_legacy_driver_profile(state: &AppState, config: &ConnectionConfig) -> Result<bool, String> {
     if config.one_time {
-        return Ok(());
+        return Ok(true);
     }
     state
         .storage
         .save_connection_driver_profile(
-            &config.id,
-            DatabaseType::MongoDb,
+            config,
             Some(MONGO_LEGACY_DRIVER_PROFILE.to_string()),
             Some(MONGO_LEGACY_DRIVER_LABEL.to_string()),
         )
         .await
-        .map(|_| ())
 }
 
 async fn test_agent_connection(
@@ -1287,9 +1285,9 @@ pub async fn connect_db(
                         )
                     })?;
                     state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
+                    persist_mongo_legacy_driver_profile(state.inner(), &connected_config).await?;
                     mark_mongo_legacy_driver(&mut connected_config);
                     connected_db_config = metadata_connection_config(&connected_config);
-                    persist_mongo_legacy_driver_profile(state.inner(), &connected_config).await?;
                     PoolKind::agent(client)
                 } else {
                     return Err(native_err);
