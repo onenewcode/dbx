@@ -77,9 +77,12 @@ describe("connectionStore MongoDB Legacy fallback", () => {
       driver_label: "MongoDB (Legacy)",
     };
     let resolveLoadConnections!: (configs: ConnectionConfig[]) => void;
-    const loadConnections = vi.fn().mockImplementation(() => new Promise<ConnectionConfig[]>((resolve) => {
-      resolveLoadConnections = resolve;
-    }));
+    const loadConnections = vi.fn().mockImplementation(
+      () =>
+        new Promise<ConnectionConfig[]>((resolve) => {
+          resolveLoadConnections = resolve;
+        }),
+    );
 
     vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
     vi.doMock("@/lib/backend/api", () => ({
