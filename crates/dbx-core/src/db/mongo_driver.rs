@@ -1109,21 +1109,6 @@ pub async fn drop_indexes(
     let collection = validate_mongo_namespace_name(collection, "Collection")?;
 
     let index = parse_drop_indexes_value(indexes_json, single)?;
-    if let Bson::Array(indexes) = index {
-        let mut dropped_names = Vec::new();
-        let mut failures = Vec::new();
-        for index in indexes {
-            let Bson::String(name) = index else {
-                return Err("dropIndexes only accepts arrays of string index names".to_string());
-            };
-            match client.database(database).run_command(doc! { "dropIndexes": collection, "index": &name }).await {
-                Ok(_) => dropped_names.push(name),
-                Err(error) => failures.push(MongoDropIndexFailure { name, message: error.to_string() }),
-            }
-        }
-        return Ok(MongoDropIndexesResult { affected_rows: dropped_names.len() as u64, dropped_names, failures });
-    }
-
     let before = list_indexes(client, database, collection).await?;
     client
         .database(database)
@@ -1140,6 +1125,28 @@ pub async fn drop_indexes(
 /// public gives both paths the same protection for MongoDB's default index.
 pub fn validate_drop_indexes_request(indexes_json: Option<&str>, single: bool) -> Result<(), String> {
     parse_drop_indexes_value(indexes_json, single).map(|_| ())
+}
+
+/// MongoDB added array-form `dropIndexes.index` in 4.2. Unknown version
+/// strings preserve the modern single-command semantics instead of risking a
+/// partially applied serial fallback.
+pub fn mongo_server_requires_serial_drop_indexes(version: &str) -> bool {
+    let Some(start) = version.find(|character: char| character.is_ascii_digit()) else {
+        return false;
+    };
+    let mut components = version[start..].split('.');
+    let Some(major) = components.next().and_then(parse_version_component) else {
+        return false;
+    };
+    let Some(minor) = components.next().and_then(parse_version_component) else {
+        return false;
+    };
+    (major, minor) < (4, 2)
+}
+
+fn parse_version_component(component: &str) -> Option<u32> {
+    let digits = component.chars().take_while(|character| character.is_ascii_digit()).collect::<String>();
+    (!digits.is_empty()).then(|| digits.parse().ok()).flatten()
 }
 
 /// Return names that must be issued as individual dropIndex commands for
@@ -2876,6 +2883,16 @@ mod tests {
 
         let error = serial_drop_index_names(Some(r#"["email_1","_id_"]"#), false).unwrap_err();
         assert!(error.contains("_id_"), "{error}");
+    }
+
+    #[test]
+    fn serial_drop_indexes_fallback_is_limited_to_pre_42_servers() {
+        for version in ["3.4.24", "4.0.28", "MongoDB 3.6.23"] {
+            assert!(mongo_server_requires_serial_drop_indexes(version), "{version}");
+        }
+        for version in ["4.2.0", "4.4.29", "5.0.0-rc0", "8.0.1", "unknown", "4"] {
+            assert!(!mongo_server_requires_serial_drop_indexes(version), "{version}");
+        }
     }
 
     #[test]

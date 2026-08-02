@@ -537,6 +537,37 @@ public final class MongoAgent {
         return version;
     }
 
+    static boolean serverVersionRequiresSerialDropIndexes(String version) {
+        if (version == null) {
+            return false;
+        }
+        int start = 0;
+        while (start < version.length() && !Character.isDigit(version.charAt(start))) {
+            start++;
+        }
+        String[] components = version.substring(start).split("\\.", 3);
+        if (components.length < 2) {
+            return false;
+        }
+        try {
+            int major = Integer.parseInt(components[0]);
+            int minor = Integer.parseInt(components[1]);
+            return major < 4 || (major == 4 && minor < 2);
+        } catch (NumberFormatException error) {
+            return false;
+        }
+    }
+
+    private static boolean serverRequiresSerialDropIndexes(MongoClient client, String database) {
+        try {
+            Document buildInfo = client.getDatabase(database).runCommand(new Document("buildInfo", 1));
+            return serverVersionRequiresSerialDropIndexes(serverVersionFromBuildInfo(buildInfo));
+        } catch (RuntimeException error) {
+            // Without an explicit old version, preserve MongoDB's single-command array semantics.
+            return false;
+        }
+    }
+
     private static Object createIndex(JsonObject params) {
         MongoClient c = requireClient();
         String database = params.get("database").getAsString();
@@ -608,9 +639,9 @@ public final class MongoAgent {
         boolean single = params.has("single") && !params.get("single").isJsonNull() && params.get("single").getAsBoolean();
         Object index = parseDropIndexesValue(indexesJson, single);
 
-        if (index instanceof List<?> indexes) {
-            // MongoDB 3.4 rejects an array in dropIndexes.index, so keep the
-            // legacy protocol portable even when an older caller sends one.
+        if (index instanceof List<?> indexes && serverRequiresSerialDropIndexes(c, database)) {
+            // Array-form dropIndexes was added in MongoDB 4.2. Older servers
+            // require individual commands and therefore return partial results.
             return dropNamedIndexes(
                 indexes,
                 indexName -> c.getDatabase(database).runCommand(

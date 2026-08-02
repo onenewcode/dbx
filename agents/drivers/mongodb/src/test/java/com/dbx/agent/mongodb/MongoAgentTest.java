@@ -373,6 +373,15 @@ class MongoAgentTest {
     }
 
     @Test
+    void batchDropIndexesUsesSerialFallbackOnlyBeforeMongo42() {
+        assertTrue(MongoAgent.serverVersionRequiresSerialDropIndexes("3.4.24"));
+        assertTrue(MongoAgent.serverVersionRequiresSerialDropIndexes("4.0.28"));
+        assertFalse(MongoAgent.serverVersionRequiresSerialDropIndexes("4.2.0"));
+        assertFalse(MongoAgent.serverVersionRequiresSerialDropIndexes("7.0.14"));
+        assertFalse(MongoAgent.serverVersionRequiresSerialDropIndexes("unknown"));
+    }
+
+    @Test
     void dropCollectionMethodIsRecognizedOverJsonRpc() {
         String response = MongoAgent.handleRequest(
             "{\"jsonrpc\":\"2.0\",\"id\":14,\"method\":\"drop_collection\","

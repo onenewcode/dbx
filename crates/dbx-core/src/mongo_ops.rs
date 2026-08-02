@@ -360,21 +360,32 @@ pub async fn mongo_drop_indexes_core(
     mongo_driver::validate_mongo_namespace_name(collection, "Collection")?;
     let serial_names = mongo_driver::serial_drop_index_names(indexes_json, single)?;
     if let Some(names) = serial_names {
-        let mut dropped_names = Vec::new();
-        let mut failures = Vec::new();
-        for name in names {
-            let index_json = serde_json::to_string(&name).map_err(|error| error.to_string())?;
-            match mongo_drop_indexes_once_core(state, connection_id, database, collection, Some(&index_json), true)
-                .await
-            {
-                Ok(result) => {
-                    dropped_names.extend(result.dropped_names);
-                    failures.extend(result.failures);
-                }
-                Err(message) => failures.push(MongoDropIndexFailure { name, message }),
+        let requires_serial_fallback = match mongo_server_version_core(state, connection_id, database).await {
+            Ok(version) => mongo_driver::mongo_server_requires_serial_drop_indexes(&version),
+            Err(error) => {
+                log::warn!(
+                    "[mongo][drop-indexes] server version unavailable; preserving array command semantics: {error}"
+                );
+                false
             }
+        };
+        if requires_serial_fallback {
+            let mut dropped_names = Vec::new();
+            let mut failures = Vec::new();
+            for name in names {
+                let index_json = serde_json::to_string(&name).map_err(|error| error.to_string())?;
+                match mongo_drop_indexes_once_core(state, connection_id, database, collection, Some(&index_json), true)
+                    .await
+                {
+                    Ok(result) => {
+                        dropped_names.extend(result.dropped_names);
+                        failures.extend(result.failures);
+                    }
+                    Err(message) => failures.push(MongoDropIndexFailure { name, message }),
+                }
+            }
+            return Ok(MongoDropIndexesResult { affected_rows: dropped_names.len() as u64, dropped_names, failures });
         }
-        return Ok(MongoDropIndexesResult { affected_rows: dropped_names.len() as u64, dropped_names, failures });
     }
 
     mongo_drop_indexes_once_core(state, connection_id, database, collection, indexes_json, single).await
@@ -629,11 +640,13 @@ mod tests {
         expected_params: serde_json::Value,
         expected_result: serde_json::Value,
     ) -> (AppState, tempfile::TempDir) {
-        legacy_mongo_state_with_capabilities(
+        legacy_mongo_state_with_options(
             expected_method,
             expected_params,
             expected_result,
             &[AgentCapability::MongoDropDatabase.as_str()],
+            None,
+            None,
         )
         .await
     }
@@ -645,6 +658,55 @@ mod tests {
         expected_result: serde_json::Value,
         capabilities: &[&str],
     ) -> (AppState, tempfile::TempDir) {
+        legacy_mongo_state_with_options(expected_method, expected_params, expected_result, capabilities, None, None)
+            .await
+    }
+
+    #[cfg(unix)]
+    async fn legacy_mongo_state_with_server_version(
+        expected_method: &str,
+        expected_params: serde_json::Value,
+        expected_result: serde_json::Value,
+        server_version: &str,
+    ) -> (AppState, tempfile::TempDir) {
+        legacy_mongo_state_with_options(
+            expected_method,
+            expected_params,
+            expected_result,
+            &[AgentCapability::MongoDropDatabase.as_str()],
+            Some(server_version),
+            None,
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    async fn legacy_mongo_state_with_server_error(
+        expected_method: &str,
+        expected_params: serde_json::Value,
+        expected_error: &str,
+        server_version: &str,
+    ) -> (AppState, tempfile::TempDir) {
+        legacy_mongo_state_with_options(
+            expected_method,
+            expected_params,
+            serde_json::Value::Null,
+            &[AgentCapability::MongoDropDatabase.as_str()],
+            Some(server_version),
+            Some(expected_error),
+        )
+        .await
+    }
+
+    #[cfg(unix)]
+    async fn legacy_mongo_state_with_options(
+        expected_method: &str,
+        expected_params: serde_json::Value,
+        expected_result: serde_json::Value,
+        capabilities: &[&str],
+        server_version: Option<&str>,
+        expected_error: Option<&str>,
+    ) -> (AppState, tempfile::TempDir) {
         use std::io::Write;
 
         let directory = tempfile::tempdir().unwrap();
@@ -653,6 +715,8 @@ mod tests {
         let expected_params = serde_json::to_string(&serde_json::to_string(&expected_params).unwrap()).unwrap();
         let expected_result = serde_json::to_string(&serde_json::to_string(&expected_result).unwrap()).unwrap();
         let capabilities = serde_json::to_string(capabilities).unwrap();
+        let server_version = serde_json::to_string(&server_version).unwrap();
+        let expected_error = serde_json::to_string(&expected_error).unwrap();
         write!(
             script,
             r#"import json
@@ -662,6 +726,8 @@ EXPECTED_METHOD = {expected_method}
 EXPECTED_PARAMS = json.loads({expected_params})
 EXPECTED_RESULT = json.loads({expected_result})
 CAPABILITIES = {capabilities}
+SERVER_VERSION = {server_version}
+EXPECTED_ERROR = {expected_error}
 
 print(json.dumps({{"ready": True}}), flush=True)
 for line in sys.stdin:
@@ -673,10 +739,16 @@ for line in sys.stdin:
     if request.get("method") == "validate_connection":
         print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": {{"ok": True}}}}), flush=True)
         continue
+    if request.get("method") == "server_version" and SERVER_VERSION is not None:
+        print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": SERVER_VERSION}}), flush=True)
+        continue
     if request.get("method") != EXPECTED_METHOD or request.get("params") != EXPECTED_PARAMS:
         print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -1, "message": "unexpected MongoDB RPC"}}}}), flush=True)
         continue
-    print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": EXPECTED_RESULT}}), flush=True)
+    if EXPECTED_ERROR is not None:
+        print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "error": {{"code": -1, "message": EXPECTED_ERROR}}}}), flush=True)
+    else:
+        print(json.dumps({{"jsonrpc": "2.0", "id": request["id"], "result": EXPECTED_RESULT}}), flush=True)
 "#
         )
         .unwrap();
@@ -875,8 +947,8 @@ for line in sys.stdin:
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn mongo_drop_indexes_returns_partial_results_from_legacy_agents() {
-        let (state, _directory) = legacy_mongo_state(
+    async fn mongo_drop_indexes_returns_partial_results_for_mongodb_34_agents() {
+        let (state, _directory) = legacy_mongo_state_with_server_version(
             "drop_indexes",
             serde_json::json!({
                 "database": "app",
@@ -885,6 +957,7 @@ for line in sys.stdin:
                 "single": true,
             }),
             serde_json::json!({ "affected_rows": 1, "dropped_names": ["email_1"] }),
+            "3.4.24",
         )
         .await;
 
@@ -898,6 +971,30 @@ for line in sys.stdin:
         assert_eq!(result.failures.len(), 1);
         assert_eq!(result.failures[0].name, "missing_1");
         assert!(result.failures[0].message.contains("unexpected MongoDB RPC"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn mongo_drop_indexes_preserves_modern_agent_batch_failure_semantics() {
+        let (state, _directory) = legacy_mongo_state_with_server_error(
+            "drop_indexes",
+            serde_json::json!({
+                "database": "app",
+                "collection": "users",
+                "indexes_json": "[\"email_1\",\"missing_1\"]",
+                "single": false,
+            }),
+            "index not found; no indexes dropped",
+            "4.2.0",
+        )
+        .await;
+
+        let error =
+            mongo_drop_indexes_core(&state, "legacy", "app", "users", Some(r#"["email_1","missing_1"]"#), false)
+                .await
+                .unwrap_err();
+
+        assert!(error.contains("no indexes dropped"), "{error}");
     }
 
     #[cfg(unix)]
