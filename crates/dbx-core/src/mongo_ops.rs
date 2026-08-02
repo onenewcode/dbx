@@ -715,8 +715,11 @@ mod tests {
         let expected_params = serde_json::to_string(&serde_json::to_string(&expected_params).unwrap()).unwrap();
         let expected_result = serde_json::to_string(&serde_json::to_string(&expected_result).unwrap()).unwrap();
         let capabilities = serde_json::to_string(capabilities).unwrap();
-        let server_version = serde_json::to_string(&server_version).unwrap();
-        let expected_error = serde_json::to_string(&expected_error).unwrap();
+        let python_optional_string = |value: Option<&str>| {
+            value.map(|value| serde_json::to_string(value).unwrap()).unwrap_or_else(|| "None".to_string())
+        };
+        let server_version = python_optional_string(server_version);
+        let expected_error = python_optional_string(expected_error);
         write!(
             script,
             r#"import json
