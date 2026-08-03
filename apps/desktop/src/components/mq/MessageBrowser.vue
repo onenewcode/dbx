@@ -120,16 +120,16 @@ watch(kafkaStartPosition, () => {
 
     <p v-if="isKafka" class="peek-default-hint">
       <template v-if="kafkaStartPosition === 'latest'">
-        {{ t("mqMessages.kafkaLatestHint", { count }) }}
+        {{ t("mqMessages.kafkaLatestHint") }}
       </template>
       <template v-else-if="kafkaStartPosition === 'earliest'">
-        {{ t("mqMessages.kafkaEarliestHint", { count }) }}
+        {{ t("mqMessages.kafkaEarliestHint") }}
       </template>
       <template v-else>
-        {{ t("mqMessages.kafkaOffsetHint", { count }) }}
+        {{ t("mqMessages.kafkaOffsetHint") }}
       </template>
     </p>
-    <p v-else class="peek-default-hint">{{ t("mqMessages.peekDefaultHint", { count }) }}</p>
+    <p v-else class="peek-default-hint">{{ t("mqMessages.peekDefaultHint") }}</p>
 
     <div class="peek-controls">
       <label>
