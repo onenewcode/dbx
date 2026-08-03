@@ -19,6 +19,41 @@ vi.mock("@/lib/backend/api", () => ({
   mqSendMessage: backend.mqSendMessage,
 }));
 
+vi.mock("@/components/ui/select", async () => {
+  const { defineComponent, h, inject, provide } = await import("vue");
+  const updateKey = Symbol("select-update");
+  const Select = defineComponent({
+    emits: ["update:modelValue"],
+    setup(_, { emit, slots }) {
+      provide(updateKey, (value: string) => emit("update:modelValue", value));
+      return () => h("div", { "data-slot": "select" }, slots.default?.());
+    },
+  });
+  const SelectTrigger = defineComponent({
+    setup(_, { attrs, slots }) {
+      return () => h("button", { ...attrs, type: "button" }, slots.default?.());
+    },
+  });
+  const SelectContent = defineComponent({
+    setup(_, { attrs, slots }) {
+      return () => h("div", attrs, slots.default?.());
+    },
+  });
+  const SelectItem = defineComponent({
+    props: { value: { type: String, required: true } },
+    setup(props, { attrs, slots }) {
+      const update = inject<(value: string) => void>(updateKey);
+      return () => h("button", { ...attrs, "data-slot": "select-item", "data-value": props.value, type: "button", onClick: () => update?.(props.value) }, slots.default?.());
+    },
+  });
+  const SelectValue = defineComponent({
+    setup(_, { attrs, slots }) {
+      return () => h("span", attrs, slots.default?.());
+    },
+  });
+  return { Select, SelectContent, SelectItem, SelectTrigger, SelectValue };
+});
+
 import SendMessagePanel from "@/components/mq/SendMessagePanel.vue";
 
 const TOPIC = {
@@ -51,10 +86,13 @@ async function setInputValue(input: HTMLInputElement | HTMLTextAreaElement, valu
   await nextTick();
 }
 
-async function setSelectValue(select: HTMLSelectElement, value: string) {
-  select.value = value;
-  select.dispatchEvent(new Event("change", { bubbles: true }));
-  await nextTick();
+async function setSelectValue(trigger: HTMLElement, value: string) {
+  trigger.click();
+  await flushUi();
+  const item = document.querySelector<HTMLElement>(`[data-slot="select-item"][data-value="${value}"]`);
+  if (!item) throw new Error(`Select item not found: ${value}`);
+  item.click();
+  await flushUi();
 }
 
 function expectedTopic(system: BrowseableSystem) {
@@ -145,7 +183,7 @@ describe("SendMessagePanel post-send browsing", () => {
   it("sends Kafka's selected start position and specific offset", async () => {
     const panel = await mountPanel("kafka");
 
-    const startPosition = panel.querySelector<HTMLSelectElement>('[data-testid="kafka-peek-start-position"]');
+    const startPosition = panel.querySelector<HTMLElement>('[data-testid="kafka-peek-start-position"]');
     if (!startPosition) throw new Error("Kafka start position select not found");
     await setSelectValue(startPosition, "earliest");
     await loadMessages(panel);
@@ -188,7 +226,7 @@ describe("SendMessagePanel post-send browsing", () => {
 
   it("does not request Kafka offset mode without an offset", async () => {
     const panel = await mountPanel("kafka");
-    const startPosition = panel.querySelector<HTMLSelectElement>('[data-testid="kafka-peek-start-position"]');
+    const startPosition = panel.querySelector<HTMLElement>('[data-testid="kafka-peek-start-position"]');
     if (!startPosition) throw new Error("Kafka start position control not found");
 
     await setSelectValue(startPosition, "offset");
@@ -205,7 +243,7 @@ describe("SendMessagePanel post-send browsing", () => {
 
   it("clears Kafka results and validation errors when the start position changes", async () => {
     const panel = await mountPanel("kafka");
-    const startPosition = panel.querySelector<HTMLSelectElement>('[data-testid="kafka-peek-start-position"]');
+    const startPosition = panel.querySelector<HTMLElement>('[data-testid="kafka-peek-start-position"]');
     if (!startPosition) throw new Error("Kafka start position select not found");
 
     await loadMessages(panel);
@@ -224,7 +262,7 @@ describe("SendMessagePanel post-send browsing", () => {
 
   it("does not leak a saved Kafka offset after switching start positions", async () => {
     const panel = await mountPanel("kafka");
-    const startPosition = panel.querySelector<HTMLSelectElement>('[data-testid="kafka-peek-start-position"]');
+    const startPosition = panel.querySelector<HTMLElement>('[data-testid="kafka-peek-start-position"]');
     const partitionInput = panel.querySelector<HTMLInputElement>('[data-testid="kafka-peek-partition"]');
     if (!startPosition || !partitionInput) throw new Error("Kafka start position controls not found");
 

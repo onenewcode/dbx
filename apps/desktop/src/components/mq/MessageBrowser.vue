@@ -5,6 +5,7 @@ import type { MqSystemKind, PeekedMessage, PeekMessagesOptions, TopicRef } from 
 import { mqPeekMessages } from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
 import { parseNonNegativeSafeInteger } from "@/lib/mq/mqPeekFilters";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
 type MessageBrowserAppearance = "form" | "monitoring";
 
@@ -137,11 +138,16 @@ watch(kafkaStartPosition, () => {
       </label>
       <label v-if="isKafka">
         <span>{{ t("mqMessages.startPosition") }}</span>
-        <select v-model="kafkaStartPosition" data-testid="kafka-peek-start-position" :disabled="loading">
-          <option value="latest">{{ t("mqMessages.kafkaLatest") }}</option>
-          <option value="earliest">{{ t("mqMessages.kafkaEarliest") }}</option>
-          <option value="offset">{{ t("mqMessages.kafkaOffset") }}</option>
-        </select>
+        <Select v-model="kafkaStartPosition" :disabled="loading">
+          <SelectTrigger data-testid="kafka-peek-start-position" class="message-browser-start-position">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent position="popper" class="message-browser-start-position-content">
+            <SelectItem value="latest">{{ t("mqMessages.kafkaLatest") }}</SelectItem>
+            <SelectItem value="earliest">{{ t("mqMessages.kafkaEarliest") }}</SelectItem>
+            <SelectItem value="offset">{{ t("mqMessages.kafkaOffset") }}</SelectItem>
+          </SelectContent>
+        </Select>
       </label>
       <label v-if="isKafka">
         <span>{{ t("mqMessages.partition") }}</span>
@@ -327,7 +333,7 @@ watch(kafkaStartPosition, () => {
 }
 
 .peek-controls input,
-.peek-controls select {
+.peek-controls :deep(.message-browser-start-position) {
   height: 32px;
   width: 100%;
   padding: 7px 10px;
@@ -341,7 +347,7 @@ watch(kafkaStartPosition, () => {
 }
 
 .peek-controls input:focus,
-.peek-controls select:focus {
+.peek-controls :deep(.message-browser-start-position:focus-visible) {
   outline: none;
   border-color: var(--browser-accent);
   box-shadow: 0 0 0 2px var(--browser-accent-soft);
@@ -354,7 +360,7 @@ watch(kafkaStartPosition, () => {
 }
 
 .message-browser.is-monitoring .peek-controls input,
-.message-browser.is-monitoring .peek-controls select {
+.message-browser.is-monitoring .peek-controls :deep(.message-browser-start-position) {
   height: 34px;
   min-height: 34px;
   border-radius: var(--dbx-radius-fixed-4);

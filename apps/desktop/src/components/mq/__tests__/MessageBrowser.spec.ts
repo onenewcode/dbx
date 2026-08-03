@@ -15,6 +15,41 @@ vi.mock("@/lib/backend/api", () => ({
   mqPeekMessages: backend.mqPeekMessages,
 }));
 
+vi.mock("@/components/ui/select", async () => {
+  const { defineComponent, h, inject, provide } = await import("vue");
+  const updateKey = Symbol("select-update");
+  const Select = defineComponent({
+    emits: ["update:modelValue"],
+    setup(_, { emit, slots }) {
+      provide(updateKey, (value: string) => emit("update:modelValue", value));
+      return () => h("div", { "data-slot": "select" }, slots.default?.());
+    },
+  });
+  const SelectTrigger = defineComponent({
+    setup(_, { attrs, slots }) {
+      return () => h("button", { ...attrs, type: "button" }, slots.default?.());
+    },
+  });
+  const SelectContent = defineComponent({
+    setup(_, { attrs, slots }) {
+      return () => h("div", attrs, slots.default?.());
+    },
+  });
+  const SelectItem = defineComponent({
+    props: { value: { type: String, required: true } },
+    setup(props, { attrs, slots }) {
+      const update = inject<(value: string) => void>(updateKey);
+      return () => h("button", { ...attrs, "data-slot": "select-item", "data-value": props.value, type: "button", onClick: () => update?.(props.value) }, slots.default?.());
+    },
+  });
+  const SelectValue = defineComponent({
+    setup(_, { attrs, slots }) {
+      return () => h("span", attrs, slots.default?.());
+    },
+  });
+  return { Select, SelectContent, SelectItem, SelectTrigger, SelectValue };
+});
+
 import MessageBrowser from "@/components/mq/MessageBrowser.vue";
 
 const TOPIC = {
@@ -46,10 +81,13 @@ async function setInputValue(input: HTMLInputElement, value: string) {
   await nextTick();
 }
 
-async function setSelectValue(select: HTMLSelectElement, value: string) {
-  select.value = value;
-  select.dispatchEvent(new Event("change", { bubbles: true }));
-  await nextTick();
+async function setSelectValue(trigger: HTMLElement, value: string) {
+  trigger.click();
+  await flushUi();
+  const item = document.querySelector<HTMLElement>(`[data-slot="select-item"][data-value="${value}"]`);
+  if (!item) throw new Error(`Select item not found: ${value}`);
+  item.click();
+  await flushUi();
 }
 
 async function mountBrowser(mqSystemKind: "kafka" | "rabbitmq" = "kafka") {
@@ -102,7 +140,7 @@ describe("MessageBrowser", () => {
 
   it("sends explicit earliest and offset read positions", async () => {
     const browser = await mountBrowser();
-    const startPosition = browser.querySelector<HTMLSelectElement>('[data-testid="kafka-peek-start-position"]');
+    const startPosition = browser.querySelector<HTMLElement>('[data-testid="kafka-peek-start-position"]');
     if (!startPosition) throw new Error("Kafka start position select not found");
 
     await setSelectValue(startPosition, "earliest");
@@ -122,7 +160,7 @@ describe("MessageBrowser", () => {
 
   it("allows an all-partition offset read but requires an offset", async () => {
     const browser = await mountBrowser();
-    const startPosition = browser.querySelector<HTMLSelectElement>('[data-testid="kafka-peek-start-position"]');
+    const startPosition = browser.querySelector<HTMLElement>('[data-testid="kafka-peek-start-position"]');
     if (!startPosition) throw new Error("Kafka start position control not found");
 
     await setSelectValue(startPosition, "offset");
@@ -144,7 +182,7 @@ describe("MessageBrowser", () => {
 
   it("clears results and does not leak an offset into a different read mode", async () => {
     const browser = await mountBrowser();
-    const startPosition = browser.querySelector<HTMLSelectElement>('[data-testid="kafka-peek-start-position"]');
+    const startPosition = browser.querySelector<HTMLElement>('[data-testid="kafka-peek-start-position"]');
     const partition = browser.querySelector<HTMLInputElement>('[data-testid="kafka-peek-partition"]');
     if (!startPosition || !partition) throw new Error("Kafka start position controls not found");
 
