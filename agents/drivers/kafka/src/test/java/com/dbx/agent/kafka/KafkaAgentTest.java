@@ -1,6 +1,7 @@
 package com.dbx.agent.kafka;
 
 import com.google.gson.JsonObject;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
@@ -332,8 +333,8 @@ class KafkaAgentTest {
     }
 
     @Test
-    void offsetStartPositionRequiresNonNegativePartitionAndOffset() {
-        assertThrows(IllegalArgumentException.class, () ->
+    void offsetStartPositionAllowsAllPartitionsButRequiresANonNegativeOffset() {
+        assertDoesNotThrow(() ->
             KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, null, 0L));
         assertThrows(IllegalArgumentException.class, () ->
             KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, 0, null));
@@ -379,6 +380,20 @@ class KafkaAgentTest {
         assertEquals(0L, KafkaAgent.requestedPeekOffset(
             KafkaAgent.PeekStartPosition.EARLIEST, 7L, false, 0L, 10L
         ));
+    }
+
+    @Test
+    void offsetSortUsesPartitionAsADeterministicTieBreaker() {
+        var messages = new java.util.ArrayList<Map<String, Object>>();
+        messages.add(Map.of("partition", 2, "offset", 7L));
+        messages.add(Map.of("partition", 1, "offset", 7L));
+        messages.add(Map.of("partition", 0, "offset", 8L));
+
+        KafkaAgent.sortPeekedMessages(messages, KafkaAgent.PeekStartPosition.OFFSET);
+
+        assertEquals(1, messages.get(0).get("partition"));
+        assertEquals(2, messages.get(1).get("partition"));
+        assertEquals(8L, messages.get(2).get("offset"));
     }
 
     @Test

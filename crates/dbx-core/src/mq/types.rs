@@ -509,7 +509,8 @@ pub enum PeekStartPosition {
 /// `start_position` and retain their existing partition/offset handling.
 /// For Kafka, an omitted position keeps legacy behavior: it starts at the
 /// earliest available message unless an older caller supplies `offset`.
-/// `start_position: Offset` requires one non-negative partition and offset.
+/// `start_position: Offset` requires a non-negative offset. When no partition
+/// is supplied, Kafka reads forward from that offset in every topic partition.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PeekMessagesOptions {

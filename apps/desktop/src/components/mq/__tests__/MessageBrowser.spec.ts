@@ -120,18 +120,12 @@ describe("MessageBrowser", () => {
     expect(backend.mqPeekMessages).toHaveBeenLastCalledWith("mq-1", expect.objectContaining({ topic: "events" }), "__dbx_kafka_viewer__", 20, { startPosition: "offset", partition: 2, offset: 17 });
   });
 
-  it("validates both fields before requesting an offset read", async () => {
+  it("allows an all-partition offset read but requires an offset", async () => {
     const browser = await mountBrowser();
     const startPosition = browser.querySelector<HTMLSelectElement>('[data-testid="kafka-peek-start-position"]');
-    const partition = browser.querySelector<HTMLInputElement>('[data-testid="kafka-peek-partition"]');
-    if (!startPosition || !partition) throw new Error("Kafka start position controls not found");
+    if (!startPosition) throw new Error("Kafka start position control not found");
 
     await setSelectValue(startPosition, "offset");
-    await loadMessages(browser);
-    expect(backend.mqPeekMessages).not.toHaveBeenCalled();
-    expect(browser.textContent).toContain("mqMessages.partitionRequiredForOffset");
-
-    await setInputValue(partition, "0");
     await loadMessages(browser);
     expect(backend.mqPeekMessages).not.toHaveBeenCalled();
     expect(browser.textContent).toContain("mqMessages.offsetRequiredForOffset");
@@ -142,6 +136,10 @@ describe("MessageBrowser", () => {
     await loadMessages(browser);
     expect(backend.mqPeekMessages).not.toHaveBeenCalled();
     expect(browser.textContent).toContain("mqMessages.offsetMustBeNonNegativeIntRequired");
+
+    await setInputValue(offset, "17");
+    await loadMessages(browser);
+    expect(backend.mqPeekMessages).toHaveBeenLastCalledWith("mq-1", expect.objectContaining({ topic: "events" }), "__dbx_kafka_viewer__", 20, { startPosition: "offset", offset: 17 });
   });
 
   it("clears results and does not leak an offset into a different read mode", async () => {

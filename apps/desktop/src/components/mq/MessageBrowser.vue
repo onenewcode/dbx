@@ -57,7 +57,6 @@ async function loadMessages() {
         partition.value = String(parsedPartition);
       }
       if (isKafkaOffsetMode.value) {
-        if (partitionText === "") throw new Error(t("mqMessages.partitionRequiredForOffset"));
         if (offsetText === "") throw new Error(t("mqMessages.offsetRequiredForOffset"));
         const parsedOffset = parseNonNegativeSafeInteger(offsetText);
         if (parsedOffset == null) throw new Error(t("mqMessages.offsetMustBeNonNegativeIntRequired"));

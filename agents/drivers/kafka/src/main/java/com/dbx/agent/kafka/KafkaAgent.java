@@ -1294,9 +1294,6 @@ public final class KafkaAgent {
             }
             return;
         }
-        if (partition == null) {
-            throw new IllegalArgumentException("partition is required when startPosition is offset");
-        }
         if (offset == null) {
             throw new IllegalArgumentException("offset is required when startPosition is offset");
         }
@@ -1334,9 +1331,12 @@ public final class KafkaAgent {
 
     static void sortPeekedMessages(List<Map<String, Object>> messages, PeekStartPosition startPosition) {
         if (startPosition == PeekStartPosition.OFFSET) {
-            messages.sort(Comparator.comparingLong(message ->
-                ((Number) message.getOrDefault("offset", 0L)).longValue()
-            ));
+            messages.sort(Comparator
+                .comparingLong((Map<String, Object> message) ->
+                    ((Number) message.getOrDefault("offset", 0L)).longValue()
+                )
+                .thenComparingInt(message -> ((Number) message.getOrDefault("partition", 0)).intValue())
+            );
             return;
         }
 

@@ -186,21 +186,21 @@ describe("SendMessagePanel post-send browsing", () => {
     expect(backend.mqPeekMessages).toHaveBeenLastCalledWith("mq-1", expectedTopic("kafka"), "__dbx_kafka_viewer__", 20, { startPosition: "latest" });
   });
 
-  it("does not request Kafka offset mode without both required fields", async () => {
+  it("does not request Kafka offset mode without an offset", async () => {
     const panel = await mountPanel("kafka");
     const startPosition = panel.querySelector<HTMLSelectElement>('[data-testid="kafka-peek-start-position"]');
-    const partitionInput = panel.querySelector<HTMLInputElement>('[data-testid="kafka-peek-partition"]');
-    if (!startPosition || !partitionInput) throw new Error("Kafka start position controls not found");
+    if (!startPosition) throw new Error("Kafka start position control not found");
 
     await setSelectValue(startPosition, "offset");
     await loadMessages(panel);
     expect(backend.mqPeekMessages).not.toHaveBeenCalled();
-    expect(panel.textContent).toContain("mqMessages.partitionRequiredForOffset");
-
-    await setInputValue(partitionInput, "0");
-    await loadMessages(panel);
-    expect(backend.mqPeekMessages).not.toHaveBeenCalled();
     expect(panel.textContent).toContain("mqMessages.offsetRequiredForOffset");
+
+    const offsetInput = panel.querySelector<HTMLInputElement>('[data-testid="kafka-peek-offset"]');
+    if (!offsetInput) throw new Error("Kafka offset input not found");
+    await setInputValue(offsetInput, "17");
+    await loadMessages(panel);
+    expect(backend.mqPeekMessages).toHaveBeenCalledWith("mq-1", expectedTopic("kafka"), "__dbx_kafka_viewer__", 20, { startPosition: "offset", offset: 17 });
   });
 
   it("clears Kafka results and validation errors when the start position changes", async () => {
@@ -215,11 +215,11 @@ describe("SendMessagePanel post-send browsing", () => {
     expect(panel.textContent).not.toContain("existing message");
 
     await loadMessages(panel);
-    expect(panel.textContent).toContain("mqMessages.partitionRequiredForOffset");
+    expect(panel.textContent).toContain("mqMessages.offsetRequiredForOffset");
 
     await setSelectValue(startPosition, "earliest");
     expect(panel.textContent).not.toContain("existing message");
-    expect(panel.textContent).not.toContain("mqMessages.partitionRequiredForOffset");
+    expect(panel.textContent).not.toContain("mqMessages.offsetRequiredForOffset");
   });
 
   it("does not leak a saved Kafka offset after switching start positions", async () => {
