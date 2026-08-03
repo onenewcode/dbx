@@ -397,9 +397,9 @@ class KafkaAgentTest {
     }
 
     @Test
-    void splitsLatestMessageWindowAcrossPartitions() {
-        assertEquals(4, KafkaAgent.recentPeekMessagesPerPartition(10, 3));
-        assertEquals(10, KafkaAgent.recentPeekMessagesPerPartition(10, 1));
+    void splitsMessageWindowAcrossPartitions() {
+        assertEquals(4, KafkaAgent.peekMessagesPerPartition(10, 3));
+        assertEquals(10, KafkaAgent.peekMessagesPerPartition(10, 1));
     }
 
     @Test
@@ -409,23 +409,28 @@ class KafkaAgentTest {
     }
 
     @Test
-    void fetchesEveryPartitionLatestWindowBeforeTrimmingTheResult() {
+    void boundsEveryPartitionWindowBeforeTrimmingTheResult() {
         assertEquals(12, KafkaAgent.recentPeekFetchCount(4, 3));
-        assertEquals(12, KafkaAgent.peekFetchCount(KafkaAgent.PeekStartPosition.LATEST, 10, 3));
-        assertEquals(10, KafkaAgent.peekFetchCount(KafkaAgent.PeekStartPosition.EARLIEST, 10, 3));
+        assertEquals(4, KafkaAgent.peekMessagesPerPartition(10, 3));
     }
 
     @Test
-    void latestPeekRejectsAWindowThatExceedsTheScanLimit() {
+    void peekRejectsAWindowThatExceedsTheScanLimit() {
         assertThrows(IllegalArgumentException.class, () ->
-            KafkaAgent.latestPeekScanLimit(100, 1_001));
+            KafkaAgent.peekScanLimit(100, 1_001));
     }
 
     @Test
-    void latestPeekWindowCalculationDoesNotOverflow() {
-        assertEquals(1, KafkaAgent.recentPeekMessagesPerPartition(
+    void peekWindowCalculationDoesNotOverflow() {
+        assertEquals(1, KafkaAgent.peekMessagesPerPartition(
             Integer.MAX_VALUE, Integer.MAX_VALUE
         ));
+    }
+
+    @Test
+    void peekWindowEndsAtTheRequestedPartitionWindow() {
+        assertEquals(15L, KafkaAgent.peekWindowEndOffset(10L, 100L, 5));
+        assertEquals(12L, KafkaAgent.peekWindowEndOffset(10L, 12L, 5));
     }
 
     @Test
@@ -457,14 +462,11 @@ class KafkaAgentTest {
     }
 
     @Test
-    void incompletePeekResultsAreReportedUnlessTheRequestedPageIsFull() {
+    void incompletePartitionWindowsAreAlwaysReported() {
         assertThrows(IllegalStateException.class, () ->
-            KafkaAgent.ensurePeekResultComplete(KafkaAgent.PeekStartPosition.EARLIEST, 10, 9, false)
+            KafkaAgent.ensurePeekResultComplete(false)
         );
-        KafkaAgent.ensurePeekResultComplete(KafkaAgent.PeekStartPosition.EARLIEST, 10, 10, false);
-        assertThrows(IllegalStateException.class, () ->
-            KafkaAgent.ensurePeekResultComplete(KafkaAgent.PeekStartPosition.LATEST, 10, 10, false)
-        );
+        KafkaAgent.ensurePeekResultComplete(true);
     }
 
     @Test
@@ -561,8 +563,11 @@ class KafkaAgentTest {
         AtomicInteger polls = new AtomicInteger();
         List<Map<String, Object>> messages = KafkaAgent.collectPeekedMessages(
             timeout -> polls.getAndIncrement() == 0 ? ConsumerRecords.empty() : withData,
-            () -> false,
+            () -> polls.get() >= 2,
+            ignored -> true,
+            List.of(tp),
             1,
+            1_000,
             System.nanoTime() + Duration.ofSeconds(5).toNanos(),
             Duration.ofMillis(1)
         );
@@ -575,6 +580,7 @@ class KafkaAgentTest {
 
     @Test
     void collectPeekedMessagesDoesNotPollWhenAlreadyCaughtUp() {
+        TopicPartition tp = new TopicPartition("events", 0);
         AtomicInteger polls = new AtomicInteger();
         List<Map<String, Object>> messages = KafkaAgent.collectPeekedMessages(
             timeout -> {
@@ -582,7 +588,10 @@ class KafkaAgentTest {
                 return ConsumerRecords.empty();
             },
             () -> true,
+            record -> true,
+            List.of(tp),
             10,
+            1_000,
             System.nanoTime() + Duration.ofSeconds(5).toNanos(),
             Duration.ofMillis(1)
         );
@@ -611,7 +620,9 @@ class KafkaAgentTest {
             },
             () -> caughtUpChecks.getAndIncrement() > 0,
             record -> record.offset() < 10L,
+            List.of(tp),
             2,
+            1_000,
             System.nanoTime() + Duration.ofSeconds(5).toNanos(),
             Duration.ofMillis(1)
         );
@@ -622,7 +633,7 @@ class KafkaAgentTest {
     }
 
     @Test
-    void latestPeekCollectsFromEveryPartitionBeforeTrimming() {
+    void peekCollectsFromEveryPartitionBeforeTrimming() {
         TopicPartition p0 = new TopicPartition("events", 0);
         TopicPartition p1 = new TopicPartition("events", 1);
         ConsumerRecords<String, byte[]> batch = new ConsumerRecords<>(Map.of(
@@ -636,7 +647,7 @@ class KafkaAgentTest {
         ));
         AtomicInteger polls = new AtomicInteger();
 
-        List<Map<String, Object>> messages = KafkaAgent.collectLatestPeekedMessages(
+        List<Map<String, Object>> messages = KafkaAgent.collectPeekedMessages(
             timeout -> polls.getAndIncrement() == 0 ? batch : ConsumerRecords.empty(),
             () -> polls.get() > 0,
             record -> true,
@@ -653,14 +664,44 @@ class KafkaAgentTest {
     }
 
     @Test
-    void latestPeekFailsWhenPollingWouldExceedTheScanLimit() {
+    void peekWaitsForEveryPartitionWindowWhenOnePartitionRespondsFirst() {
+        TopicPartition p0 = new TopicPartition("events", 0);
+        TopicPartition p1 = new TopicPartition("events", 1);
+        ConsumerRecords<String, byte[]> firstPartition = new ConsumerRecords<>(Map.of(p0, List.of(
+            new ConsumerRecord<>("events", 0, 0L, "p0-first", "one".getBytes(StandardCharsets.UTF_8)),
+            new ConsumerRecord<>("events", 0, 1L, "p0-second", "two".getBytes(StandardCharsets.UTF_8))
+        )));
+        ConsumerRecords<String, byte[]> secondPartition = new ConsumerRecords<>(Map.of(p1, List.of(
+            new ConsumerRecord<>("events", 1, 0L, "p1-first", "three".getBytes(StandardCharsets.UTF_8))
+        )));
+        AtomicInteger polls = new AtomicInteger();
+
+        List<Map<String, Object>> messages = KafkaAgent.collectPeekedMessages(
+            timeout -> polls.getAndIncrement() == 0 ? firstPartition : secondPartition,
+            () -> polls.get() >= 2,
+            ignored -> true,
+            List.of(p0, p1),
+            1,
+            1_000,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        assertEquals(2, polls.get());
+        assertEquals(2, messages.size());
+        assertTrue(messages.stream().anyMatch(message -> message.get("partition").equals(0)));
+        assertTrue(messages.stream().anyMatch(message -> message.get("partition").equals(1)));
+    }
+
+    @Test
+    void peekFailsWhenPollingWouldExceedTheScanLimit() {
         TopicPartition partition = new TopicPartition("events", 0);
         ConsumerRecords<String, byte[]> batch = new ConsumerRecords<>(Map.of(partition, List.of(
             new ConsumerRecord<>("events", 0, 9L, "first", "one".getBytes(StandardCharsets.UTF_8)),
             new ConsumerRecord<>("events", 0, 10L, "second", "two".getBytes(StandardCharsets.UTF_8))
         )));
 
-        assertThrows(IllegalStateException.class, () -> KafkaAgent.collectLatestPeekedMessages(
+        assertThrows(IllegalStateException.class, () -> KafkaAgent.collectPeekedMessages(
             timeout -> batch,
             () -> false,
             record -> true,
@@ -670,6 +711,53 @@ class KafkaAgentTest {
             System.nanoTime() + Duration.ofSeconds(5).toNanos(),
             Duration.ofMillis(1)
         ));
+    }
+
+    @Test
+    void peekDropsRecordsPastThePartitionWindowEvenWhenRemainingSlotsExist() {
+        TopicPartition partition = new TopicPartition("events", 0);
+        // Sparse offsets: window is [0, 5). Offset 10 is past the window and must not fill a slot.
+        ConsumerRecords<String, byte[]> batch = new ConsumerRecords<>(Map.of(partition, List.of(
+            new ConsumerRecord<>("events", 0, 0L, "in-window", "one".getBytes(StandardCharsets.UTF_8)),
+            new ConsumerRecord<>("events", 0, 10L, "past-window", "two".getBytes(StandardCharsets.UTF_8))
+        )));
+        AtomicInteger polls = new AtomicInteger();
+
+        List<Map<String, Object>> messages = KafkaAgent.collectPeekedMessages(
+            timeout -> polls.getAndIncrement() == 0 ? batch : ConsumerRecords.empty(),
+            () -> polls.get() > 0,
+            record -> record.offset() < 5L,
+            List.of(partition),
+            5,
+            1_000,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        assertEquals(1, messages.size());
+        assertEquals(0L, messages.get(0).get("offset"));
+    }
+
+    @Test
+    void incompleteCollectIsRejectedByEnsurePeekResultComplete() {
+        TopicPartition partition = new TopicPartition("events", 0);
+        ConsumerRecords<String, byte[]> batch = new ConsumerRecords<>(Map.of(partition, List.of(
+            new ConsumerRecord<>("events", 0, 0L, "only", "one".getBytes(StandardCharsets.UTF_8))
+        )));
+
+        List<Map<String, Object>> partial = KafkaAgent.collectPeekedMessages(
+            timeout -> batch,
+            () -> false,
+            record -> true,
+            List.of(partition),
+            5,
+            1_000,
+            System.nanoTime() - 1,
+            Duration.ofMillis(1)
+        );
+
+        assertEquals(0, partial.size());
+        assertThrows(IllegalStateException.class, () -> KafkaAgent.ensurePeekResultComplete(false));
     }
 
     @Test

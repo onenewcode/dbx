@@ -266,6 +266,66 @@ describe("MessageBrowser", () => {
     expect(browser.textContent).not.toContain("old topic request failed");
   });
 
+  it("ignores an older start-mode request that resolves after the mode switches", async () => {
+    const first = deferred<PeekedMessage[]>();
+    backend.mqPeekMessages.mockReturnValueOnce(first.promise);
+    const browser = await mountBrowser();
+    const startPosition = browser.querySelector<HTMLElement>('[data-testid="kafka-peek-start-position"]');
+    if (!startPosition) throw new Error("Kafka start position select not found");
+
+    await loadMessages(browser);
+    await setSelectValue(startPosition, "earliest");
+    expect(browser.textContent).not.toContain("latest-mode message");
+
+    first.resolve([
+      {
+        position: 1,
+        messageId: "stale",
+        payloadBase64: "",
+        payloadText: "latest-mode message",
+        properties: {},
+        headers: {},
+      },
+    ]);
+    await flushUi();
+
+    expect(browser.textContent).not.toContain("latest-mode message");
+    expect(browser.querySelector(".panel-error")).toBeNull();
+    expect(browser.textContent).toContain("mqMessages.noMessages");
+  });
+
+  it("ignores an older start-mode failure after the mode switches and a new load succeeds", async () => {
+    const first = deferred<PeekedMessage[]>();
+    const second = deferred<PeekedMessage[]>();
+    backend.mqPeekMessages.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const browser = await mountBrowser();
+    const startPosition = browser.querySelector<HTMLElement>('[data-testid="kafka-peek-start-position"]');
+    if (!startPosition) throw new Error("Kafka start position select not found");
+
+    await loadMessages(browser);
+    await setSelectValue(startPosition, "earliest");
+    await loadMessages(browser);
+
+    second.resolve([
+      {
+        position: 1,
+        messageId: "fresh",
+        payloadBase64: "",
+        payloadText: "earliest-mode message",
+        properties: {},
+        headers: {},
+      },
+    ]);
+    await flushUi();
+    expect(browser.textContent).toContain("earliest-mode message");
+
+    first.reject(new Error("latest-mode request failed"));
+    await flushUi();
+
+    expect(browser.textContent).toContain("earliest-mode message");
+    expect(browser.textContent).not.toContain("latest-mode request failed");
+  });
+
   it("keeps RabbitMQ's advanced filters collapsed and sends its existing request shape", async () => {
     const browser = await mountBrowser("rabbitmq");
 

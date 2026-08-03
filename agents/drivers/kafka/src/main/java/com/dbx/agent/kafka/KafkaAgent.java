@@ -42,7 +42,7 @@ public final class KafkaAgent {
     private static final Gson GSON = new GsonBuilder().serializeNulls().create();
     private static final int DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
     private static final int MAX_PEEK_MESSAGE_COUNT = 100;
-    private static final int MAX_LATEST_PEEK_SCAN_RECORDS = 1_000;
+    private static final int MAX_PEEK_SCAN_RECORDS = 1_000;
     private static final int DEFAULT_SESSION_TIMEOUT_MS = 30_000;
     private static final int DEFAULT_ZOOKEEPER_CONNECTION_TIMEOUT_MS = 10_000;
     private static final String ZOOKEEPER_PROPERTY_PREFIX = "zookeeper.";
@@ -1075,18 +1075,22 @@ public final class KafkaAgent {
                 return Collections.singletonMap("messages", Collections.emptyList());
             }
 
-            int latestMessagesPerPartition = 0;
-            int latestScanLimit = 0;
+            int messagesPerPartition = peekMessagesPerPartition(count, readablePartitions.size());
+            int scanLimit = peekScanLimit(count, readablePartitions.size());
+            Map<TopicPartition, Long> readEndOffsets = new LinkedHashMap<>();
             if (startPosition == PeekStartPosition.LATEST) {
-                latestMessagesPerPartition = recentPeekMessagesPerPartition(count, readablePartitions.size());
-                latestScanLimit = latestPeekScanLimit(count, readablePartitions.size());
                 for (TopicPartition tp : readablePartitions) {
                     long beginningOffset = beginningOffsets.getOrDefault(tp, 0L);
                     long endOffset = endOffsets.getOrDefault(tp, beginningOffset);
                     seekOffsets.put(tp, recentPeekStartOffset(
-                        beginningOffset, endOffset, latestMessagesPerPartition
+                        beginningOffset, endOffset, messagesPerPartition
                     ));
                 }
+            }
+            for (TopicPartition tp : readablePartitions) {
+                long endOffset = endOffsets.getOrDefault(tp, 0L);
+                long seekOffset = seekOffsets.getOrDefault(tp, endOffset);
+                readEndOffsets.put(tp, peekWindowEndOffset(seekOffset, endOffset, messagesPerPartition));
             }
 
             consumer.assign(readablePartitions);
@@ -1099,40 +1103,30 @@ public final class KafkaAgent {
                 for (TopicPartition tp : readablePartitions) {
                     positions.put(tp, consumer.position(tp));
                 }
-                return allPeekPartitionsCaughtUp(readablePartitions, positions, endOffsets);
+                return allPeekPartitionsCaughtUp(readablePartitions, positions, readEndOffsets);
             };
+            // Bound inclusion to the per-partition window. Using the full log end would allow
+            // compacted/sparse offsets past the window to fill remaining slots incorrectly.
             PeekRecordFilter snapshotRecordFilter = record -> {
-                Long snapshotEndOffset = endOffsets.get(
+                Long windowEndOffset = readEndOffsets.get(
                     new TopicPartition(record.topic(), record.partition())
                 );
-                return snapshotEndOffset != null && record.offset() < snapshotEndOffset;
+                return windowEndOffset != null && record.offset() < windowEndOffset;
             };
             long deadlineNs = System.nanoTime() + requestTimeout.toNanos();
             Duration pollTimeout = Duration.ofMillis(Math.min(500L, requestTimeout.toMillis()));
-            List<Map<String, Object>> messages;
-            if (startPosition == PeekStartPosition.LATEST) {
-                // Preserve one tail-window sample from every partition before global trimming.
-                messages = collectLatestPeekedMessages(
-                    timeout -> consumer.poll(timeout),
-                    caughtUpChecker,
-                    snapshotRecordFilter,
-                    readablePartitions,
-                    latestMessagesPerPartition,
-                    latestScanLimit,
-                    deadlineNs,
-                    pollTimeout
-                );
-            } else {
-                messages = collectPeekedMessages(
-                    timeout -> consumer.poll(timeout),
-                    caughtUpChecker,
-                    snapshotRecordFilter,
-                    peekFetchCount(startPosition, count, readablePartitions.size()),
-                    deadlineNs,
-                    pollTimeout
-                );
-            }
-            ensurePeekResultComplete(startPosition, count, messages.size(), caughtUpChecker.allPartitionsCaughtUp());
+            // Preserve one bounded sample from every partition before global sorting and trimming.
+            List<Map<String, Object>> messages = collectPeekedMessages(
+                timeout -> consumer.poll(timeout),
+                caughtUpChecker,
+                snapshotRecordFilter,
+                readablePartitions,
+                messagesPerPartition,
+                scanLimit,
+                deadlineNs,
+                pollTimeout
+            );
+            ensurePeekResultComplete(caughtUpChecker.allPartitionsCaughtUp());
             sortPeekedMessages(messages, startPosition);
             if (messages.size() > count) {
                 messages = new ArrayList<>(messages.subList(0, count));
@@ -1141,17 +1135,10 @@ public final class KafkaAgent {
         }
     }
 
-    static void ensurePeekResultComplete(
-        PeekStartPosition startPosition,
-        int requestedCount,
-        int fetchedCount,
-        boolean snapshotComplete
-    ) {
-        // A full page is complete for earliest/offset modes; latest must reach the
-        // snapshot end offsets to guarantee the records are actually the latest ones.
-        if (!snapshotComplete && (startPosition == PeekStartPosition.LATEST || fetchedCount < requestedCount)) {
+    static void ensurePeekResultComplete(boolean allPartitionWindowsComplete) {
+        if (!allPartitionWindowsComplete) {
             throw new IllegalStateException(
-                "Kafka message browse did not reach the snapshot end offsets before the request timeout"
+                "Kafka message browse did not finish fetching every partition window before the request timeout"
             );
         }
     }
@@ -1206,72 +1193,10 @@ public final class KafkaAgent {
     }
 
     /**
-     * Poll until {@code count} messages are collected, every assigned partition has reached its
-     * end offset, or {@code deadlineNs} expires. Empty polls retry until caught-up or deadline —
-     * they must not abort early (broker / network / first-fetch latency can exceed one poll).
+     * Reads a bounded window from every partition before returning a globally sorted page. This
+     * prevents a fast partition from filling the page while another selected partition is delayed.
      */
     static List<Map<String, Object>> collectPeekedMessages(
-        PeekRecordPoller poller,
-        PeekCaughtUpChecker caughtUpChecker,
-        int count,
-        long deadlineNs,
-        Duration pollTimeout
-    ) {
-        return collectPeekedMessages(
-            poller,
-            caughtUpChecker,
-            record -> true,
-            count,
-            deadlineNs,
-            pollTimeout
-        );
-    }
-
-    static List<Map<String, Object>> collectPeekedMessages(
-        PeekRecordPoller poller,
-        PeekCaughtUpChecker caughtUpChecker,
-        PeekRecordFilter recordFilter,
-        int count,
-        long deadlineNs,
-        Duration pollTimeout
-    ) {
-        List<Map<String, Object>> messages = new ArrayList<>();
-        while (messages.size() < count && System.nanoTime() < deadlineNs) {
-            if (caughtUpChecker.allPartitionsCaughtUp()) {
-                break;
-            }
-            long remainingNs = deadlineNs - System.nanoTime();
-            if (remainingNs <= 0) {
-                break;
-            }
-            Duration timeout = pollTimeout.toNanos() > remainingNs
-                ? Duration.ofNanos(remainingNs)
-                : pollTimeout;
-            ConsumerRecords<String, byte[]> records = poller.poll(timeout);
-            if (records.isEmpty()) {
-                if (caughtUpChecker.allPartitionsCaughtUp()) {
-                    break;
-                }
-                continue;
-            }
-            for (ConsumerRecord<String, byte[]> record : records) {
-                if (!recordFilter.include(record)) {
-                    continue;
-                }
-                messages.add(peekedMessageFromRecord(record));
-                if (messages.size() >= count) {
-                    break;
-                }
-            }
-        }
-        return messages;
-    }
-
-    /**
-     * Reads a bounded tail window from every partition. Unlike a global record limit, this avoids
-     * starving later partitions when the consumer returns one partition's records first.
-     */
-    static List<Map<String, Object>> collectLatestPeekedMessages(
         PeekRecordPoller poller,
         PeekCaughtUpChecker caughtUpChecker,
         PeekRecordFilter recordFilter,
@@ -1300,10 +1225,16 @@ public final class KafkaAgent {
                 ? Duration.ofNanos(remainingNs)
                 : pollTimeout;
             ConsumerRecords<String, byte[]> records = poller.poll(timeout);
+            if (records.isEmpty()) {
+                if (caughtUpChecker.allPartitionsCaughtUp()) {
+                    break;
+                }
+                continue;
+            }
             for (ConsumerRecord<String, byte[]> record : records) {
                 if (++scannedRecords > maxScanRecords) {
                     throw new IllegalStateException(
-                        "Kafka latest message browse exceeded the " + maxScanRecords + " record scan limit"
+                        "Kafka message browse exceeded the " + maxScanRecords + " record scan limit"
                     );
                 }
                 TopicPartition partition = new TopicPartition(record.topic(), record.partition());
@@ -1443,23 +1374,16 @@ public final class KafkaAgent {
         };
     }
 
-    static int peekFetchCount(PeekStartPosition startPosition, int count, int readablePartitionCount) {
-        if (startPosition != PeekStartPosition.LATEST) {
-            return count;
-        }
-        return recentPeekFetchCount(
-            recentPeekMessagesPerPartition(count, readablePartitionCount), readablePartitionCount
+    static int peekScanLimit(int count, int readablePartitionCount) {
+        int fetchCount = recentPeekFetchCount(
+            peekMessagesPerPartition(count, readablePartitionCount), readablePartitionCount
         );
-    }
-
-    static int latestPeekScanLimit(int count, int readablePartitionCount) {
-        int fetchCount = peekFetchCount(PeekStartPosition.LATEST, count, readablePartitionCount);
-        if (fetchCount > MAX_LATEST_PEEK_SCAN_RECORDS) {
+        if (fetchCount > MAX_PEEK_SCAN_RECORDS) {
             throw new IllegalArgumentException(
-                "Kafka latest message browse would scan more than " + MAX_LATEST_PEEK_SCAN_RECORDS + " records"
+                "Kafka message browse would scan more than " + MAX_PEEK_SCAN_RECORDS + " records"
             );
         }
-        return MAX_LATEST_PEEK_SCAN_RECORDS;
+        return MAX_PEEK_SCAN_RECORDS;
     }
 
     static void sortPeekedMessages(List<Map<String, Object>> messages) {
@@ -1866,14 +1790,19 @@ public final class KafkaAgent {
         return requestedOffset;
     }
 
-    /** Splits a latest-message request across partitions without reading their full history. */
-    static int recentPeekMessagesPerPartition(int count, int partitionCount) {
+    /** Splits a bounded browse window across partitions without reading their full history. */
+    static int peekMessagesPerPartition(int count, int partitionCount) {
         int safePartitionCount = Math.max(1, partitionCount);
         return (int) (((long) count + safePartitionCount - 1) / safePartitionCount);
     }
 
     static long recentPeekStartOffset(long beginningOffset, long endOffset, int messagesPerPartition) {
         return Math.max(beginningOffset, endOffset - messagesPerPartition);
+    }
+
+    static long peekWindowEndOffset(long seekOffset, long snapshotEndOffset, int messagesPerPartition) {
+        long remainingRecords = snapshotEndOffset - seekOffset;
+        return seekOffset + Math.min(remainingRecords, (long) messagesPerPartition);
     }
 
     static int recentPeekFetchCount(int messagesPerPartition, int partitionCount) {
