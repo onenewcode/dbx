@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createApp, nextTick, type App } from "vue";
+import { createApp, h, nextTick, ref, type App } from "vue";
+import type { PeekedMessage } from "@/types/mq";
 
 const backend = vi.hoisted(() => ({
   mqPeekMessages: vi.fn(),
@@ -68,6 +69,33 @@ async function mountBrowser(mqSystemKind: "kafka" | "rabbitmq" = "kafka") {
   app.mount(root);
   await flushUi();
   return root;
+}
+
+async function mountBrowserWithMutableTopic() {
+  const topic = ref({ ...TOPIC });
+  root = document.createElement("div");
+  document.body.appendChild(root);
+  app = createApp({
+    setup: () => () =>
+      h(MessageBrowser, {
+        connectionId: "mq-1",
+        topic: topic.value,
+        mqSystemKind: "kafka",
+      }),
+  });
+  app.mount(root);
+  await flushUi();
+  return { browser: root, topic };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
 }
 
 async function loadMessages(container: ParentNode) {
@@ -166,6 +194,76 @@ describe("MessageBrowser", () => {
     await setSelectValue(startPosition, "latest");
     await loadMessages(browser);
     expect(backend.mqPeekMessages).toHaveBeenLastCalledWith("mq-1", expect.objectContaining({ topic: "events" }), "__dbx_kafka_viewer__", 20, { startPosition: "latest", partition: 2 });
+  });
+
+  it("ignores an older topic request that resolves after the current request", async () => {
+    const first = deferred<PeekedMessage[]>();
+    const second = deferred<PeekedMessage[]>();
+    backend.mqPeekMessages.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const { browser, topic } = await mountBrowserWithMutableTopic();
+
+    await loadMessages(browser);
+    topic.value = { ...TOPIC, topic: "payments" };
+    await flushUi();
+    await loadMessages(browser);
+
+    second.resolve([
+      {
+        position: 1,
+        messageId: "new",
+        payloadBase64: "",
+        payloadText: "new topic message",
+        properties: {},
+        headers: {},
+      },
+    ]);
+    await flushUi();
+    expect(browser.textContent).toContain("new topic message");
+
+    first.resolve([
+      {
+        position: 1,
+        messageId: "old",
+        payloadBase64: "",
+        payloadText: "old topic message",
+        properties: {},
+        headers: {},
+      },
+    ]);
+    await flushUi();
+
+    expect(browser.textContent).toContain("new topic message");
+    expect(browser.textContent).not.toContain("old topic message");
+  });
+
+  it("ignores an older topic request failure after the current request succeeds", async () => {
+    const first = deferred<PeekedMessage[]>();
+    const second = deferred<PeekedMessage[]>();
+    backend.mqPeekMessages.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const { browser, topic } = await mountBrowserWithMutableTopic();
+
+    await loadMessages(browser);
+    topic.value = { ...TOPIC, topic: "payments" };
+    await flushUi();
+    await loadMessages(browser);
+
+    second.resolve([
+      {
+        position: 1,
+        messageId: "new",
+        payloadBase64: "",
+        payloadText: "new topic message",
+        properties: {},
+        headers: {},
+      },
+    ]);
+    await flushUi();
+
+    first.reject(new Error("old topic request failed"));
+    await flushUi();
+
+    expect(browser.textContent).toContain("new topic message");
+    expect(browser.textContent).not.toContain("old topic request failed");
   });
 
   it("keeps RabbitMQ's advanced filters collapsed and sends its existing request shape", async () => {

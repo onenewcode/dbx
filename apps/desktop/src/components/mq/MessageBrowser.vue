@@ -7,13 +7,10 @@ import { formatError } from "@/lib/backend/errorUtils";
 import { parseNonNegativeSafeInteger } from "@/lib/mq/mqPeekFilters";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
-type MessageBrowserAppearance = "form" | "monitoring";
-
 interface Props {
   connectionId: string;
   topic?: TopicRef | null;
   mqSystemKind?: MqSystemKind;
-  appearance?: MessageBrowserAppearance;
 }
 
 const props = defineProps<Props>();
@@ -28,10 +25,10 @@ const count = ref(20);
 const advancedExpanded = ref(false);
 type KafkaPeekStartPosition = NonNullable<PeekMessagesOptions["startPosition"]>;
 const kafkaStartPosition = ref<KafkaPeekStartPosition>("latest");
+let messageRequestVersion = 0;
 
 const isKafka = computed(() => props.mqSystemKind === "kafka");
 const isKafkaOffsetMode = computed(() => kafkaStartPosition.value === "offset");
-const isMonitoring = computed(() => props.appearance === "monitoring");
 
 function peekGroupName(): string {
   if (props.mqSystemKind === "rocketmq") return "__dbx_rocketmq_viewer__";
@@ -39,7 +36,9 @@ function peekGroupName(): string {
 }
 
 async function loadMessages() {
-  if (!props.topic || loading.value) return;
+  const topic = props.topic;
+  if (!topic || loading.value) return;
+  const requestVersion = ++messageRequestVersion;
   loading.value = true;
   error.value = undefined;
   try {
@@ -78,12 +77,26 @@ async function loadMessages() {
         offset.value = String(parsedOffset);
       }
     }
-    messages.value = await mqPeekMessages(props.connectionId, props.topic, peekGroupName(), resultLimit, options);
+    const result = await mqPeekMessages(props.connectionId, topic, peekGroupName(), resultLimit, options);
+    if (requestVersion === messageRequestVersion) {
+      messages.value = result;
+    }
   } catch (cause: unknown) {
-    error.value = formatError(cause);
+    if (requestVersion === messageRequestVersion) {
+      error.value = formatError(cause);
+    }
   } finally {
-    loading.value = false;
+    if (requestVersion === messageRequestVersion) {
+      loading.value = false;
+    }
   }
+}
+
+function invalidateMessageRequest() {
+  messageRequestVersion += 1;
+  loading.value = false;
+  error.value = undefined;
+  messages.value = [];
 }
 
 function messagePayload(message: PeekedMessage): string {
@@ -98,19 +111,17 @@ function formatMessageTimestamp(value?: string): string {
 }
 
 watch([() => props.topic?.tenant, () => props.topic?.namespace, () => props.topic?.topic], () => {
-  error.value = undefined;
-  messages.value = [];
+  invalidateMessageRequest();
 });
 
 watch(kafkaStartPosition, () => {
   // Keep offset values for switching back, but never retain results from another start mode.
-  error.value = undefined;
-  messages.value = [];
+  invalidateMessageRequest();
 });
 </script>
 
 <template>
-  <section v-if="topic" class="message-browser" :class="{ 'is-monitoring': isMonitoring }" data-testid="message-browser">
+  <section v-if="topic" class="message-browser" data-testid="message-browser">
     <div class="message-browser-header">
       <h4>{{ t("mqMessages.messageList") }}</h4>
       <button type="button" class="btn-sm" :disabled="loading" @click="loadMessages">
@@ -200,42 +211,11 @@ watch(kafkaStartPosition, () => {
 
 <style scoped>
 .message-browser {
-  --browser-border: var(--color-border);
-  --browser-surface: var(--color-background-secondary);
-  --browser-raised-surface: var(--color-background);
-  --browser-code-surface: var(--color-background-tertiary, var(--color-background-secondary));
-  --browser-text: var(--color-text);
-  --browser-muted: var(--color-text-secondary);
-  --browser-faint: var(--color-text-tertiary);
-  --browser-accent: var(--color-primary);
-  --browser-accent-soft: var(--color-primary-alpha);
-  --browser-error: var(--color-error);
-  --browser-error-surface: var(--color-error-bg);
-  /* The send form uses a flex gap; retain the former final visual offset here. */
-  margin: 4px 0 0;
+  margin-top: 4px;
   padding: 14px;
-  border: 1px solid var(--browser-border);
+  border: 1px solid var(--color-border);
   border-radius: var(--dbx-radius-fixed-6);
-  background: var(--browser-surface);
-}
-
-.message-browser.is-monitoring {
-  --browser-border: var(--monitor-border, var(--color-border));
-  --browser-surface: var(--monitor-surface, var(--color-background-secondary));
-  --browser-raised-surface: var(--monitor-surface-raised, var(--color-background));
-  --browser-code-surface: var(--monitor-surface, var(--color-background-secondary));
-  --browser-text: var(--monitor-text, var(--color-text));
-  --browser-muted: var(--monitor-muted, var(--color-text-secondary));
-  --browser-faint: var(--monitor-faint, var(--color-text-tertiary));
-  --browser-accent: var(--monitor-accent, var(--color-primary));
-  --browser-accent-soft: var(--monitor-accent-soft, var(--color-primary-alpha));
-  --browser-error: var(--monitor-danger, var(--color-error));
-  --browser-error-surface: var(--monitor-danger-soft, var(--color-error-bg));
-  margin: 0;
-  padding: 0;
-  border: 0;
-  border-radius: 0;
-  background: transparent;
+  background: var(--color-background-secondary);
 }
 
 .message-browser-header {
@@ -243,74 +223,43 @@ watch(kafkaStartPosition, () => {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 32px;
   margin-bottom: 12px;
 }
 
 .message-browser-header h4 {
   margin: 0;
-  color: var(--browser-text);
+  color: var(--color-text);
   font-size: 14px;
   font-weight: 600;
-  line-height: 1.35;
-}
-
-.message-browser.is-monitoring .message-browser-header {
-  min-height: 34px;
-  margin-bottom: 14px;
-}
-
-.message-browser.is-monitoring .message-browser-header h4 {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  font-weight: 680;
-}
-
-.message-browser.is-monitoring .message-browser-header h4::before {
-  content: "";
-  width: 4px;
-  height: 16px;
-  border-radius: 2px;
-  background: var(--browser-accent);
-  box-shadow: 0 0 0 4px var(--browser-accent-soft);
 }
 
 .btn-sm {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 32px;
   padding: 4px 10px;
-  border: 1px solid var(--browser-border);
+  border: 1px solid var(--color-border);
   border-radius: var(--dbx-radius-fixed-6);
-  background: var(--browser-raised-surface);
-  color: var(--browser-text);
+  background: var(--color-background);
+  color: var(--color-text);
   cursor: pointer;
   font-size: 12px;
-  line-height: 1;
-  white-space: nowrap;
 }
 
-.message-browser.is-monitoring .btn-sm {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-height: 34px;
-  padding: 7px 12px;
-  border-radius: var(--dbx-radius-fixed-4);
-  font-size: 13px;
-  font-weight: 560;
-  line-height: 1;
-  box-shadow: 0 1px 0 rgb(255 255 255 / 0.55) inset;
+.btn-sm:hover:not(:disabled) {
+  background: var(--color-background-secondary);
+}
+
+.btn-sm:disabled,
+.peek-controls input:disabled,
+.peek-controls :deep(.message-browser-start-position[data-disabled]) {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .peek-default-hint {
   margin: 0 0 12px;
   padding: 8px 10px;
   border-radius: var(--dbx-radius-fixed-6);
-  background: color-mix(in srgb, var(--browser-accent) 8%, transparent);
-  color: var(--browser-muted);
+  background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+  color: var(--color-text-secondary);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -326,10 +275,9 @@ watch(kafkaStartPosition, () => {
   display: flex;
   flex-direction: column;
   gap: 5px;
-  color: var(--browser-muted);
+  color: var(--color-text-secondary);
   font-size: 12px;
   font-weight: 500;
-  line-height: 18px;
 }
 
 .peek-controls input,
@@ -338,32 +286,18 @@ watch(kafkaStartPosition, () => {
   width: 100%;
   padding: 7px 10px;
   box-sizing: border-box;
-  border: 1px solid var(--browser-border);
+  border: 1px solid var(--color-border);
   border-radius: var(--dbx-radius-fixed-6);
-  background: var(--browser-raised-surface);
-  color: var(--browser-text);
+  background: var(--color-background);
+  color: var(--color-text);
   font-size: 13px;
-  line-height: 18px;
 }
 
 .peek-controls input:focus,
 .peek-controls :deep(.message-browser-start-position:focus-visible) {
   outline: none;
-  border-color: var(--browser-accent);
-  box-shadow: 0 0 0 2px var(--browser-accent-soft);
-}
-
-.message-browser.is-monitoring .peek-controls {
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 12px;
-  margin-bottom: 14px;
-}
-
-.message-browser.is-monitoring .peek-controls input,
-.message-browser.is-monitoring .peek-controls :deep(.message-browser-start-position) {
-  height: 34px;
-  min-height: 34px;
-  border-radius: var(--dbx-radius-fixed-4);
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px var(--color-primary-alpha);
 }
 
 .non-kafka-controls {
@@ -377,7 +311,7 @@ watch(kafkaStartPosition, () => {
   padding: 0;
   border: none;
   background: none;
-  color: var(--browser-muted);
+  color: var(--color-text-secondary);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
@@ -399,23 +333,23 @@ watch(kafkaStartPosition, () => {
 }
 
 .collapse-badge {
-  color: var(--browser-accent);
+  color: var(--color-primary);
   font-weight: 700;
 }
 
 .panel-error {
   padding: 10px 14px;
   border-radius: var(--dbx-radius-fixed-6);
-  background: var(--browser-error-surface);
-  color: var(--browser-error);
+  background: var(--color-error-bg);
+  color: var(--color-error);
   font-size: 13px;
 }
 
 .message-empty {
   padding: 18px;
-  border: 1px dashed var(--browser-border);
+  border: 1px dashed var(--color-border);
   border-radius: var(--dbx-radius-fixed-6);
-  color: var(--browser-faint);
+  color: var(--color-text-tertiary);
   text-align: center;
   font-size: 13px;
 }
@@ -430,9 +364,9 @@ watch(kafkaStartPosition, () => {
 
 .message-row {
   padding: 10px 12px;
-  border: 1px solid var(--browser-border);
+  border: 1px solid var(--color-border);
   border-radius: var(--dbx-radius-fixed-6);
-  background: var(--browser-raised-surface);
+  background: var(--color-background);
 }
 
 .message-meta {
@@ -440,24 +374,23 @@ watch(kafkaStartPosition, () => {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  margin-bottom: 8px;
-  color: var(--browser-faint);
+  color: var(--color-text-tertiary);
   font-size: 12px;
 }
 
 .message-meta span:first-child {
-  color: var(--browser-accent);
+  color: var(--color-primary);
   font-weight: 700;
 }
 
 .message-payload {
-  max-height: 160px;
   margin: 8px 0 0;
-  overflow: auto;
   padding: 10px;
+  max-height: 160px;
+  overflow: auto;
   border-radius: var(--dbx-radius-fixed-6);
-  background: var(--browser-code-surface);
-  color: var(--browser-text);
+  background: var(--color-background-tertiary, var(--color-background-secondary));
+  color: var(--color-text);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   font-size: 12px;
   line-height: 1.5;
@@ -470,15 +403,15 @@ watch(kafkaStartPosition, () => {
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 8px;
-  color: var(--browser-muted);
-  font-size: 11px;
 }
 
 .message-headers span {
   padding: 2px 6px;
-  border: 1px solid var(--browser-border);
+  border: 1px solid var(--color-border);
   border-radius: var(--dbx-radius-fixed-4);
-  background: var(--browser-surface);
+  color: var(--color-text-secondary);
+  background: var(--color-background-secondary);
+  font-size: 12px;
 }
 
 @media (max-width: 720px) {

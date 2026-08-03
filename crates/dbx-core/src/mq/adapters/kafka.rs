@@ -85,6 +85,17 @@ impl KafkaAdmin {
         client.call(method, params).await
     }
 
+    /// The Kafka agent bounds message browsing with its configured request timeout.
+    /// Do not preempt that with the driver's generic 30-second RPC timeout.
+    async fn call_with_agent_timeout<T: DeserializeOwned + Send + 'static>(
+        &self,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, String> {
+        let mut client = self.client.lock().await;
+        client.call_with_timeout(method, params, None).await
+    }
+
     /// Send a JSON-RPC call that returns `{ok: true}` on success.
     async fn call_ok(&self, method: &str, params: serde_json::Value) -> Result<(), String> {
         let _: serde_json::Value = self.call(method, params).await?;
@@ -319,7 +330,7 @@ impl MessageQueueAdmin for KafkaAdmin {
         options: PeekMessagesOptions,
     ) -> Result<Vec<PeekedMessage>, String> {
         let params = peek_messages_params(&self.config, topic, count, options);
-        let result: serde_json::Value = self.call("mq_peek_messages", params).await?;
+        let result: serde_json::Value = self.call_with_agent_timeout("mq_peek_messages", params).await?;
 
         let messages = result.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
         Ok(messages

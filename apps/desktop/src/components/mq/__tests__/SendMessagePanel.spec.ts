@@ -135,6 +135,7 @@ describe("SendMessagePanel post-send browsing", () => {
     it(`keeps ${system} results unchanged after sending`, async () => {
       const panel = await mountPanel(system);
 
+      expect(panel.querySelector('[data-testid="message-browser"]')?.classList.contains("message-browser")).toBe(true);
       expect(panel.querySelector('[data-testid="message-browser"]')?.classList.contains("is-monitoring")).toBe(false);
       await loadMessages(panel);
       expect(backend.mqPeekMessages).toHaveBeenCalledWith("mq-1", expectedTopic(system), "__dbx_kafka_viewer__", 20, system === "kafka" ? { startPosition: "latest" } : {});
