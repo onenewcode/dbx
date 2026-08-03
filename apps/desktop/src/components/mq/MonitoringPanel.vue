@@ -629,7 +629,7 @@ onUnmounted(() => {
       </div>
 
       <div class="stats-section">
-        <MessageBrowser :connection-id="connectionId" :topic="getTopicRef()" mq-system-kind="kafka" />
+        <MessageBrowser :connection-id="connectionId" :topic="getTopicRef()" mq-system-kind="kafka" appearance="monitoring" />
       </div>
     </div>
 

@@ -126,7 +126,7 @@ describe("MonitoringPanel Kafka message browser", () => {
 
     expect(panel.querySelector("textarea")).toBeNull();
     expect(browser.classList.contains("message-browser")).toBe(true);
-    expect(browser.classList.contains("is-monitoring")).toBe(false);
+    expect(browser.classList.contains("is-monitoring")).toBe(true);
     expect(browser.querySelector('[data-testid="kafka-peek-start-position"]')).not.toBeNull();
 
     loadButton.click();

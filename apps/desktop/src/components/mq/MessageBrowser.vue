@@ -7,13 +7,19 @@ import { formatError } from "@/lib/backend/errorUtils";
 import { parseNonNegativeSafeInteger } from "@/lib/mq/mqPeekFilters";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 
+type MessageBrowserAppearance = "form" | "monitoring";
+
 interface Props {
   connectionId: string;
   topic?: TopicRef | null;
   mqSystemKind?: MqSystemKind;
+  /** Flatten chrome when embedded in MonitoringPanel so it is not a second nested card. */
+  appearance?: MessageBrowserAppearance;
 }
 
-const props = defineProps<Props>();
+const props = withDefaults(defineProps<Props>(), {
+  appearance: "form",
+});
 const { t } = useI18n();
 
 const loading = ref(false);
@@ -29,6 +35,7 @@ let messageRequestVersion = 0;
 
 const isKafka = computed(() => props.mqSystemKind === "kafka");
 const isKafkaOffsetMode = computed(() => kafkaStartPosition.value === "offset");
+const isMonitoring = computed(() => props.appearance === "monitoring");
 
 function peekGroupName(): string {
   if (props.mqSystemKind === "rocketmq") return "__dbx_rocketmq_viewer__";
@@ -121,7 +128,7 @@ watch(kafkaStartPosition, () => {
 </script>
 
 <template>
-  <section v-if="topic" class="message-browser" data-testid="message-browser">
+  <section v-if="topic" class="message-browser" :class="{ 'is-monitoring': isMonitoring }" data-testid="message-browser">
     <div class="message-browser-header">
       <h4>{{ t("mqMessages.messageList") }}</h4>
       <button type="button" class="btn-sm" :disabled="loading" @click="loadMessages">
@@ -216,6 +223,15 @@ watch(kafkaStartPosition, () => {
   border: 1px solid var(--color-border);
   border-radius: var(--dbx-radius-fixed-6);
   background: var(--color-background-secondary);
+}
+
+/* Only flatten outer chrome when embedded in MonitoringPanel — do not restyle list rows. */
+.message-browser.is-monitoring {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
 }
 
 .message-browser-header {
@@ -360,6 +376,12 @@ watch(kafkaStartPosition, () => {
   gap: 10px;
   max-height: 360px;
   overflow: auto;
+}
+
+/* Monitoring page already scrolls via .stats-container — avoid a second vertical bar. */
+.message-browser.is-monitoring .message-list {
+  max-height: none;
+  overflow: visible;
 }
 
 .message-row {
