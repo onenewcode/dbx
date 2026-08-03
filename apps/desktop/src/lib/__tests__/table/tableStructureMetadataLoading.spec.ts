@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { shouldLoadTableStructureTriggers, visibleTableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
+import { hasTableStructureRefreshScope, missingTableStructureRefreshScope, shouldLoadTableStructureTriggers, visibleTableStructureRefreshScope } from "@/lib/table/tableStructureMetadataLoading";
 
 describe("table structure metadata loading", () => {
   it.each([
@@ -23,6 +23,19 @@ describe("table structure metadata loading", () => {
 
     expect(shouldLoadTableStructureTriggers({ ...base, loaded: false })).toBe(true);
     expect(shouldLoadTableStructureTriggers({ ...base, loaded: true })).toBe(false);
+  });
+
+  it("loads only the facet that is still missing after visiting the columns tab", () => {
+    const scope = missingTableStructureRefreshScope(visibleTableStructureRefreshScope("indexes"), new Set(["columns", "comment"]));
+
+    expect(scope).toEqual({ columns: false, indexes: true, foreignKeys: false, triggers: false, tableComment: false });
+    expect(hasTableStructureRefreshScope(scope)).toBe(true);
+  });
+
+  it("does not schedule a load when every requested facet is already present", () => {
+    const scope = missingTableStructureRefreshScope(visibleTableStructureRefreshScope("foreignKeys"), new Set(["columns", "foreign-keys", "comment"]));
+
+    expect(hasTableStructureRefreshScope(scope)).toBe(false);
   });
 
   it("waits for the initial structure load and skips create mode", () => {

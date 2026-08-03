@@ -900,6 +900,7 @@ export interface TableStructureEditorDraft {
   foreignKeys: import("@/lib/table/tableStructureEditorSql").EditableStructureForeignKey[];
   triggers: import("@/lib/table/tableStructureEditorSql").EditableStructureTrigger[];
   triggersLoaded?: boolean;
+  loadedMetadataFacets?: import("@/lib/table/tableStructureMetadataLoading").TableStructureMetadataFacet[];
   scrollPositions?: Partial<Record<TableInfoTab, TableStructureEditorViewport>>;
   initialized: boolean;
 }

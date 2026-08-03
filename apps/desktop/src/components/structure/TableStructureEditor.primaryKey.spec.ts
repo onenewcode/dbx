@@ -1,7 +1,8 @@
 // @vitest-environment happy-dom
 
-import { createApp, nextTick, type App } from "vue";
+import { createApp, defineComponent, h, nextTick, ref, type App } from "vue";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { TableInfoTab, TableStructureEditorDraft } from "@/types/database";
 
 const mocks = vi.hoisted(() => ({
   connection: {
@@ -291,6 +292,49 @@ async function mountLoadingEditor(initialTab: "columns" | "indexes" | "foreignKe
   return root;
 }
 
+async function mountLazyLoadingEditor(initialDraft?: TableStructureEditorDraft) {
+  mocks.connection.db_type = "postgres";
+  mocks.connection.name = "postgres";
+  mocks.connection.driver_label = "postgres";
+  mocks.ensureConnected.mockResolvedValue(undefined);
+  mocks.listDataTypes.mockResolvedValue([]);
+  mocks.buildTableStructureChangeSql.mockResolvedValue({ statements: [], warnings: [] });
+
+  const initialTab = ref<TableInfoTab>();
+  const initialTabRequestId = ref<number>();
+  const currentDraft = ref<TableStructureEditorDraft | undefined>(initialDraft);
+  const root = document.createElement("div");
+  document.body.append(root);
+  const app = createApp(
+    defineComponent({
+      setup: () => () =>
+        h(TableStructureEditor, {
+          connectionId: mocks.connection.id,
+          database: "test",
+          schema: "public",
+          tableName: "users",
+          initialTab: initialTab.value,
+          initialTabRequestId: initialTabRequestId.value,
+          draft: currentDraft.value,
+          "onUpdate:draft": (nextDraft: TableStructureEditorDraft | undefined) => {
+            currentDraft.value = nextDraft;
+          },
+        }),
+    }),
+  );
+  mountedApps.push(app);
+  app.mount(root);
+
+  return {
+    root,
+    currentDraft,
+    selectTab(tab: TableInfoTab) {
+      initialTab.value = tab;
+      initialTabRequestId.value = (initialTabRequestId.value ?? 0) + 1;
+    },
+  };
+}
+
 function columnCheckbox(root: HTMLElement, header: string): HTMLInputElement {
   const headerIndex = Array.from(root.querySelectorAll("thead th")).findIndex((cell) => cell.textContent?.trim() === header);
   if (headerIndex < 0) throw new Error(`Missing ${header} column`);
@@ -382,5 +426,92 @@ describe("TableStructureEditor metadata loading", () => {
     await vi.waitFor(() => expect(mocks.loadObjectMetadataFacet).toHaveBeenCalledTimes(expectedFacets.length));
     expect(mocks.loadObjectMetadataFacet.mock.calls.map((call) => call[1])).toEqual(expectedFacets);
     expect(mocks.loadObjectDdl).not.toHaveBeenCalled();
+  });
+
+  it("loads indexes after the columns draft is synchronized to the parent", async () => {
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request: unknown, facet: string) => ({
+      value:
+        facet === "indexes"
+          ? [
+              {
+                name: "users_pkey",
+                columns: ["id"],
+                is_unique: true,
+                is_primary: true,
+              },
+            ]
+          : [],
+      cacheStatus: "remote",
+    }));
+    const { root, currentDraft, selectTab } = await mountLazyLoadingEditor();
+
+    await vi.waitFor(() => expect(mocks.loadObjectMetadataFacet.mock.calls.map((call) => call[1])).toEqual(["columns", "comment"]));
+    await vi.waitFor(() => expect(currentDraft.value?.loadedMetadataFacets).toEqual(expect.arrayContaining(["columns", "comment"])));
+
+    selectTab("indexes");
+
+    await vi.waitFor(() => expect(mocks.loadObjectMetadataFacet.mock.calls.map((call) => call[1])).toEqual(["columns", "comment", "indexes"]));
+    expect(root.querySelector('[data-index-row-index="0"]')).not.toBeNull();
+    expect(currentDraft.value?.loadedMetadataFacets).toEqual(expect.arrayContaining(["columns", "comment", "indexes"]));
+  });
+
+  it("retries index loading when the user switches tabs during the initial columns load", async () => {
+    let resolveColumns: ((value: { value: unknown[]; cacheStatus: "remote" }) => void) | undefined;
+    const columns = new Promise<{ value: unknown[]; cacheStatus: "remote" }>((resolve) => {
+      resolveColumns = resolve;
+    });
+    mocks.loadObjectMetadataFacet.mockImplementation(async (_request: unknown, facet: string) => {
+      if (facet === "columns") return columns;
+      return { value: [], cacheStatus: "remote" };
+    });
+    const { selectTab } = await mountLazyLoadingEditor();
+
+    await vi.waitFor(() => expect(mocks.loadObjectMetadataFacet.mock.calls.map((call) => call[1])).toEqual(["columns", "comment"]));
+    selectTab("indexes");
+    await nextTick();
+    expect(mocks.loadObjectMetadataFacet.mock.calls.map((call) => call[1])).toEqual(["columns", "comment"]);
+
+    resolveColumns?.({ value: [], cacheStatus: "remote" });
+
+    await vi.waitFor(() => expect(mocks.loadObjectMetadataFacet.mock.calls.map((call) => call[1])).toEqual(["columns", "comment", "indexes"]));
+  });
+
+  it("loads only missing indexes without replacing a restored dirty columns draft", async () => {
+    const restoredDraft = draft() as TableStructureEditorDraft;
+    restoredDraft.dirty = true;
+    restoredDraft.columns[0]!.name = "edited_id";
+    restoredDraft.loadedMetadataFacets = ["columns", "comment"];
+    mocks.loadObjectMetadataFacet.mockResolvedValue({ value: [], cacheStatus: "remote" });
+    const { currentDraft, selectTab } = await mountLazyLoadingEditor(restoredDraft);
+
+    selectTab("indexes");
+
+    await vi.waitFor(() => expect(mocks.loadObjectMetadataFacet.mock.calls.map((call) => call[1])).toEqual(["indexes"]));
+    expect(currentDraft.value?.columns[0]?.name).toBe("edited_id");
+  });
+
+  it("persists a lazily loaded comment even when its value does not change", async () => {
+    const restoredDraft = draft() as TableStructureEditorDraft;
+    restoredDraft.loadedMetadataFacets = ["columns", "indexes", "foreign-keys", "triggers"];
+    mocks.loadObjectMetadataFacet.mockResolvedValue({ value: "", cacheStatus: "remote" });
+    const { currentDraft, selectTab } = await mountLazyLoadingEditor(restoredDraft);
+
+    selectTab("indexes");
+
+    await vi.waitFor(() => expect(mocks.loadObjectMetadataFacet.mock.calls.map((call) => call[1])).toEqual(["comment"]));
+    expect(currentDraft.value?.loadedMetadataFacets).toEqual(expect.arrayContaining(["comment"]));
+  });
+
+  it("does not reload facets already recorded in a restored draft", async () => {
+    const restoredDraft = draft() as TableStructureEditorDraft;
+    restoredDraft.loadedMetadataFacets = ["columns", "indexes", "foreign-keys", "triggers", "comment"];
+    const { selectTab } = await mountLazyLoadingEditor(restoredDraft);
+
+    selectTab("indexes");
+    await nextTick();
+    await Promise.resolve();
+    await nextTick();
+
+    expect(mocks.loadObjectMetadataFacet).not.toHaveBeenCalled();
   });
 });
