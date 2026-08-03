@@ -1026,6 +1026,10 @@ public final class KafkaAgent {
         Integer partition = integerOrNull(params, "partition");
         Long offset = longOrNull(params, "offset");
         int count = Math.max(1, intOrDefault(params, "count", 10));
+        PeekStartPosition startPosition = peekStartPosition(params);
+        boolean explicitStartPosition = stringOrNull(params, "startPosition") != null;
+        validatePeekRequest(startPosition, explicitStartPosition, partition, offset);
+        boolean legacyOffsetRequest = !explicitStartPosition && offset != null;
 
         JsonObject conn = activeConnection;
         if (conn == null) {
@@ -1049,7 +1053,12 @@ public final class KafkaAgent {
             for (TopicPartition tp : candidatePartitions) {
                 long beginningOffset = beginningOffsets.getOrDefault(tp, 0L);
                 long endOffset = endOffsets.getOrDefault(tp, beginningOffset);
-                long requestedOffset = offset != null ? offset : beginningOffset;
+                Long requestedOffset = requestedPeekOffset(
+                    startPosition, offset, legacyOffsetRequest, beginningOffset, endOffset
+                );
+                if (requestedOffset == null) {
+                    continue;
+                }
                 Long seekOffset = normalizePeekOffset(requestedOffset, beginningOffset, endOffset);
                 if (seekOffset == null) {
                     continue;
@@ -1059,6 +1068,19 @@ public final class KafkaAgent {
             }
             if (readablePartitions.isEmpty()) {
                 return Collections.singletonMap("messages", Collections.emptyList());
+            }
+
+            if (startPosition == PeekStartPosition.LATEST) {
+                int messagesPerPartition = recentPeekMessagesPerPartition(
+                    count, readablePartitions.size()
+                );
+                for (TopicPartition tp : readablePartitions) {
+                    long beginningOffset = beginningOffsets.getOrDefault(tp, 0L);
+                    long endOffset = endOffsets.getOrDefault(tp, beginningOffset);
+                    seekOffsets.put(tp, recentPeekStartOffset(
+                        beginningOffset, endOffset, messagesPerPartition
+                    ));
+                }
             }
 
             consumer.assign(readablePartitions);
@@ -1075,11 +1097,17 @@ public final class KafkaAgent {
                     }
                     return allPeekPartitionsCaughtUp(readablePartitions, positions, endOffsets);
                 },
-                count,
+                record -> {
+                    Long snapshotEndOffset = endOffsets.get(
+                        new TopicPartition(record.topic(), record.partition())
+                    );
+                    return snapshotEndOffset != null && record.offset() < snapshotEndOffset;
+                },
+                peekFetchCount(startPosition, count, readablePartitions.size()),
                 System.nanoTime() + Duration.ofSeconds(5).toNanos(),
                 Duration.ofMillis(500)
             );
-            sortPeekedMessages(messages);
+            sortPeekedMessages(messages, startPosition);
             if (messages.size() > count) {
                 messages = new ArrayList<>(messages.subList(0, count));
             }
@@ -1114,8 +1142,29 @@ public final class KafkaAgent {
         long deadlineNs,
         Duration pollTimeout
     ) {
+        return collectPeekedMessages(
+            poller,
+            caughtUpChecker,
+            record -> true,
+            count,
+            deadlineNs,
+            pollTimeout
+        );
+    }
+
+    static List<Map<String, Object>> collectPeekedMessages(
+        PeekRecordPoller poller,
+        PeekCaughtUpChecker caughtUpChecker,
+        PeekRecordFilter recordFilter,
+        int count,
+        long deadlineNs,
+        Duration pollTimeout
+    ) {
         List<Map<String, Object>> messages = new ArrayList<>();
         while (messages.size() < count && System.nanoTime() < deadlineNs) {
+            if (caughtUpChecker.allPartitionsCaughtUp()) {
+                break;
+            }
             long remainingNs = deadlineNs - System.nanoTime();
             if (remainingNs <= 0) {
                 break;
@@ -1131,6 +1180,9 @@ public final class KafkaAgent {
                 continue;
             }
             for (ConsumerRecord<String, byte[]> record : records) {
+                if (!recordFilter.include(record)) {
+                    continue;
+                }
                 messages.add(peekedMessageFromRecord(record));
                 if (messages.size() >= count) {
                     break;
@@ -1165,6 +1217,11 @@ public final class KafkaAgent {
         boolean allPartitionsCaughtUp();
     }
 
+    @FunctionalInterface
+    interface PeekRecordFilter {
+        boolean include(ConsumerRecord<String, byte[]> record);
+    }
+
     /** When partition is null, peek across every partition of the topic. */
     static List<TopicPartition> resolvePeekPartitions(
         KafkaConsumer<String, byte[]> consumer,
@@ -1195,13 +1252,100 @@ public final class KafkaAgent {
             .collect(Collectors.toList());
     }
 
+    enum PeekStartPosition {
+        EARLIEST,
+        LATEST,
+        OFFSET,
+    }
+
+    /** Omitting startPosition preserves the old earliest default (or explicit legacy offset) behavior. */
+    static PeekStartPosition peekStartPosition(JsonObject params) {
+        String value = stringOrNull(params, "startPosition");
+        if (value == null) {
+            return PeekStartPosition.EARLIEST;
+        }
+        return switch (value.trim().toLowerCase(Locale.ROOT)) {
+            case "earliest" -> PeekStartPosition.EARLIEST;
+            case "latest" -> PeekStartPosition.LATEST;
+            case "offset" -> PeekStartPosition.OFFSET;
+            default -> throw new IllegalArgumentException("Unsupported peek startPosition: " + value);
+        };
+    }
+
+    static void validatePeekRequest(
+        PeekStartPosition startPosition,
+        boolean explicitStartPosition,
+        Integer partition,
+        Long offset
+    ) {
+        if (partition != null && partition < 0) {
+            throw new IllegalArgumentException("partition must be non-negative");
+        }
+        if (!explicitStartPosition) {
+            // Older clients used offset directly without a startPosition field.
+            if (offset != null && offset < 0) {
+                throw new IllegalArgumentException("offset must be non-negative");
+            }
+            return;
+        }
+        if (startPosition != PeekStartPosition.OFFSET) {
+            if (offset != null) {
+                throw new IllegalArgumentException("offset is only supported when startPosition is offset");
+            }
+            return;
+        }
+        if (partition == null) {
+            throw new IllegalArgumentException("partition is required when startPosition is offset");
+        }
+        if (offset == null) {
+            throw new IllegalArgumentException("offset is required when startPosition is offset");
+        }
+        if (offset < 0) {
+            throw new IllegalArgumentException("offset must be non-negative when startPosition is offset");
+        }
+    }
+
+    static Long requestedPeekOffset(
+        PeekStartPosition startPosition,
+        Long offset,
+        boolean legacyOffsetRequest,
+        long beginningOffset,
+        long endOffset
+    ) {
+        return switch (startPosition) {
+            case LATEST -> endOffset > beginningOffset ? beginningOffset : null;
+            case OFFSET -> offset;
+            case EARLIEST -> legacyOffsetRequest ? offset : beginningOffset;
+        };
+    }
+
+    static int peekFetchCount(PeekStartPosition startPosition, int count, int readablePartitionCount) {
+        if (startPosition != PeekStartPosition.LATEST) {
+            return count;
+        }
+        return recentPeekFetchCount(
+            recentPeekMessagesPerPartition(count, readablePartitionCount), readablePartitionCount
+        );
+    }
+
     static void sortPeekedMessages(List<Map<String, Object>> messages) {
-        messages.sort((left, right) -> {
+        sortPeekedMessages(messages, PeekStartPosition.EARLIEST);
+    }
+
+    static void sortPeekedMessages(List<Map<String, Object>> messages, PeekStartPosition startPosition) {
+        if (startPosition == PeekStartPosition.OFFSET) {
+            messages.sort(Comparator.comparingLong(message ->
+                ((Number) message.getOrDefault("offset", 0L)).longValue()
+            ));
+            return;
+        }
+
+        Comparator<Map<String, Object>> comparator = (left, right) -> {
             long leftTs = ((Number) left.getOrDefault("timestamp", 0L)).longValue();
             long rightTs = ((Number) right.getOrDefault("timestamp", 0L)).longValue();
             int byTs = Long.compare(leftTs, rightTs);
             if (byTs != 0) {
-                return byTs;
+                return startPosition == PeekStartPosition.LATEST ? -byTs : byTs;
             }
             int leftPartition = ((Number) left.getOrDefault("partition", 0)).intValue();
             int rightPartition = ((Number) right.getOrDefault("partition", 0)).intValue();
@@ -1212,7 +1356,8 @@ public final class KafkaAgent {
             long leftOffset = ((Number) left.getOrDefault("offset", 0L)).longValue();
             long rightOffset = ((Number) right.getOrDefault("offset", 0L)).longValue();
             return Long.compare(leftOffset, rightOffset);
-        });
+        };
+        messages.sort(comparator);
     }
 
     private static Map<String, Object> peekedMessageFromRecord(ConsumerRecord<String, byte[]> record) {
@@ -1582,6 +1727,21 @@ public final class KafkaAgent {
             return null;
         }
         return requestedOffset;
+    }
+
+    /** Splits a latest-message request across partitions without reading their full history. */
+    static int recentPeekMessagesPerPartition(int count, int partitionCount) {
+        int safePartitionCount = Math.max(1, partitionCount);
+        return (count + safePartitionCount - 1) / safePartitionCount;
+    }
+
+    static long recentPeekStartOffset(long beginningOffset, long endOffset, int messagesPerPartition) {
+        return Math.max(beginningOffset, endOffset - messagesPerPartition);
+    }
+
+    static int recentPeekFetchCount(int messagesPerPartition, int partitionCount) {
+        long total = (long) messagesPerPartition * Math.max(1, partitionCount);
+        return (int) Math.min(Integer.MAX_VALUE, total);
     }
 
     private static String stringOrNull(JsonObject object, String key) {

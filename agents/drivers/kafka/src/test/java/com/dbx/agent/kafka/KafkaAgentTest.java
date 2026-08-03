@@ -4,6 +4,7 @@ import com.google.gson.JsonObject;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.google.gson.JsonParser;
@@ -303,6 +304,103 @@ class KafkaAgentTest {
     }
 
     @Test
+    void peekStartPositionDefaultsToEarliestForOlderClients() {
+        assertEquals(KafkaAgent.PeekStartPosition.EARLIEST,
+            KafkaAgent.peekStartPosition(new JsonObject()));
+    }
+
+    @Test
+    void peekStartPositionRecognizesEveryExplicitMode() {
+        JsonObject latest = new JsonObject();
+        latest.addProperty("startPosition", "latest");
+        JsonObject earliest = new JsonObject();
+        earliest.addProperty("startPosition", "earliest");
+        JsonObject offset = new JsonObject();
+        offset.addProperty("startPosition", "offset");
+
+        assertEquals(KafkaAgent.PeekStartPosition.LATEST, KafkaAgent.peekStartPosition(latest));
+        assertEquals(KafkaAgent.PeekStartPosition.EARLIEST, KafkaAgent.peekStartPosition(earliest));
+        assertEquals(KafkaAgent.PeekStartPosition.OFFSET, KafkaAgent.peekStartPosition(offset));
+    }
+
+    @Test
+    void peekStartPositionRejectsUnknownValues() {
+        JsonObject params = new JsonObject();
+        params.addProperty("startPosition", "middle");
+
+        assertThrows(IllegalArgumentException.class, () -> KafkaAgent.peekStartPosition(params));
+    }
+
+    @Test
+    void offsetStartPositionRequiresNonNegativePartitionAndOffset() {
+        assertThrows(IllegalArgumentException.class, () ->
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, null, 0L));
+        assertThrows(IllegalArgumentException.class, () ->
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, 0, null));
+        assertThrows(IllegalArgumentException.class, () ->
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, -1, 0L));
+        assertThrows(IllegalArgumentException.class, () ->
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.OFFSET, true, 0, -1L));
+    }
+
+    @Test
+    void nonOffsetStartPositionsRejectAnOffset() {
+        assertThrows(IllegalArgumentException.class, () ->
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.LATEST, true, 0, 7L));
+        assertThrows(IllegalArgumentException.class, () ->
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, true, 0, 7L));
+    }
+
+    @Test
+    void latestSkipsEmptyPartitions() {
+        assertNull(KafkaAgent.requestedPeekOffset(
+            KafkaAgent.PeekStartPosition.LATEST, null, false, 5L, 5L
+        ));
+    }
+
+    @Test
+    void everyStartPositionRejectsNegativePartitions() {
+        assertThrows(IllegalArgumentException.class, () ->
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.LATEST, true, -1, null));
+        assertThrows(IllegalArgumentException.class, () ->
+            KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, true, -1, null));
+    }
+
+    @Test
+    void legacyOffsetWithoutStartPositionKeepsTheExistingReadBehavior() {
+        KafkaAgent.validatePeekRequest(KafkaAgent.PeekStartPosition.EARLIEST, false, null, 7L);
+        assertEquals(7L, KafkaAgent.requestedPeekOffset(
+            KafkaAgent.PeekStartPosition.EARLIEST, 7L, true, 0L, 10L
+        ));
+    }
+
+    @Test
+    void explicitEarliestDoesNotReuseAnOffsetFromAnOlderRequest() {
+        assertEquals(0L, KafkaAgent.requestedPeekOffset(
+            KafkaAgent.PeekStartPosition.EARLIEST, 7L, false, 0L, 10L
+        ));
+    }
+
+    @Test
+    void splitsLatestMessageWindowAcrossPartitions() {
+        assertEquals(4, KafkaAgent.recentPeekMessagesPerPartition(10, 3));
+        assertEquals(10, KafkaAgent.recentPeekMessagesPerPartition(10, 1));
+    }
+
+    @Test
+    void startsLatestMessageWindowNearThePartitionEnd() {
+        assertEquals(90L, KafkaAgent.recentPeekStartOffset(0, 100, 10));
+        assertEquals(5L, KafkaAgent.recentPeekStartOffset(5, 8, 10));
+    }
+
+    @Test
+    void fetchesEveryPartitionLatestWindowBeforeTrimmingTheResult() {
+        assertEquals(12, KafkaAgent.recentPeekFetchCount(4, 3));
+        assertEquals(12, KafkaAgent.peekFetchCount(KafkaAgent.PeekStartPosition.LATEST, 10, 3));
+        assertEquals(10, KafkaAgent.peekFetchCount(KafkaAgent.PeekStartPosition.EARLIEST, 10, 3));
+    }
+
+    @Test
     void resolvePeekPartitionsUsesSinglePartitionWhenSpecified() {
         var partitions = KafkaAgent.resolvePeekPartitions("events", 2, List.of(0, 1, 2));
         assertEquals(1, partitions.size());
@@ -328,6 +426,37 @@ class KafkaAgentTest {
         assertEquals(5L, messages.get(1).get("offset"));
         assertEquals(1, messages.get(2).get("partition"));
         assertEquals(20L, messages.get(3).get("timestamp"));
+    }
+
+    @Test
+    void sortPeekedMessagesCanOrderNewestFirst() {
+        var messages = new java.util.ArrayList<Map<String, Object>>();
+        messages.add(Map.of("timestamp", 20L, "partition", 1, "offset", 1L));
+        messages.add(Map.of("timestamp", 10L, "partition", 0, "offset", 5L));
+        messages.add(Map.of("timestamp", 10L, "partition", 0, "offset", 2L));
+        messages.add(Map.of("timestamp", 10L, "partition", 1, "offset", 0L));
+
+        KafkaAgent.sortPeekedMessages(messages, KafkaAgent.PeekStartPosition.LATEST);
+
+        assertEquals(20L, messages.get(0).get("timestamp"));
+        assertEquals(0, messages.get(1).get("partition"));
+        assertEquals(2L, messages.get(1).get("offset"));
+        assertEquals(5L, messages.get(2).get("offset"));
+        assertEquals(1, messages.get(3).get("partition"));
+    }
+
+    @Test
+    void sortPeekedMessagesOrdersOffsetModeByOffsetAscending() {
+        var messages = new java.util.ArrayList<Map<String, Object>>();
+        messages.add(Map.of("timestamp", 10L, "partition", 0, "offset", 5L));
+        messages.add(Map.of("timestamp", 30L, "partition", 0, "offset", 2L));
+        messages.add(Map.of("timestamp", 20L, "partition", 0, "offset", 3L));
+
+        KafkaAgent.sortPeekedMessages(messages, KafkaAgent.PeekStartPosition.OFFSET);
+
+        assertEquals(2L, messages.get(0).get("offset"));
+        assertEquals(3L, messages.get(1).get("offset"));
+        assertEquals(5L, messages.get(2).get("offset"));
     }
 
     @Test
@@ -378,7 +507,7 @@ class KafkaAgentTest {
     }
 
     @Test
-    void collectPeekedMessagesStopsOnEmptyPollWhenCaughtUp() {
+    void collectPeekedMessagesDoesNotPollWhenAlreadyCaughtUp() {
         AtomicInteger polls = new AtomicInteger();
         List<Map<String, Object>> messages = KafkaAgent.collectPeekedMessages(
             timeout -> {
@@ -391,8 +520,38 @@ class KafkaAgentTest {
             Duration.ofMillis(1)
         );
 
-        assertEquals(1, polls.get());
+        assertEquals(0, polls.get());
         assertTrue(messages.isEmpty());
+    }
+
+    @Test
+    void collectPeekedMessagesExcludesRecordsPastTheSnapshotEndOffset() {
+        TopicPartition tp = new TopicPartition("events", 0);
+        ConsumerRecord<String, byte[]> included = new ConsumerRecord<>(
+            "events", 0, 9L, "before", "before".getBytes(StandardCharsets.UTF_8)
+        );
+        ConsumerRecord<String, byte[]> excluded = new ConsumerRecord<>(
+            "events", 0, 10L, "after", "after".getBytes(StandardCharsets.UTF_8)
+        );
+        ConsumerRecords<String, byte[]> batch = new ConsumerRecords<>(Map.of(tp, List.of(included, excluded)));
+        AtomicInteger polls = new AtomicInteger();
+        AtomicInteger caughtUpChecks = new AtomicInteger();
+
+        List<Map<String, Object>> messages = KafkaAgent.collectPeekedMessages(
+            timeout -> {
+                polls.incrementAndGet();
+                return batch;
+            },
+            () -> caughtUpChecks.getAndIncrement() > 0,
+            record -> record.offset() < 10L,
+            2,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        assertEquals(1, polls.get());
+        assertEquals(1, messages.size());
+        assertEquals(9L, messages.get(0).get("offset"));
     }
 
     @Test

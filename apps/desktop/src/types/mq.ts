@@ -264,6 +264,8 @@ export interface PeekedMessage {
 }
 
 export interface PeekMessagesOptions {
+  /** Kafka only. Omitted starts at earliest unless a legacy caller supplies offset. */
+  startPosition?: "latest" | "earliest" | "offset";
   partition?: number;
   offset?: number;
 }
