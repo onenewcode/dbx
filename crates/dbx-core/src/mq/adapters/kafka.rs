@@ -684,8 +684,14 @@ fn peek_messages_params(
 }
 
 fn peek_messages_result_from_agent(result: &serde_json::Value) -> PeekMessagesResult {
-    let incomplete = result.get("incomplete").and_then(|v| v.as_bool()).unwrap_or(false);
-    let messages = result.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let (messages, incomplete) = if let Some(messages) = result.as_array() {
+        (messages.clone(), false)
+    } else {
+        (
+            result.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default(),
+            result.get("incomplete").and_then(|v| v.as_bool()).unwrap_or(false),
+        )
+    };
     let messages = messages
         .into_iter()
         .enumerate()
@@ -858,6 +864,21 @@ mod tests {
         assert_eq!(result.messages.len(), 1);
         assert_eq!(result.messages[0].properties.get("partition").map(String::as_str), Some("2"));
         assert_eq!(result.messages[0].message_id.as_deref(), Some("17"));
+    }
+
+    #[test]
+    fn peek_result_accepts_legacy_agent_array_responses() {
+        let result = peek_messages_result_from_agent(&serde_json::json!([{
+            "partition": 1,
+            "offset": 9,
+            "payloadBase64": "bGVnYWN5",
+        }]));
+
+        assert!(!result.incomplete);
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].properties.get("partition").map(String::as_str), Some("1"));
+        assert_eq!(result.messages[0].message_id.as_deref(), Some("9"));
+        assert_eq!(result.messages[0].payload_base64, "bGVnYWN5");
     }
 
     #[test]
