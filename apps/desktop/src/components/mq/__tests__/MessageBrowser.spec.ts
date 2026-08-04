@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createApp, h, nextTick, ref, type App } from "vue";
-import type { PeekedMessage } from "@/types/mq";
+import type { MqSystemKind, PeekedMessage } from "@/types/mq";
 
 const backend = vi.hoisted(() => ({
   mqPeekMessages: vi.fn(),
@@ -73,19 +73,21 @@ async function mountBrowser(mqSystemKind: "kafka" | "rabbitmq" = "kafka") {
 
 async function mountBrowserWithMutableTopic() {
   const topic = ref({ ...TOPIC });
+  const connectionId = ref("mq-1");
+  const mqSystemKind = ref<MqSystemKind>("kafka");
   root = document.createElement("div");
   document.body.appendChild(root);
   app = createApp({
     setup: () => () =>
       h(MessageBrowser, {
-        connectionId: "mq-1",
+        connectionId: connectionId.value,
         topic: topic.value,
-        mqSystemKind: "kafka",
+        mqSystemKind: mqSystemKind.value,
       }),
   });
   app.mount(root);
   await flushUi();
-  return { browser: root, topic };
+  return { browser: root, topic, connectionId, mqSystemKind };
 }
 
 function deferred<T>() {
@@ -131,6 +133,40 @@ describe("MessageBrowser", () => {
     await loadMessages(browser);
 
     expect(backend.mqPeekMessages).toHaveBeenCalledWith("mq-1", expect.objectContaining({ topic: "events" }), "__dbx_kafka_viewer__", 20, { startPosition: "latest" });
+  });
+
+  it("normalizes a decimal count before sending the request", async () => {
+    const browser = await mountBrowser();
+    const countInput = browser.querySelector<HTMLInputElement>('[data-testid="peek-count"]');
+    if (!countInput) throw new Error("Peek count input not found");
+
+    await setInputValue(countInput, "2.9");
+    await loadMessages(browser);
+
+    expect(countInput.value).toBe("2");
+    expect(backend.mqPeekMessages).toHaveBeenCalledWith("mq-1", expect.objectContaining({ topic: "events" }), "__dbx_kafka_viewer__", 2, { startPosition: "latest" });
+  });
+
+  it("shows an explicit warning when the broker returns an incomplete snapshot", async () => {
+    backend.mqPeekMessages.mockResolvedValueOnce({
+      messages: [
+        {
+          position: 1,
+          messageId: "partial",
+          payloadBase64: "",
+          payloadText: "partial message",
+          properties: {},
+          headers: {},
+        },
+      ],
+      incomplete: true,
+    });
+    const browser = await mountBrowser();
+
+    await loadMessages(browser);
+
+    expect(browser.querySelector('[data-testid="peek-incomplete"]')?.textContent).toContain("mqMessages.peekIncomplete");
+    expect(browser.textContent).toContain("partial message");
   });
 
   it("sends explicit earliest and offset read positions", async () => {
@@ -236,6 +272,44 @@ describe("MessageBrowser", () => {
     expect(browser.textContent).not.toContain("old topic message");
   });
 
+  it("invalidates a request when the topic persistence changes", async () => {
+    const first = deferred<PeekedMessage[]>();
+    const second = deferred<PeekedMessage[]>();
+    backend.mqPeekMessages.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const { browser, topic } = await mountBrowserWithMutableTopic();
+
+    await loadMessages(browser);
+    topic.value = { ...TOPIC, persistent: false };
+    await flushUi();
+    await loadMessages(browser);
+
+    second.resolve([
+      {
+        position: 1,
+        messageId: "non-persistent",
+        payloadBase64: "",
+        payloadText: "new persistence message",
+        properties: {},
+        headers: {},
+      },
+    ]);
+    await flushUi();
+    first.resolve([
+      {
+        position: 1,
+        messageId: "persistent",
+        payloadBase64: "",
+        payloadText: "stale persistence message",
+        properties: {},
+        headers: {},
+      },
+    ]);
+    await flushUi();
+
+    expect(browser.textContent).toContain("new persistence message");
+    expect(browser.textContent).not.toContain("stale persistence message");
+  });
+
   it("ignores an older topic request failure after the current request succeeds", async () => {
     const first = deferred<PeekedMessage[]>();
     const second = deferred<PeekedMessage[]>();
@@ -264,6 +338,46 @@ describe("MessageBrowser", () => {
 
     expect(browser.textContent).toContain("new topic message");
     expect(browser.textContent).not.toContain("old topic request failed");
+  });
+
+  it("ignores an older connection request after the connection changes", async () => {
+    const first = deferred<PeekedMessage[]>();
+    const second = deferred<PeekedMessage[]>();
+    backend.mqPeekMessages.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const { browser, connectionId } = await mountBrowserWithMutableTopic();
+
+    await loadMessages(browser);
+    connectionId.value = "mq-2";
+    await flushUi();
+    await loadMessages(browser);
+
+    second.resolve([
+      {
+        position: 1,
+        messageId: "new-connection",
+        payloadBase64: "",
+        payloadText: "new connection message",
+        properties: {},
+        headers: {},
+      },
+    ]);
+    await flushUi();
+    expect(browser.textContent).toContain("new connection message");
+
+    first.resolve([
+      {
+        position: 1,
+        messageId: "old-connection",
+        payloadBase64: "",
+        payloadText: "old connection message",
+        properties: {},
+        headers: {},
+      },
+    ]);
+    await flushUi();
+
+    expect(browser.textContent).toContain("new connection message");
+    expect(browser.textContent).not.toContain("old connection message");
   });
 
   it("ignores an older start-mode request that resolves after the mode switches", async () => {

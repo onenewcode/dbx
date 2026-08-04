@@ -5739,6 +5739,7 @@ export default withEnglishFallback({
     kafkaOffsetHint: "Lê em ordem crescente a partir do offset informado na partição escolhida, ou em todas se deixada vazia.",
     messagesLoading: "Carregando mensagens...",
     noMessages: "Nenhuma mensagem",
+    peekIncomplete: "Os resultados das mensagens estão incompletos porque o broker não concluiu o snapshot.",
     selectTopicBeforeLoad: "Selecione um tópico antes de carregar mensagens",
     partitionMustBeNonNegativeInt: "A partição deve ser um inteiro ≥ 0; deixe vazio para todas as partições",
     offsetMustBeNonNegativeInt: "O Offset deve ser um inteiro ≥ 0; deixe vazio para Earliest",

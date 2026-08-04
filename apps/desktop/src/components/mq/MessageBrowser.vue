@@ -25,6 +25,7 @@ const { t } = useI18n();
 const loading = ref(false);
 const error = ref<string>();
 const messages = ref<PeekedMessage[]>([]);
+const incomplete = ref(false);
 const partition = ref<string | number>("");
 const offset = ref<string | number>("");
 const count = ref(20);
@@ -48,8 +49,9 @@ async function loadMessages() {
   const requestVersion = ++messageRequestVersion;
   loading.value = true;
   error.value = undefined;
+  incomplete.value = false;
   try {
-    const resultLimit = Math.max(1, Math.min(100, Number(count.value) || 20));
+    const resultLimit = Math.max(1, Math.min(100, Math.trunc(Number(count.value) || 20)));
     count.value = resultLimit;
     const options: PeekMessagesOptions = {};
     const partitionText = String(partition.value).trim();
@@ -86,7 +88,9 @@ async function loadMessages() {
     }
     const result = await mqPeekMessages(props.connectionId, topic, peekGroupName(), resultLimit, options);
     if (requestVersion === messageRequestVersion) {
-      messages.value = result;
+      const browseResult = Array.isArray(result) ? { messages: result, incomplete: false } : result;
+      messages.value = browseResult.messages;
+      incomplete.value = browseResult.incomplete;
     }
   } catch (cause: unknown) {
     if (requestVersion === messageRequestVersion) {
@@ -104,6 +108,7 @@ function invalidateMessageRequest() {
   loading.value = false;
   error.value = undefined;
   messages.value = [];
+  incomplete.value = false;
 }
 
 function messagePayload(message: PeekedMessage): string {
@@ -117,7 +122,7 @@ function formatMessageTimestamp(value?: string): string {
   return new Date(numeric).toLocaleString();
 }
 
-watch([() => props.topic?.tenant, () => props.topic?.namespace, () => props.topic?.topic], () => {
+watch([() => props.connectionId, () => props.mqSystemKind, () => JSON.stringify(props.topic ?? null)], () => {
   invalidateMessageRequest();
 });
 
@@ -148,6 +153,9 @@ watch(kafkaStartPosition, () => {
       </template>
     </p>
     <p v-else class="peek-default-hint">{{ t("mqMessages.peekDefaultHint") }}</p>
+    <p v-if="incomplete" class="peek-incomplete" role="status" data-testid="peek-incomplete">
+      {{ t("mqMessages.peekIncomplete") }}
+    </p>
 
     <div class="peek-controls">
       <label>
@@ -278,6 +286,16 @@ watch(kafkaStartPosition, () => {
   color: var(--color-text-secondary);
   font-size: 12px;
   line-height: 1.5;
+}
+
+.peek-incomplete {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-warning-border, #d99a22);
+  border-radius: var(--dbx-radius-fixed-6);
+  background: var(--color-warning-background, #fff6df);
+  color: var(--color-warning-text, #7a4a00);
+  font-size: 12px;
 }
 
 .peek-controls {

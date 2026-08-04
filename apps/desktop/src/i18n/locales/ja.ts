@@ -5792,6 +5792,7 @@ export default withEnglishFallback({
     kafkaOffsetHint: "指定 Offset から、選択したパーティション（空欄ならすべて）を昇順に読み取ります。",
     messagesLoading: "メッセージを読み込み中...",
     noMessages: "メッセージがありません",
+    peekIncomplete: "ブローカーがスナップショットの読み取りを完了できなかったため、メッセージ結果は不完全です。",
     selectTopicBeforeLoad: "メッセージを読み込む前にトピックを選択してください",
     partitionMustBeNonNegativeInt: "パーティションは 0 以上の整数である必要があります。空欄の場合はすべてのパーティション",
     offsetMustBeNonNegativeInt: "Offset は 0 以上の整数である必要があります。空欄の場合は Earliest",

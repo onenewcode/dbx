@@ -5611,6 +5611,7 @@ export default withEnglishFallback({
     kafkaOffsetHint: "지정한 오프셋부터 선택한 파티션(비워 두면 전체)을 오름차순으로 읽습니다.",
     messagesLoading: "메시지를 불러오는 중...",
     noMessages: "메시지가 없습니다",
+    peekIncomplete: "브로커가 스냅샷 읽기를 완료하지 못해 메시지 결과가 불완전합니다.",
     selectTopicBeforeLoad: "메시지를 불러오기 전에 토픽을 선택하세요",
     partitionMustBeNonNegativeInt: "파티션은 0 이상의 정수여야 하며, 모든 파티션은 비워 두세요",
     offsetMustBeNonNegativeInt: "오프셋은 0 이상의 정수여야 하며, 처음은 비워 두세요",

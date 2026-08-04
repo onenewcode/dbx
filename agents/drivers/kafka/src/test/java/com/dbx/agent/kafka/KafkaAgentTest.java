@@ -14,8 +14,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -409,7 +412,7 @@ class KafkaAgentTest {
     }
 
     @Test
-    void boundsEveryPartitionWindowBeforeTrimmingTheResult() {
+    void boundsThePerPartitionMessageQuotaBeforeTrimmingTheResult() {
         assertEquals(12, KafkaAgent.recentPeekFetchCount(4, 3));
         assertEquals(4, KafkaAgent.peekMessagesPerPartition(10, 3));
     }
@@ -428,9 +431,20 @@ class KafkaAgentTest {
     }
 
     @Test
-    void peekWindowEndsAtTheRequestedPartitionWindow() {
-        assertEquals(15L, KafkaAgent.peekWindowEndOffset(10L, 100L, 5));
-        assertEquals(12L, KafkaAgent.peekWindowEndOffset(10L, 12L, 5));
+    void latestPeekExpandsBackwardAcrossSparseOffsetGaps() {
+        assertEquals(6L, KafkaAgent.recentPeekStartOffset(0L, 11L, 5));
+        assertEquals(0L, KafkaAgent.previousLatestPeekStartOffset(0L, 6L, 5L));
+        assertEquals(12L, KafkaAgent.previousLatestPeekStartOffset(0L, 32L, 10L));
+    }
+
+    @Test
+    void latestPeekRetainsTheNewestRecordsFromAnExpandedRange() {
+        Deque<Long> latestOffsets = new ArrayDeque<>();
+        for (long offset = 86L; offset <= 95L; offset++) {
+            KafkaAgent.retainLatestPeekRecord(latestOffsets, offset, 4);
+        }
+
+        assertEquals(List.of(92L, 93L, 94L, 95L), new ArrayList<>(latestOffsets));
     }
 
     @Test
@@ -462,11 +476,12 @@ class KafkaAgentTest {
     }
 
     @Test
-    void incompletePartitionWindowsAreAlwaysReported() {
-        assertThrows(IllegalStateException.class, () ->
-            KafkaAgent.ensurePeekResultComplete(false)
-        );
-        KafkaAgent.ensurePeekResultComplete(true);
+    void incompletePeekResultsAreExplicitlyMarked() {
+        Map<String, Object> partial = KafkaAgent.peekMessagesResult(List.of(), true);
+        Map<String, Object> complete = KafkaAgent.peekMessagesResult(List.of(), false);
+
+        assertEquals(true, partial.get("incomplete"));
+        assertEquals(false, complete.get("incomplete"));
     }
 
     @Test
@@ -542,6 +557,33 @@ class KafkaAgentTest {
         assertTrue(KafkaAgent.allPeekPartitionsCaughtUp(
             List.of(p0, p1),
             Map.of(p0, 10L, p1, 5L),
+            endOffsets
+        ));
+    }
+
+    @Test
+    void peekCompletionStopsAfterEachPartitionSuppliesItsQuota() {
+        TopicPartition p0 = new TopicPartition("events", 0);
+        TopicPartition p1 = new TopicPartition("events", 1);
+        List<TopicPartition> partitions = List.of(p0, p1);
+        Map<TopicPartition, Long> endOffsets = Map.of(p0, 100L, p1, 100L);
+
+        assertTrue(KafkaAgent.allPeekPartitionsComplete(
+            partitions,
+            Map.of(p0, 0, p1, 0),
+            Map.of(p0, 1L, p1, 1L),
+            endOffsets
+        ));
+        assertFalse(KafkaAgent.allPeekPartitionsComplete(
+            partitions,
+            Map.of(p0, 0, p1, 1),
+            Map.of(p0, 1L, p1, 1L),
+            endOffsets
+        ));
+        assertTrue(KafkaAgent.allPeekPartitionsComplete(
+            partitions,
+            Map.of(p0, 0, p1, 1),
+            Map.of(p0, 1L, p1, 100L),
             endOffsets
         ));
     }
@@ -694,14 +736,14 @@ class KafkaAgentTest {
     }
 
     @Test
-    void peekFailsWhenPollingWouldExceedTheScanLimit() {
+    void peekRetainsRecordsReadBeforeTheScanLimit() {
         TopicPartition partition = new TopicPartition("events", 0);
         ConsumerRecords<String, byte[]> batch = new ConsumerRecords<>(Map.of(partition, List.of(
             new ConsumerRecord<>("events", 0, 9L, "first", "one".getBytes(StandardCharsets.UTF_8)),
             new ConsumerRecord<>("events", 0, 10L, "second", "two".getBytes(StandardCharsets.UTF_8))
         )));
 
-        assertThrows(IllegalStateException.class, () -> KafkaAgent.collectPeekedMessages(
+        List<Map<String, Object>> messages = KafkaAgent.collectPeekedMessages(
             timeout -> batch,
             () -> false,
             record -> true,
@@ -710,23 +752,26 @@ class KafkaAgentTest {
             1,
             System.nanoTime() + Duration.ofSeconds(5).toNanos(),
             Duration.ofMillis(1)
-        ));
+        );
+
+        assertEquals(1, messages.size());
+        assertEquals(9L, messages.get(0).get("offset"));
     }
 
     @Test
-    void peekDropsRecordsPastThePartitionWindowEvenWhenRemainingSlotsExist() {
+    void peekCountsSparseOffsetsAsRecordsInsteadOfOffsetWindowWidth() {
         TopicPartition partition = new TopicPartition("events", 0);
-        // Sparse offsets: window is [0, 5). Offset 10 is past the window and must not fill a slot.
+        // A compacted topic can retain these two records while offsets 1..9 are absent.
         ConsumerRecords<String, byte[]> batch = new ConsumerRecords<>(Map.of(partition, List.of(
-            new ConsumerRecord<>("events", 0, 0L, "in-window", "one".getBytes(StandardCharsets.UTF_8)),
-            new ConsumerRecord<>("events", 0, 10L, "past-window", "two".getBytes(StandardCharsets.UTF_8))
+            new ConsumerRecord<>("events", 0, 0L, "first", "one".getBytes(StandardCharsets.UTF_8)),
+            new ConsumerRecord<>("events", 0, 10L, "second", "two".getBytes(StandardCharsets.UTF_8))
         )));
         AtomicInteger polls = new AtomicInteger();
 
         List<Map<String, Object>> messages = KafkaAgent.collectPeekedMessages(
             timeout -> polls.getAndIncrement() == 0 ? batch : ConsumerRecords.empty(),
             () -> polls.get() > 0,
-            record -> record.offset() < 5L,
+            record -> true,
             List.of(partition),
             5,
             1_000,
@@ -734,12 +779,40 @@ class KafkaAgentTest {
             Duration.ofMillis(1)
         );
 
-        assertEquals(1, messages.size());
+        assertEquals(2, messages.size());
         assertEquals(0L, messages.get(0).get("offset"));
+        assertEquals(10L, messages.get(1).get("offset"));
     }
 
     @Test
-    void incompleteCollectIsRejectedByEnsurePeekResultComplete() {
+    void peekHandlesKafkaHeadersWithNullValues() {
+        TopicPartition partition = new TopicPartition("events", 0);
+        ConsumerRecord<String, byte[]> record = new ConsumerRecord<>(
+            "events", 0, 0L, "key", "value".getBytes(StandardCharsets.UTF_8)
+        );
+        record.headers().add("tombstone", null);
+        ConsumerRecords<String, byte[]> batch = new ConsumerRecords<>(Map.of(partition, List.of(record)));
+        AtomicInteger polls = new AtomicInteger();
+
+        List<Map<String, Object>> messages = KafkaAgent.collectPeekedMessages(
+            timeout -> {
+                polls.incrementAndGet();
+                return batch;
+            },
+            () -> polls.get() > 0,
+            ignored -> true,
+            List.of(partition),
+            1,
+            1_000,
+            System.nanoTime() + Duration.ofSeconds(5).toNanos(),
+            Duration.ofMillis(1)
+        );
+
+        assertEquals("", ((Map<?, ?>) messages.get(0).get("headers")).get("tombstone"));
+    }
+
+    @Test
+    void incompleteCollectCanBeReturnedWithAnExplicitStatus() {
         TopicPartition partition = new TopicPartition("events", 0);
         ConsumerRecords<String, byte[]> batch = new ConsumerRecords<>(Map.of(partition, List.of(
             new ConsumerRecord<>("events", 0, 0L, "only", "one".getBytes(StandardCharsets.UTF_8))
@@ -757,7 +830,8 @@ class KafkaAgentTest {
         );
 
         assertEquals(0, partial.size());
-        assertThrows(IllegalStateException.class, () -> KafkaAgent.ensurePeekResultComplete(false));
+        Map<String, Object> result = KafkaAgent.peekMessagesResult(partial, true);
+        assertEquals(true, result.get("incomplete"));
     }
 
     @Test

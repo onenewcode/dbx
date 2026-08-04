@@ -328,38 +328,11 @@ impl MessageQueueAdmin for KafkaAdmin {
         _sub: &str,
         count: u32,
         options: PeekMessagesOptions,
-    ) -> Result<Vec<PeekedMessage>, String> {
+    ) -> Result<PeekMessagesResult, String> {
         let params = peek_messages_params(&self.config, topic, count, options);
         let result: serde_json::Value = self.call_with_agent_timeout("mq_peek_messages", params).await?;
 
-        let messages = result.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-        Ok(messages
-            .into_iter()
-            .enumerate()
-            .map(|(idx, m)| {
-                let mut properties = HashMap::new();
-                if let Some(partition) = m.get("partition").and_then(|v| v.as_i64()) {
-                    properties.insert("partition".to_string(), partition.to_string());
-                }
-                PeekedMessage {
-                    position: (idx + 1) as u32,
-                    message_id: m.get("offset").and_then(|v| v.as_i64()).map(|v| v.to_string()),
-                    key: m.get("key").and_then(|v| v.as_str()).map(String::from),
-                    publish_time: m.get("timestamp").and_then(|v| v.as_i64()).map(|v| v.to_string()),
-                    event_time: None,
-                    properties,
-                    headers: m
-                        .get("headers")
-                        .and_then(|v| v.as_object())
-                        .map(|obj| {
-                            obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect()
-                        })
-                        .unwrap_or_default(),
-                    payload_base64: m.get("payloadBase64").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
-                    payload_text: m.get("payloadText").and_then(|v| v.as_str()).map(String::from),
-                }
-            })
-            .collect())
+        Ok(peek_messages_result_from_agent(&result))
     }
 
     async fn expire_messages(&self, _topic: &TopicRef, _sub: &str, _expire_seconds: i64) -> Result<(), String> {
@@ -710,6 +683,39 @@ fn peek_messages_params(
     params
 }
 
+fn peek_messages_result_from_agent(result: &serde_json::Value) -> PeekMessagesResult {
+    let incomplete = result.get("incomplete").and_then(|v| v.as_bool()).unwrap_or(false);
+    let messages = result.get("messages").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let messages = messages
+        .into_iter()
+        .enumerate()
+        .map(|(idx, m)| {
+            let mut properties = HashMap::new();
+            if let Some(partition) = m.get("partition").and_then(|v| v.as_i64()) {
+                properties.insert("partition".to_string(), partition.to_string());
+            }
+            PeekedMessage {
+                position: (idx + 1) as u32,
+                message_id: m.get("offset").and_then(|v| v.as_i64()).map(|v| v.to_string()),
+                key: m.get("key").and_then(|v| v.as_str()).map(String::from),
+                publish_time: m.get("timestamp").and_then(|v| v.as_i64()).map(|v| v.to_string()),
+                event_time: None,
+                properties,
+                headers: m
+                    .get("headers")
+                    .and_then(|v| v.as_object())
+                    .map(|obj| {
+                        obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_string())).collect()
+                    })
+                    .unwrap_or_default(),
+                payload_base64: m.get("payloadBase64").and_then(|v| v.as_str()).unwrap_or_default().to_string(),
+                payload_text: m.get("payloadText").and_then(|v| v.as_str()).map(String::from),
+            }
+        })
+        .collect();
+    PeekMessagesResult { messages, incomplete }
+}
+
 fn reset_cursor_params(topic: &TopicRef, sub: &str, pos: ResetPosition) -> Result<serde_json::Value, String> {
     match pos {
         ResetPosition::Earliest => Ok(serde_json::json!({
@@ -835,6 +841,23 @@ mod tests {
         assert!(params.get("startPosition").is_none());
         assert!(params.get("partition").is_none());
         assert!(params.get("offset").is_none());
+    }
+
+    #[test]
+    fn peek_result_preserves_the_agent_incomplete_status() {
+        let result = peek_messages_result_from_agent(&serde_json::json!({
+            "messages": [{
+                "partition": 2,
+                "offset": 17,
+                "payloadBase64": "aGVsbG8=",
+            }],
+            "incomplete": true,
+        }));
+
+        assert!(result.incomplete);
+        assert_eq!(result.messages.len(), 1);
+        assert_eq!(result.messages[0].properties.get("partition").map(String::as_str), Some("2"));
+        assert_eq!(result.messages[0].message_id.as_deref(), Some("17"));
     }
 
     #[test]

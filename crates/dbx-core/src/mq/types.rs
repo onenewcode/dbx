@@ -496,6 +496,23 @@ pub struct PeekedMessage {
     pub payload_text: Option<String>,
 }
 
+/// A message browse response. `incomplete` is set when the adapter could only
+/// return a partial snapshot before its configured deadline or scan limit.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PeekMessagesResult {
+    #[serde(default)]
+    pub messages: Vec<PeekedMessage>,
+    #[serde(default)]
+    pub incomplete: bool,
+}
+
+impl PeekMessagesResult {
+    pub fn complete(messages: Vec<PeekedMessage>) -> Self {
+        Self { messages, incomplete: false }
+    }
+}
+
 /// Kafka's explicit starting position for a non-committing message peek.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -1220,5 +1237,17 @@ mod tests {
         assert_eq!(latest.start_position, Some(super::PeekStartPosition::Latest));
         let json = serde_json::to_value(latest).expect("serialize latest peek options");
         assert_eq!(json.get("startPosition").and_then(|value| value.as_str()), Some("latest"));
+    }
+
+    #[test]
+    fn peek_result_serializes_completion_status_and_accepts_legacy_responses() {
+        let complete = super::PeekMessagesResult::complete(Vec::new());
+        let json = serde_json::to_value(&complete).expect("serialize complete peek result");
+        assert_eq!(json, serde_json::json!({ "messages": [], "incomplete": false }));
+
+        let legacy: super::PeekMessagesResult =
+            serde_json::from_value(serde_json::json!({ "messages": [] })).expect("deserialize legacy peek result");
+        assert!(!legacy.incomplete);
+        assert!(legacy.messages.is_empty());
     }
 }

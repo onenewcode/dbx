@@ -5884,6 +5884,7 @@ export default {
     kafkaOffsetHint: "Reads forward from the specified offset in the chosen partition, or every partition when left empty.",
     messagesLoading: "Loading messages...",
     noMessages: "No messages",
+    peekIncomplete: "The message results are incomplete because the broker did not finish the snapshot.",
     selectTopicBeforeLoad: "Select a topic before loading messages",
     partitionMustBeNonNegativeInt: "Partition must be an integer ≥ 0; leave empty for all partitions",
     offsetMustBeNonNegativeInt: "Offset must be an integer ≥ 0; leave empty for earliest",

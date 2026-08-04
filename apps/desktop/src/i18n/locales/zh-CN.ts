@@ -5884,6 +5884,7 @@ export default withEnglishFallback({
     kafkaOffsetHint: "从指定 Offset 开始正序读取；填写分区时仅读该分区，留空则对全部分区分别读取。",
     messagesLoading: "消息加载中...",
     noMessages: "暂无消息",
+    peekIncomplete: "消息结果不完整：Broker 未能在限制内完成快照读取。",
     selectTopicBeforeLoad: "请先选择主题再加载消息",
     partitionMustBeNonNegativeInt: "分区必须是大于等于 0 的整数；留空表示查询全部分区",
     offsetMustBeNonNegativeInt: "Offset 必须是大于等于 0 的整数；留空表示从各分区最早可读位置开始",
