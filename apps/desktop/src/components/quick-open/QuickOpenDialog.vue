@@ -198,7 +198,6 @@ watch(
 <style scoped>
 :deep([data-slot="dialog-content"]) {
   border-color: color-mix(in srgb, var(--border) 80%, var(--ring));
-  border-radius: 0.75rem;
   box-shadow: 0 24px 70px rgb(0 0 0 / 0.32);
 }
 
@@ -211,7 +210,6 @@ watch(
 :deep(.dark .bg-yellow-800) {
   background-color: var(--warning-bg) !important;
   border-radius: 0.1875rem;
-  color: var(--warning) !important;
   padding: 0 0.0625rem;
 }
 </style>
