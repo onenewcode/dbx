@@ -199,23 +199,6 @@ async function flushUi() {
   }
 }
 
-async function openFilterBuilder(expectedMode: string) {
-  const trigger = root?.querySelector<HTMLButtonElement>('[data-testid="data-grid"] button') ?? null;
-  expect(trigger).not.toBeNull();
-  trigger!.click();
-  await vi.waitFor(() => {
-    expect(document.body.querySelector(`[data-testid="select"][data-model-value="${expectedMode}"]`)).not.toBeNull();
-  });
-}
-
-async function documentFilterValueInput() {
-  return vi.waitFor(() => {
-    const input = document.body.querySelector<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]');
-    expect(input).not.toBeNull();
-    return input!;
-  });
-}
-
 function buttonWithTitle(title: string): HTMLButtonElement {
   const button = document.body.querySelector<HTMLElement>(`[title="${title}"]`)?.closest<HTMLButtonElement>("button") ?? null;
   expect(button).not.toBeNull();
@@ -335,7 +318,8 @@ describe("DocumentBrowser Elasticsearch field search", () => {
   });
 
   it("searches, selects, updates the query type, and clears the search when closed", async () => {
-    await openFilterBuilder("match");
+    root!.querySelector<HTMLButtonElement>('[data-testid="data-grid"] button')!.click();
+    await flushUi();
 
     const initialFieldTrigger = buttonWithTitle("buyers.email (text)");
     expect(document.body.querySelector('[data-testid="select"][data-model-value="match"]')).not.toBeNull();
@@ -366,7 +350,8 @@ describe("DocumentBrowser Elasticsearch field search", () => {
   });
 
   it("clears each rule search independently when its field popover closes", async () => {
-    await openFilterBuilder("match");
+    root!.querySelector<HTMLButtonElement>('[data-testid="data-grid"] button')!.click();
+    await flushUi();
     buttonWithText("grid.filterBuilderAddRule").click();
     await flushUi();
 
@@ -442,7 +427,9 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     app.mount(root!);
     await flushUi();
 
-    await openFilterBuilder("auto");
+    root!.querySelector<HTMLButtonElement>('[data-testid="data-grid"] button')!.click();
+    await flushUi();
+    expect(document.body.querySelector('[data-testid="select"][data-model-value="auto"]')).not.toBeNull();
 
     const clearButton = buttonWithText("grid.clearFilter");
     const addButton = buttonWithText("grid.filterBuilderAddRule");
@@ -458,9 +445,10 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     expect(removeButton?.className).toContain("h-7");
     expect(removeButton?.className).toContain("w-7");
 
-    const valueInput = await documentFilterValueInput();
-    valueInput.value = "1";
-    valueInput.dispatchEvent(new Event("input", { bubbles: true }));
+    const valueInput = document.body.querySelector<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]');
+    expect(valueInput).not.toBeNull();
+    valueInput!.value = "1";
+    valueInput!.dispatchEvent(new Event("input", { bubbles: true }));
     await flushUi();
     buttonWithText("grid.applyFilter").click();
     await flushUi();
@@ -512,15 +500,17 @@ describe("DocumentBrowser MongoDB filter value types", () => {
     app.mount(root!);
     await flushUi();
 
-    await openFilterBuilder("auto");
-    const valueInput = await documentFilterValueInput();
+    root!.querySelector<HTMLButtonElement>('[data-testid="data-grid"] button')!.click();
+    await flushUi();
+    const valueInput = document.body.querySelector<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]')!;
     const callsBeforeEnter = backend.documentFindDocuments.mock.calls.length;
     valueInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }));
     await flushUi();
     expect(backend.documentFindDocuments.mock.calls.length).toBeGreaterThan(callsBeforeEnter);
 
-    await openFilterBuilder("auto");
-    const reopenedValueInput = await documentFilterValueInput();
+    root!.querySelector<HTMLButtonElement>('[data-testid="data-grid"] button')!.click();
+    await flushUi();
+    const reopenedValueInput = document.body.querySelector<HTMLInputElement>('input[placeholder="grid.filterBuilderValue"]')!;
     reopenedValueInput.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, bubbles: true, cancelable: true }));
     await flushUi();
     expect(document.body.querySelectorAll('input[placeholder="grid.filterBuilderValue"]')).toHaveLength(2);

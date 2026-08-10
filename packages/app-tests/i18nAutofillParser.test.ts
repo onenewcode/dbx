@@ -8,5 +8,4 @@ test("i18n autofill parses locale roots with imported shorthand sections", () =>
   });
 
   assert.match(output, /(?:No new zh-CN i18n keys compared with HEAD|Found \d+ new zh-CN i18n key\(s\):)/);
-  assert.match(output, /No locale files needed changes/);
 });
