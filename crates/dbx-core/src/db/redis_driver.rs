@@ -5075,7 +5075,7 @@ mod tests {
 
     #[test]
     fn rejects_empty_command_text() {
-        for command_text in ["   ", r#"""#] {
+        for command_text in ["   ", "\"\""] {
             assert_eq!(parse_command_argv(command_text).unwrap_err(), "Redis command is empty");
         }
     }
