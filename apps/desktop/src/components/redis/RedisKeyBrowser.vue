@@ -42,6 +42,8 @@ import {
 import { classifyRedisCommandSafety } from "@/lib/redis/redisCommandSafety";
 import { isRedisMutatingCommand } from "@/lib/redis/redisCommandTable";
 import { isRedisClearScreenCommand, nextRedisCommandDb, redisKeyTextToRaw } from "@/lib/redis/redisCommandSession";
+import { buildRedisCompletionItemsFromContext, getRedisCompletionContext, takesKeyArgument, type RedisCompletionItem } from "@/lib/redis/redisCompletion";
+import type { RedisCommandDocumentation } from "@/lib/redis/redisCommandDocs";
 import { formatRedisConsoleValue, redisValuePreview, redisValueSize } from "@/lib/redis/redisValuePresentation";
 import { isCancelSearchShortcut } from "@/lib/editor/keyboardShortcuts";
 import { copyToClipboard } from "@/lib/common/clipboard";
@@ -118,6 +120,14 @@ const commandRunning = ref(false);
 const commandDb = ref(props.db);
 const commandHistory = ref<RedisCommandHistoryEntry[]>([]);
 const commandHistoryIndex = ref(-1);
+const commandCompletionItems = ref<RedisCompletionItem[]>([]);
+const commandCompletionSelectedIndex = ref(0);
+const commandCompletionLoading = ref(false);
+const commandCompletionListboxId = `redis-command-completions-${uuid()}`;
+const commandCompletionSelectedItem = computed(() => commandCompletionItems.value[commandCompletionSelectedIndex.value]);
+const commandCompletionActiveDescendant = computed(() => (commandCompletionSelectedItem.value ? `${commandCompletionListboxId}-option-${commandCompletionSelectedIndex.value}` : undefined));
+const commandCompletionOpen = computed(() => commandCompletionLoading.value || commandCompletionItems.value.length > 0);
+const commandDocumentation = shallowRef<RedisCommandDocumentation[]>([]);
 const activeSidePanel = ref<RedisSidePanel>("detail");
 const showCreateKeyDialog = ref(false);
 const creatingKey = ref(false);
@@ -151,6 +161,11 @@ let redisDbFlushedListenerRegistered = false;
 let redisInfiniteScrollFrame = 0;
 const loadedKeyRaws = new Set<string>();
 let treeIndex: RedisKeyTreeIndex | null = null;
+const REDIS_COMMAND_COMPLETION_MENU_LIMIT = 12;
+let commandCompletionRequestId = 0;
+let commandDocumentationConnectionId: string | null = null;
+let commandDocumentationRequestId = 0;
+let commandDocumentationLoading = false;
 
 const valueQuery = computed(() => searchPattern.value.trim());
 const isValueSearchMode = computed(() => searchMode.value === "value" || searchMode.value === "all");
@@ -908,6 +923,7 @@ async function openCommandPanel() {
   activeSidePanel.value = "command";
   await nextTick();
   getCommandInput()?.focus();
+  requestCommandDocumentation();
 }
 
 function makeEntry(): CreateKeyEntry {
@@ -1208,6 +1224,7 @@ async function createRedisKey() {
 
 async function executeCommand() {
   const command = commandText.value.trim();
+  dismissCommandCompletions();
   if (!command) {
     // 空命令显示提示但不记入历史
     appendCommandOutput({
@@ -1344,6 +1361,136 @@ function getCommandInput(): HTMLInputElement | null {
   return rootRef.value?.querySelector<HTMLInputElement>("[data-redis-command-input]") ?? null;
 }
 
+function resetCommandDocumentation() {
+  commandDocumentationRequestId++;
+  commandDocumentationConnectionId = null;
+  commandDocumentationLoading = false;
+  commandDocumentation.value = [];
+}
+
+function requestCommandDocumentation() {
+  if (commandDocumentationLoading || commandDocumentationConnectionId === props.connectionId) return;
+  const requestId = ++commandDocumentationRequestId;
+  const connectionId = props.connectionId;
+  const database = String(commandDb.value);
+  commandDocumentationLoading = true;
+  void connectionStore
+    .listRedisCompletionCommandDocs(connectionId, database)
+    .then((docs) => {
+      if (requestId !== commandDocumentationRequestId || connectionId !== props.connectionId) return;
+      commandDocumentation.value = docs;
+      commandDocumentationConnectionId = connectionId;
+      if (commandText.value) void refreshCommandCompletions();
+    })
+    .catch(() => {
+      if (requestId !== commandDocumentationRequestId || connectionId !== props.connectionId) return;
+      // Older Redis versions or restricted ACLs can reject COMMAND DOCS; use the offline table.
+      commandDocumentation.value = [];
+      commandDocumentationConnectionId = connectionId;
+    })
+    .finally(() => {
+      if (requestId === commandDocumentationRequestId) commandDocumentationLoading = false;
+    });
+}
+
+function dismissCommandCompletions() {
+  commandCompletionRequestId++;
+  commandCompletionItems.value = [];
+  commandCompletionSelectedIndex.value = 0;
+  commandCompletionLoading.value = false;
+}
+
+async function refreshCommandCompletions(options: { force?: boolean } = {}) {
+  const input = getCommandInput();
+  const text = commandText.value;
+  if (!options.force && !text) {
+    dismissCommandCompletions();
+    return;
+  }
+
+  const cursor = input?.selectionStart ?? text.length;
+  requestCommandDocumentation();
+  const completionInput = { commands: commandDocumentation.value };
+  const context = getRedisCompletionContext(text, cursor, completionInput);
+  const requestId = ++commandCompletionRequestId;
+  commandCompletionItems.value = [];
+  commandCompletionSelectedIndex.value = 0;
+
+  let keys: string[] = [];
+  const needsKeys = context.mode === "argument" && takesKeyArgument(context.commandName ?? context.mainCommand, completionInput);
+  commandCompletionLoading.value = needsKeys;
+  if (needsKeys) {
+    try {
+      keys = await connectionStore.listRedisCompletionKeys(props.connectionId, String(commandDb.value));
+    } catch {
+      keys = [];
+    }
+  }
+
+  if (requestId !== commandCompletionRequestId) return;
+  commandCompletionItems.value = buildRedisCompletionItemsFromContext(context, { keys, ...completionInput }).slice(0, REDIS_COMMAND_COMPLETION_MENU_LIMIT);
+  commandCompletionLoading.value = false;
+}
+
+function onCommandInput() {
+  void refreshCommandCompletions();
+}
+
+function onCommandInputClick() {
+  void refreshCommandCompletions();
+}
+
+function selectCommandCompletion(index: number) {
+  if (index >= 0 && index < commandCompletionItems.value.length) commandCompletionSelectedIndex.value = index;
+}
+
+function moveCommandCompletionSelection(direction: 1 | -1): boolean {
+  const count = commandCompletionItems.value.length;
+  if (count === 0) return false;
+  selectCommandCompletion((commandCompletionSelectedIndex.value + direction + count) % count);
+  return true;
+}
+
+function commandCompletionInsertion(index = commandCompletionSelectedIndex.value) {
+  const item = commandCompletionItems.value[index];
+  const input = getCommandInput();
+  if (!item || !input) return null;
+
+  const text = commandText.value;
+  const context = getRedisCompletionContext(text, input.selectionStart ?? text.length, { commands: commandDocumentation.value });
+  const from = context.from;
+  const to = input.selectionEnd ?? text.length;
+  const insert = item.apply ?? item.label;
+  const commandHead = context.mode === "command" || context.mode === "subcommand";
+  const appendSpace = commandHead && !/^\s/.test(text.slice(to));
+  return { text, from, to, insert, replacement: `${insert}${appendSpace ? " " : ""}`, appendSpace, commandHead };
+}
+
+function selectedCompletionMatchesInput(): boolean {
+  const completion = commandCompletionInsertion();
+  if (!completion) return false;
+  const current = completion.text.slice(completion.from, completion.to);
+  return completion.commandHead ? current.toUpperCase() === completion.insert.toUpperCase() : current === completion.insert;
+}
+
+function acceptCommandCompletion(index = commandCompletionSelectedIndex.value): boolean {
+  const completion = commandCompletionInsertion(index);
+  if (!completion) return false;
+
+  commandText.value = `${completion.text.slice(0, completion.from)}${completion.replacement}${completion.text.slice(completion.to)}`;
+  dismissCommandCompletions();
+
+  void nextTick(() => {
+    const nextInput = getCommandInput();
+    if (!nextInput) return;
+    const cursor = completion.from + completion.replacement.length;
+    nextInput.focus();
+    nextInput.setSelectionRange(cursor, cursor);
+    if (completion.appendSpace) void refreshCommandCompletions({ force: true });
+  });
+  return true;
+}
+
 function focusSearch(): boolean {
   if (activeSidePanel.value === "detail" && valueViewerRef.value?.focusSearch()) {
     return true;
@@ -1424,6 +1571,33 @@ function onCommandAreaClick() {
 }
 
 function onCommandInputKeydown(event: KeyboardEvent) {
+  if ((event.ctrlKey || event.metaKey) && event.code === "Space") {
+    event.preventDefault();
+    void refreshCommandCompletions({ force: true });
+    return;
+  }
+  if (event.key === "Tab" && !event.shiftKey && acceptCommandCompletion()) {
+    event.preventDefault();
+    return;
+  }
+  if (event.key === "Escape" && commandCompletionOpen.value) {
+    event.preventDefault();
+    dismissCommandCompletions();
+    return;
+  }
+  if (event.key === "ArrowUp" && moveCommandCompletionSelection(-1)) {
+    event.preventDefault();
+    return;
+  }
+  if (event.key === "ArrowDown" && moveCommandCompletionSelection(1)) {
+    event.preventDefault();
+    return;
+  }
+  if (event.key === "Enter" && !selectedCompletionMatchesInput() && acceptCommandCompletion()) {
+    event.preventDefault();
+    return;
+  }
+
   // 上下键切换历史命令
   if (event.key === "ArrowUp") {
     event.preventDefault();
@@ -1437,6 +1611,7 @@ function onCommandInputKeydown(event: KeyboardEvent) {
       commandHistoryIndex.value--;
     }
     commandText.value = commandHistory.value[commandHistoryIndex.value].command;
+    dismissCommandCompletions();
   } else if (event.key === "ArrowDown") {
     event.preventDefault();
     if (commandHistoryIndex.value === -1) return;
@@ -1450,9 +1625,10 @@ function onCommandInputKeydown(event: KeyboardEvent) {
       commandHistoryIndex.value = -1;
       commandText.value = "";
     }
+    dismissCommandCompletions();
   } else if (event.key === "Enter") {
     event.preventDefault();
-    executeCommand();
+    void executeCommand();
   }
 }
 
@@ -1498,6 +1674,7 @@ watch(
     // ContentArea remounts this browser for scope changes; keep embedded uses
     // in sync as well so an old scan cannot populate the new scope.
     commandDb.value = db;
+    resetCommandDocumentation();
     resetLoadedKeys();
     try {
       await connectionStore.ensureConnected(connectionId);
@@ -1736,17 +1913,53 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
 
                 <form class="flex shrink-0 items-center gap-2 border-t border-white/10 bg-[#171b21] px-4 py-2" @submit.prevent="executeCommand">
                   <span class="shrink-0 text-[#d7ba7d]">{{ commandPrompt }}</span>
-                  <input
-                    v-model="commandText"
-                    data-redis-command-input
-                    class="dbx-editor-font-family min-w-0 flex-1 border-0 bg-transparent p-0 text-[13px] text-slate-200 caret-[#d7ba7d] outline-none placeholder:text-slate-500"
-                    :class="{ 'opacity-50': commandRunning }"
-                    :readonly="commandRunning"
-                    autocomplete="off"
-                    autocapitalize="off"
-                    spellcheck="false"
-                    @keydown="onCommandInputKeydown"
-                  />
+                  <div class="relative min-w-0 flex-1">
+                    <div v-if="commandCompletionOpen" class="absolute bottom-[calc(100%+0.5rem)] left-0 z-20 w-full overflow-hidden rounded-md border border-white/15 bg-[#20262f] py-1 shadow-xl">
+                      <div v-if="commandCompletionLoading" class="flex items-center justify-center px-3 py-2 text-slate-400">
+                        <Loader2 class="h-3.5 w-3.5 animate-spin" />
+                      </div>
+                      <div v-else :id="commandCompletionListboxId" role="listbox" aria-label="Redis command completions" class="max-h-60 overflow-y-auto">
+                        <button
+                          v-for="(item, index) in commandCompletionItems"
+                          :id="`${commandCompletionListboxId}-option-${index}`"
+                          :key="`${item.type}:${item.label}:${index}`"
+                          type="button"
+                          role="option"
+                          class="flex w-full items-center gap-3 px-3 py-1.5 text-left text-xs transition-colors"
+                          :class="commandCompletionSelectedIndex === index ? 'bg-[#2b3440] text-white' : 'text-slate-200 hover:text-white'"
+                          :aria-selected="commandCompletionSelectedIndex === index"
+                          :aria-description="item.info"
+                          @pointerenter="selectCommandCompletion(index)"
+                          @mousedown.prevent
+                          @click.stop="acceptCommandCompletion(index)"
+                        >
+                          <span class="min-w-0 flex-1">
+                            <span class="block truncate font-mono">{{ item.label }}</span>
+                            <span v-if="item.summary" class="block truncate text-[11px] text-slate-400">{{ item.summary }}</span>
+                          </span>
+                          <span v-if="item.detail" class="shrink-0 text-slate-400">{{ item.detail }}</span>
+                        </button>
+                      </div>
+                    </div>
+                    <input
+                      v-model="commandText"
+                      data-redis-command-input
+                      class="dbx-editor-font-family min-w-0 w-full border-0 bg-transparent p-0 text-[13px] text-slate-200 caret-[#d7ba7d] outline-none placeholder:text-slate-500"
+                      :class="{ 'opacity-50': commandRunning }"
+                      :readonly="commandRunning"
+                      autocomplete="off"
+                      autocapitalize="off"
+                      spellcheck="false"
+                      aria-autocomplete="list"
+                      aria-haspopup="listbox"
+                      :aria-controls="commandCompletionOpen ? commandCompletionListboxId : undefined"
+                      :aria-activedescendant="commandCompletionOpen ? commandCompletionActiveDescendant : undefined"
+                      :aria-expanded="commandCompletionOpen"
+                      @click.stop="onCommandInputClick"
+                      @input="onCommandInput"
+                      @keydown="onCommandInputKeydown"
+                    />
+                  </div>
                   <Loader2 v-if="commandRunning" class="h-3.5 w-3.5 shrink-0 animate-spin text-slate-500" />
                 </form>
               </div>

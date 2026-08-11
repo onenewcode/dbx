@@ -36,6 +36,17 @@ function mysqlConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function redisConnection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "redis-1",
+    name: "Redis",
+    db_type: "redis",
+    port: 6379,
+    database: "0",
+  } as ConnectionConfig;
+}
+
 function oracleConnection(): ConnectionConfig {
   return {
     ...postgresConnection(),
@@ -151,6 +162,37 @@ describe("connectionStore completion assistant", () => {
     expect(store.connectedIds.has("pg-1")).toBe(true);
     expect(store.activeConnectionId).toBe("already-active");
     expect(tables).toEqual([{ name: "users", schema: "public", type: "table" }]);
+  });
+
+  it("falls back to the server COMMAND catalog when COMMAND DOCS is unsupported", async () => {
+    const redisExecuteCommand = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("unknown subcommand 'DOCS'"))
+      .mockResolvedValueOnce({
+        command: "COMMAND",
+        safety: "allowed",
+        value: [["get", 2, ["readonly"], 1, 1, 1, ["@read"], [], [], []]],
+      });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      redisExecuteCommand,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [redisConnection()];
+    store.connectedIds.add("redis-1");
+
+    const docs = await store.listRedisCompletionCommandDocs("redis-1", "0");
+    const cached = await store.listRedisCompletionCommandDocs("redis-1", "0");
+
+    expect(redisExecuteCommand).toHaveBeenNthCalledWith(1, "redis-1", 0, "COMMAND DOCS");
+    expect(redisExecuteCommand).toHaveBeenNthCalledWith(2, "redis-1", 0, "COMMAND");
+    expect(redisExecuteCommand).toHaveBeenCalledTimes(2);
+    expect(docs).toEqual([{ name: "GET", summary: undefined, since: undefined, group: undefined, arity: 2, firstArgumentIsKey: true }]);
+    expect(cached).toEqual(docs);
   });
 
   it("preserves TDengine stable type in completion metadata", async () => {

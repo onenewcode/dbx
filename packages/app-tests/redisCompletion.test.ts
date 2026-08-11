@@ -64,6 +64,10 @@ test("OBJECT completion uses Redis space-delimited subcommands", () => {
   assert.ok(!subcommands.some((name) => name.includes("_")));
 });
 
+test("unknown subcommands do not get the command family's key suggestions", () => {
+  assert.deepEqual(buildRedisCompletionItems("OBJECT UNKNOWN ", 15, { keys: ["user:1"] }), []);
+});
+
 test("argument mode: offers key names for key-taking commands", () => {
   const items = buildRedisCompletionItems("GET ", 4, { keys: ["user:1", "user:2", "config:db"] });
   const names = labels(items);
@@ -134,6 +138,22 @@ test("context parsing: GET + space → argument mode", () => {
   const ctx = getRedisCompletionContext("GET ", 4);
   assert.equal(ctx.mode, "argument");
   assert.equal(ctx.mainCommand, "GET");
+});
+
+test("server command docs add command families, summaries, and key completion", () => {
+  const commands = [
+    { name: "ACL", group: "server", arity: -2, summary: "A container for Access List Control commands." },
+    { name: "ACL CAT", group: "server", arity: -2, summary: "Lists ACL categories." },
+    { name: "VGET", group: "string", arity: 2, summary: "Reads a vendor key.", firstArgumentIsKey: true },
+  ];
+
+  assert.ok(labels(buildRedisCompletionItems("AC", 2, { commands })).includes("ACL"));
+  assert.ok(!labels(buildRedisCompletionItems("GE", 2, { commands })).includes("GET"));
+  const subcommandContext = getRedisCompletionContext("ACL ", 4, { commands });
+  assert.equal(subcommandContext.mode, "subcommand");
+  const cat = buildRedisCompletionItems("ACL C", 5, { commands }).find((item) => item.label === "CAT");
+  assert.equal(cat?.summary, "Lists ACL categories.");
+  assert.ok(labels(buildRedisCompletionItems("VGET ", 5, { commands, keys: ["session:1"] })).includes("session:1"));
 });
 
 test("shouldAutoOpenRedisCompletion opens on word/space chars, not newline", () => {
