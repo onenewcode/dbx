@@ -710,9 +710,12 @@ describe("RedisKeyBrowser command completion", () => {
     expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([options[1]]);
     expect(input.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
 
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(options[2]!, "scrollIntoView", { value: scrollIntoView, configurable: true });
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
     await settle();
     expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([options[2]]);
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
   });
 
   it("accepts the selected completion before executing on Enter", async () => {

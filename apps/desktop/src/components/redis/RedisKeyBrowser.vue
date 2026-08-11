@@ -1441,7 +1441,11 @@ function onCommandInputClick() {
 }
 
 function selectCommandCompletion(index: number) {
-  if (index >= 0 && index < commandCompletionItems.value.length) commandCompletionSelectedIndex.value = index;
+  if (index < 0 || index >= commandCompletionItems.value.length) return;
+  commandCompletionSelectedIndex.value = index;
+  void nextTick(() => {
+    document.getElementById(`${commandCompletionListboxId}-option-${index}`)?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+  });
 }
 
 function moveCommandCompletionSelection(direction: 1 | -1): boolean {
