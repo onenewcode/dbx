@@ -7,7 +7,7 @@
  * server's `COMMAND DOCS` (or legacy `COMMAND`) response. Safety enforcement
  * remains in the command execution path and is not inferred for completion.
  */
-import type { RedisCommandDocumentation, RedisCommandKeySpec } from "@/lib/redis/redisCommandDocs";
+import type { RedisCommandArgument, RedisCommandDocumentation, RedisCommandKeySpec } from "@/lib/redis/redisCommandDocs";
 import { tokenizeRedisLine } from "@/lib/redis/redisCommandTokenizer";
 
 export interface RedisCompletionItem {
@@ -18,6 +18,7 @@ export interface RedisCompletionItem {
   summary?: string;
   since?: string;
   apply?: string;
+  appendSpace?: boolean;
   boost: number;
 }
 
@@ -51,6 +52,7 @@ interface CompletionCommandEntry {
   summary?: string;
   since?: string;
   keySpecs: readonly RedisCommandKeySpec[];
+  arguments: readonly RedisCommandArgument[];
 }
 
 interface CompletionIndex {
@@ -91,6 +93,7 @@ function createCompletionIndex(commandDocs: readonly RedisCommandDocumentation[]
       summary: doc.summary,
       since: doc.since,
       keySpecs: doc.keySpecs,
+      arguments: doc.arguments ?? [],
     });
   }
 
@@ -261,6 +264,133 @@ function keyItems(prefix: string, keys: string[]): RedisCompletionItem[] {
     }));
 }
 
+interface ArgumentTransition {
+  to: number;
+  token?: string;
+  argument?: RedisCommandArgument;
+}
+
+interface ArgumentGrammar {
+  start: number;
+  transitions: Map<number, ArgumentTransition[]>;
+}
+
+const argumentGrammars = new WeakMap<ReadonlyArray<RedisCommandArgument>, ArgumentGrammar>();
+
+function argumentGrammar(arguments_: readonly RedisCommandArgument[]): ArgumentGrammar {
+  const cached = argumentGrammars.get(arguments_);
+  if (cached) return cached;
+  const transitions = new Map<number, ArgumentTransition[]>();
+  let nextState = 0;
+  const state = () => nextState++;
+  const add = (from: number, transition: ArgumentTransition) => transitions.set(from, [...(transitions.get(from) ?? []), transition]);
+  const epsilon = (from: number, to: number) => add(from, { to });
+
+  const compileSequence = (arguments_: readonly RedisCommandArgument[], start: number, end: number) => {
+    let from = start;
+    arguments_.forEach((argument, index) => {
+      const to = index === arguments_.length - 1 ? end : state();
+      compileArgument(argument, from, to);
+      from = to;
+    });
+    if (arguments_.length === 0) epsilon(start, end);
+  };
+  const compileContent = (argument: RedisCommandArgument, start: number, end: number) => {
+    if (argument.type === "pure-token") {
+      epsilon(start, end);
+    } else if (argument.type === "block") {
+      compileSequence(argument.arguments ?? [], start, end);
+    } else if (argument.type === "oneof") {
+      for (const child of argument.arguments ?? []) compileArgument(child, start, end);
+    } else if (argument.enum?.length) {
+      for (const value of argument.enum) add(start, { to: end, token: value.toUpperCase(), argument });
+    } else {
+      add(start, { to: end, argument });
+    }
+  };
+  const compileCore = (argument: RedisCommandArgument, start: number, end: number) => {
+    if (!argument.token) return compileContent(argument, start, end);
+    const contentStart = state();
+    add(start, { to: contentStart, token: argument.token.toUpperCase(), argument });
+    compileContent(argument, contentStart, end);
+  };
+  function compileArgument(argument: RedisCommandArgument, start: number, end: number) {
+    if (argument.optional) epsilon(start, end);
+    if (!argument.multiple) {
+      compileCore(argument, start, end);
+      return;
+    }
+    if (argument.token && !argument.multipleToken && argument.type !== "pure-token") {
+      const contentStart = state();
+      const repeated = state();
+      add(start, { to: contentStart, token: argument.token.toUpperCase(), argument });
+      compileContent(argument, contentStart, repeated);
+      epsilon(repeated, end);
+      epsilon(repeated, contentStart);
+      return;
+    }
+    const repeated = state();
+    compileCore(argument, start, repeated);
+    epsilon(repeated, end);
+    epsilon(repeated, start);
+  }
+
+  const start = state();
+  const end = state();
+  compileSequence(arguments_, start, end);
+  const grammar = { start, transitions };
+  argumentGrammars.set(arguments_, grammar);
+  return grammar;
+}
+
+function argumentTokenItems(entry: CompletionCommandEntry, values: readonly string[], prefix: string): RedisCompletionItem[] {
+  if (entry.arguments.length === 0) return [];
+  const { start, transitions } = argumentGrammar(entry.arguments);
+  const closure = (states: ReadonlySet<number>) => {
+    const result = new Set(states);
+    const pending = [...states];
+    while (pending.length) {
+      for (const transition of transitions.get(pending.pop()!) ?? []) {
+        if (transition.token || transition.argument || result.has(transition.to)) continue;
+        result.add(transition.to);
+        pending.push(transition.to);
+      }
+    }
+    return result;
+  };
+
+  let active = closure(new Set([start]));
+  for (const value of values) {
+    const next = new Set<number>();
+    for (const current of active) {
+      for (const transition of transitions.get(current) ?? []) {
+        if (transition.token ? transition.token === value.toUpperCase() : transition.argument) next.add(transition.to);
+      }
+    }
+    active = closure(next);
+    if (active.size === 0) return [];
+  }
+
+  const items = new Map<string, RedisCompletionItem>();
+  for (const current of active) {
+    for (const transition of transitions.get(current) ?? []) {
+      if (!transition.token || !matchesPrefix(transition.token, prefix)) continue;
+      const argument = transition.argument;
+      const info = [argument?.summary, entry.summary, argument?.since ? `Since: ${argument.since}` : undefined].filter(Boolean).join("\n");
+      items.set(transition.token, {
+        label: transition.token,
+        type: "keyword",
+        detail: [argument?.name, argument?.type].filter(Boolean).join(" · "),
+        info: info || undefined,
+        apply: transition.token,
+        appendSpace: true,
+        boost: 80,
+      });
+    }
+  }
+  return [...items.values()];
+}
+
 export function buildRedisCompletionItemsFromContext(context: RedisCompletionContext, input: RedisCompletionInput): RedisCompletionItem[] {
   const index = completionIndex(input);
   if (context.mode === "command") return commandItems(index, context.prefix);
@@ -269,6 +399,10 @@ export function buildRedisCompletionItemsFromContext(context: RedisCompletionCon
   }
   if (context.mode === "argument" && takesKeyArgument(context.commandName, input, context.argumentIndex, context.argumentValues)) {
     return keyItems(context.prefix, input.keys ?? []);
+  }
+  if (context.mode === "argument" && context.commandName) {
+    const entry = index.commands.get(context.commandName);
+    if (entry) return argumentTokenItems(entry, context.argumentValues ?? [], context.prefix);
   }
   return [];
 }

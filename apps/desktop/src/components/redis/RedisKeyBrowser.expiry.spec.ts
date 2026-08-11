@@ -710,12 +710,53 @@ describe("RedisKeyBrowser command completion", () => {
     expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([options[1]]);
     expect(input.getAttribute("aria-activedescendant")).toBe(options[1]!.id);
 
-    const scrollIntoView = vi.fn();
-    Object.defineProperty(options[2]!, "scrollIntoView", { value: scrollIntoView, configurable: true });
+    listbox.scrollTop = 20;
+    vi.spyOn(listbox, "getBoundingClientRect").mockReturnValue({ top: 100, bottom: 200 } as DOMRect);
+    vi.spyOn(options[2]!, "getBoundingClientRect").mockReturnValue({ top: 180, bottom: 224 } as DOMRect);
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
     await settle();
     expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([options[2]]);
-    expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest", inline: "nearest" });
+    expect(listbox.scrollTop).toBe(44);
+
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+    await settle();
+    expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([options[2]]);
+
+    vi.spyOn(options[1]!, "getBoundingClientRect").mockReturnValue({ top: 76, bottom: 120 } as DOMRect);
+    vi.spyOn(options[0]!, "getBoundingClientRect").mockReturnValue({ top: 100, bottom: 144 } as DOMRect);
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    await settle();
+    expect(options.filter((option) => option.getAttribute("aria-selected") === "true")).toEqual([options[0]]);
+    expect(listbox.scrollTop).toBe(20);
+  });
+
+  it("accepts a documented argument keyword and advances to its value", async () => {
+    mocks.listRedisCompletionCommandDocs.mockResolvedValueOnce([
+      ...completionCommands,
+      {
+        name: "XREAD",
+        group: "stream",
+        arity: -4,
+        keySpecs: [],
+        arguments: [
+          { name: "count", token: "COUNT", type: "integer", optional: true },
+          { name: "streams", token: "STREAMS", type: "block", arguments: [{ name: "key", type: "key", multiple: true }] },
+        ],
+      },
+    ]);
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("XREAD C");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    await settle();
+
+    expect(input.value).toBe("XREAD COUNT ");
+    expect(commandCompletionLabels()).toEqual([]);
   });
 
   it("accepts the selected completion before executing on Enter", async () => {

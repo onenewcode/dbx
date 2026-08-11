@@ -1444,14 +1444,21 @@ function selectCommandCompletion(index: number) {
   if (index < 0 || index >= commandCompletionItems.value.length) return;
   commandCompletionSelectedIndex.value = index;
   void nextTick(() => {
-    document.getElementById(`${commandCompletionListboxId}-option-${index}`)?.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    const listbox = document.getElementById(commandCompletionListboxId);
+    const option = document.getElementById(`${commandCompletionListboxId}-option-${index}`);
+    if (!listbox || !option) return;
+    const listboxRect = listbox.getBoundingClientRect();
+    const optionRect = option.getBoundingClientRect();
+    if (optionRect.top < listboxRect.top) listbox.scrollTop -= listboxRect.top - optionRect.top;
+    else if (optionRect.bottom > listboxRect.bottom) listbox.scrollTop += optionRect.bottom - listboxRect.bottom;
   });
 }
 
 function moveCommandCompletionSelection(direction: 1 | -1): boolean {
   const count = commandCompletionItems.value.length;
   if (count === 0) return false;
-  selectCommandCompletion((commandCompletionSelectedIndex.value + direction + count) % count);
+  const nextIndex = Math.min(Math.max(commandCompletionSelectedIndex.value + direction, 0), count - 1);
+  if (nextIndex !== commandCompletionSelectedIndex.value) selectCommandCompletion(nextIndex);
   return true;
 }
 
@@ -1466,7 +1473,7 @@ function commandCompletionInsertion(index = commandCompletionSelectedIndex.value
   const to = input.selectionEnd ?? text.length;
   const insert = item.apply ?? item.label;
   const commandHead = context.mode === "command" || context.mode === "subcommand";
-  const appendSpace = commandHead && !/^\s/.test(text.slice(to));
+  const appendSpace = (commandHead || item.appendSpace === true) && !/^\s/.test(text.slice(to));
   return { text, from, to, insert, replacement: `${insert}${appendSpace ? " " : ""}`, appendSpace, commandHead };
 }
 

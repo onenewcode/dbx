@@ -9,6 +9,21 @@ export interface RedisCommandDocumentation {
   group?: string;
   arity?: number;
   keySpecs: RedisCommandKeySpec[];
+  arguments?: RedisCommandArgument[];
+}
+
+/** The recursive command grammar Redis publishes through `COMMAND DOCS`. */
+export interface RedisCommandArgument {
+  name: string;
+  token?: string;
+  type?: string;
+  summary?: string;
+  since?: string;
+  optional?: boolean;
+  multiple?: boolean;
+  multipleToken?: boolean;
+  enum?: string[];
+  arguments?: RedisCommandArgument[];
 }
 
 /** The key-position information Redis publishes through `COMMAND DOCS`. */
@@ -61,9 +76,41 @@ function optionalNumber(value: unknown): number | undefined {
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
+function enabledFlag(value: unknown): boolean {
+  return value === true || value === 1 || value === "1";
+}
+
 function normalizeCommandName(value: string): string {
   // Redis represents subcommands as `parent|child` in COMMAND metadata.
   return value.trim().replaceAll("|", " ").toUpperCase();
+}
+
+function commandArguments(value: unknown): RedisCommandArgument[] {
+  const arguments_: RedisCommandArgument[] = [];
+  for (const rawArgument of Array.isArray(value) ? value : []) {
+    const argument = recordFromMap(rawArgument);
+    const name = optionalString(argument.name);
+    if (!name) continue;
+    const token = optionalString(argument.token);
+    const type = optionalString(argument.type);
+    const summary = optionalString(argument.summary);
+    const since = optionalString(argument.since);
+    const nested = commandArguments(argument.arguments);
+    const enumValues = (Array.isArray(argument.enum) ? argument.enum : []).filter((item): item is string => typeof item === "string" && item.length > 0);
+    arguments_.push({
+      name,
+      ...(token ? { token: token.toUpperCase() } : {}),
+      ...(type ? { type } : {}),
+      ...(summary ? { summary } : {}),
+      ...(since ? { since } : {}),
+      ...(enabledFlag(argument.optional) ? { optional: true } : {}),
+      ...(enabledFlag(argument.multiple) ? { multiple: true } : {}),
+      ...(enabledFlag(argument.multiple_token) ? { multipleToken: true } : {}),
+      ...(enumValues.length ? { enum: enumValues } : {}),
+      ...(nested.length ? { arguments: nested } : {}),
+    });
+  }
+  return arguments_;
 }
 
 function commandKeySpecs(value: unknown): RedisCommandKeySpec[] {
@@ -123,6 +170,7 @@ export function parseRedisCommandDocumentation(value: unknown): RedisCommandDocu
       const name = normalizeCommandName(rawName);
       if (!name) continue;
       const doc = recordFromMap(rawDoc);
+      const arguments_ = commandArguments(doc.arguments);
       docs.set(name, {
         name,
         summary: optionalString(doc.summary),
@@ -130,6 +178,7 @@ export function parseRedisCommandDocumentation(value: unknown): RedisCommandDocu
         group: optionalString(doc.group),
         arity: optionalNumber(doc.arity),
         keySpecs: commandKeySpecs(doc.key_specs),
+        ...(arguments_.length ? { arguments: arguments_ } : {}),
       });
       // COMMAND DOCS returns only command families at the top level; their
       // concrete subcommands are nested in a map keyed as `parent|child`.

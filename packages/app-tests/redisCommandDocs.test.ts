@@ -15,8 +15,26 @@ test("parses COMMAND DOCS maps emitted by the Redis bridge", () => {
           key: "key_specs",
           value: [
             [
-              { key: "begin_search", value: [{ key: "type", value: "index" }, { key: "spec", value: [{ key: "index", value: 1 }] }] },
-              { key: "find_keys", value: [{ key: "type", value: "range" }, { key: "spec", value: [{ key: "lastkey", value: 0 }, { key: "keystep", value: 1 }] }] },
+              {
+                key: "begin_search",
+                value: [
+                  { key: "type", value: "index" },
+                  { key: "spec", value: [{ key: "index", value: 1 }] },
+                ],
+              },
+              {
+                key: "find_keys",
+                value: [
+                  { key: "type", value: "range" },
+                  {
+                    key: "spec",
+                    value: [
+                      { key: "lastkey", value: 0 },
+                      { key: "keystep", value: 1 },
+                    ],
+                  },
+                ],
+              },
             ],
           ],
         },
@@ -77,21 +95,7 @@ test("parses nested subcommands from a COMMAND DOCS response", () => {
 });
 
 test("parses COMMAND DOCS maps returned through RESP2", () => {
-  const docs = parseRedisCommandDocumentation([
-    "get",
-    [
-      "summary",
-      "Returns the string value of a key.",
-      "since",
-      "1.0.0",
-      "group",
-      "string",
-      "arity",
-      2,
-      "key_specs",
-      [["begin_search", ["type", "index", "spec", ["index", 1]], "find_keys", ["type", "range", "spec", ["lastkey", 0, "keystep", 1]]]],
-    ],
-  ]);
+  const docs = parseRedisCommandDocumentation(["get", ["summary", "Returns the string value of a key.", "since", "1.0.0", "group", "string", "arity", 2, "key_specs", [["begin_search", ["type", "index", "spec", ["index", 1]], "find_keys", ["type", "range", "spec", ["lastkey", 0, "keystep", 1]]]]]]);
 
   assert.deepEqual(docs, [
     {
@@ -140,22 +144,61 @@ test("parses keyword and key-count specs from COMMAND DOCS", () => {
   ]);
 });
 
+test("parses the recursive argument grammar from COMMAND DOCS", () => {
+  const [xread] = parseRedisCommandDocumentation({
+    xread: {
+      arguments: [
+        { name: "count", token: "count", type: "integer", summary: "Limits the number of entries.", since: "5.0.0", optional: 1 },
+        {
+          name: "streams",
+          token: "STREAMS",
+          type: "block",
+          arguments: [
+            { name: "key", type: "key", multiple: 1, multiple_token: 1 },
+            { name: "ID", type: "string", multiple: true },
+          ],
+        },
+        {
+          name: "condition",
+          type: "oneof",
+          optional: "1",
+          arguments: [
+            { name: "nx", token: "NX", type: "pure-token" },
+            { name: "xx", token: "XX", type: "pure-token" },
+          ],
+        },
+      ],
+    },
+  });
+
+  assert.deepEqual(xread?.arguments, [
+    { name: "count", token: "COUNT", type: "integer", summary: "Limits the number of entries.", since: "5.0.0", optional: true },
+    {
+      name: "streams",
+      token: "STREAMS",
+      type: "block",
+      arguments: [
+        { name: "key", type: "key", multiple: true, multipleToken: true },
+        { name: "ID", type: "string", multiple: true },
+      ],
+    },
+    {
+      name: "condition",
+      type: "oneof",
+      optional: true,
+      arguments: [
+        { name: "nx", token: "NX", type: "pure-token" },
+        { name: "xx", token: "XX", type: "pure-token" },
+      ],
+    },
+  ]);
+});
+
 test("parses the legacy COMMAND catalog including nested subcommands", () => {
   const docs = parseRedisCommandCatalog([
     ["get", 2, ["readonly", "fast"], 1, 1, 1, ["@read"], [], [], []],
     ["blpop", -3, ["write"], 1, -2, 1, ["@write"], [], [], []],
-    [
-      "acl",
-      -2,
-      ["admin"],
-      0,
-      0,
-      0,
-      ["@admin"],
-      [],
-      [],
-      [["acl|cat", -2, ["readonly"], 0, 0, 0, ["@read"], [], [], []]],
-    ],
+    ["acl", -2, ["admin"], 0, 0, 0, ["@admin"], [], [], [["acl|cat", -2, ["readonly"], 0, 0, 0, ["@read"], [], [], []]]],
   ]);
 
   assert.deepEqual(docs, [

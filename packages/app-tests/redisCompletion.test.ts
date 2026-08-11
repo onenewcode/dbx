@@ -1,11 +1,26 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import { buildRedisCompletionItems, getRedisCompletionContext, getRedisCompletionResultValidFor, shouldAutoOpenRedisCompletion, takesKeyArgument, type RedisCompletionInput } from "../../apps/desktop/src/lib/redis/redisCompletion.ts";
-import type { RedisCommandDocumentation, RedisCommandKeySpec } from "../../apps/desktop/src/lib/redis/redisCommandDocs.ts";
+import type { RedisCommandArgument, RedisCommandDocumentation, RedisCommandKeySpec } from "../../apps/desktop/src/lib/redis/redisCommandDocs.ts";
 import { tokenizeRedisLine } from "../../apps/desktop/src/lib/redis/redisCommandTokenizer.ts";
 
 const oneKey: RedisCommandKeySpec[] = [{ beginSearch: { type: "index", index: 1 }, findKeys: { type: "range", lastKey: 0, keyStep: 1, limit: 0 } }];
 const allRemainingKeys: RedisCommandKeySpec[] = [{ beginSearch: { type: "index", index: 1 }, findKeys: { type: "range", lastKey: -1, keyStep: 1, limit: 0 } }];
+const xreadArguments: RedisCommandArgument[] = [
+  { name: "count", token: "COUNT", type: "integer", optional: true },
+  { name: "maxcount", token: "MAXCOUNT", type: "integer", optional: true },
+  { name: "maxsize", token: "MAXSIZE", type: "integer", optional: true },
+  { name: "milliseconds", token: "BLOCK", type: "integer", optional: true },
+  {
+    name: "streams",
+    token: "STREAMS",
+    type: "block",
+    arguments: [
+      { name: "key", type: "key", multiple: true },
+      { name: "ID", type: "string", multiple: true },
+    ],
+  },
+];
 
 const commands: RedisCommandDocumentation[] = [
   { name: "ACL", group: "server", arity: -2, summary: "Access control commands.", keySpecs: [] },
@@ -48,7 +63,28 @@ const commands: RedisCommandDocumentation[] = [
   { name: "XGROUP CREATE", group: "stream", arity: -5, keySpecs: oneKey },
   { name: "XGROUP DESTROY", group: "stream", arity: 4, keySpecs: oneKey },
   { name: "XGROUP SETID", group: "stream", arity: -4, keySpecs: oneKey },
-  { name: "XREAD", group: "stream", arity: -4, keySpecs: [{ beginSearch: { type: "keyword", keyword: "STREAMS", startFrom: 1 }, findKeys: { type: "range", lastKey: -1, keyStep: 1, limit: 2 } }] },
+  { name: "XREAD", group: "stream", arity: -4, arguments: xreadArguments, keySpecs: [{ beginSearch: { type: "keyword", keyword: "STREAMS", startFrom: 1 }, findKeys: { type: "range", lastKey: -1, keyStep: 1, limit: 2 } }] },
+  {
+    name: "XREADGROUP",
+    group: "stream",
+    arity: -7,
+    arguments: [
+      {
+        name: "group-block",
+        token: "GROUP",
+        type: "block",
+        arguments: [
+          { name: "group", type: "string" },
+          { name: "consumer", type: "string" },
+        ],
+      },
+      { name: "count", token: "COUNT", type: "integer", optional: true },
+      { name: "milliseconds", token: "BLOCK", type: "integer", optional: true },
+      { name: "noack", token: "NOACK", type: "pure-token", optional: true },
+      xreadArguments[4]!,
+    ],
+    keySpecs: [{ beginSearch: { type: "keyword", keyword: "STREAMS", startFrom: 4 }, findKeys: { type: "range", lastKey: -1, keyStep: 1, limit: 2 } }],
+  },
 ];
 
 function input(keys: string[] = []): RedisCompletionInput {
@@ -95,6 +131,69 @@ test("server metadata supplies module commands, summaries, and key completion", 
   const search = buildRedisCompletionItems("MODULE S", 8, moduleInput).find((item) => item.label === "SEARCH");
   assert.equal(search?.summary, "Searches module data.");
   assert.ok(labels(buildRedisCompletionItems("MODULE SEARCH ", 14, moduleInput)).includes("session:1"));
+});
+
+test("argument keyword candidates follow the server's recursive command grammar", () => {
+  assert.deepEqual(labels(complete("XREAD ")), ["COUNT", "MAXCOUNT", "MAXSIZE", "BLOCK", "STREAMS"]);
+  assert.deepEqual(labels(complete("XREAD C")), ["COUNT"]);
+  assert.deepEqual(complete("XREAD COUNT "), []);
+  assert.deepEqual(labels(complete("XREAD COUNT 2 ")), ["MAXCOUNT", "MAXSIZE", "BLOCK", "STREAMS"]);
+  assert.deepEqual(labels(complete("XREADGROUP ")), ["GROUP"]);
+  assert.deepEqual(complete("XREADGROUP GROUP "), []);
+  assert.deepEqual(complete("XREADGROUP GROUP workers "), []);
+  assert.deepEqual(labels(complete("XREADGROUP GROUP workers consumer-1 ")), ["COUNT", "BLOCK", "NOACK", "STREAMS"]);
+  assert.equal(
+    complete("XREADGROUP GROUP workers consumer-1 NOACK ").some((item) => item.label === "NOACK"),
+    false,
+  );
+  assert.equal(complete("XREAD COUNT 2 ")[0]?.appendSpace, true);
+
+  const setInput: RedisCompletionInput = {
+    keys: [],
+    commands: [
+      {
+        name: "SET",
+        keySpecs: oneKey,
+        arguments: [
+          { name: "key", type: "key" },
+          { name: "value", type: "string" },
+          {
+            name: "condition",
+            type: "oneof",
+            optional: true,
+            arguments: [
+              { name: "nx", token: "NX", type: "pure-token" },
+              { name: "xx", token: "XX", type: "pure-token" },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  assert.deepEqual(labels(buildRedisCompletionItems("SET account value ", 18, setInput)), ["NX", "XX"]);
+
+  const repeatInput: RedisCompletionInput = {
+    commands: [
+      {
+        name: "SORT",
+        keySpecs: oneKey,
+        arguments: [
+          { name: "key", type: "key" },
+          { name: "pattern", token: "GET", type: "string", optional: true, multiple: true, multipleToken: true },
+          {
+            name: "order",
+            type: "oneof",
+            optional: true,
+            arguments: [
+              { name: "asc", token: "ASC", type: "pure-token" },
+              { name: "desc", token: "DESC", type: "pure-token" },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+  assert.deepEqual(new Set(labels(buildRedisCompletionItems("SORT users GET profile:* ", 25, repeatInput))), new Set(["GET", "ASC", "DESC"]));
 });
 
 test("key candidates follow documented range, key-count, and keyword key specs", () => {
