@@ -3,13 +3,11 @@
  * It mirrors the shape of `elasticsearchCompletion.ts` so the editor's
  * completion pipeline can dispatch to it.
  *
- * The static `REDIS_COMMAND_TABLE` is the offline fallback. When available,
- * Redis command docs returned by the connected server through `COMMAND DOCS`
- * are authoritative for that server's core and module command set.
+ * Candidates and their displayed metadata come exclusively from the connected
+ * server's `COMMAND DOCS` (or legacy `COMMAND`) response. Safety enforcement
+ * remains in the command execution path and is not inferred for completion.
  */
-import { REDIS_COMMAND_TABLE } from "@/lib/redis/redisCommandTable";
-import type { RedisCommandSpec } from "@/lib/redis/redisCommandTable";
-import type { RedisCommandDocumentation } from "@/lib/redis/redisCommandDocs";
+import type { RedisCommandDocumentation, RedisCommandKeySpec } from "@/lib/redis/redisCommandDocs";
 
 export interface RedisCompletionItem {
   label: string;
@@ -33,37 +31,32 @@ export interface RedisCompletionContext {
   commandName?: string;
   /** In argument mode: 0-based index of the argument position (after the command head). */
   argumentIndex?: number;
+  /** Completed argument values before the current cursor position. */
+  argumentValues?: string[];
 }
 
 export interface RedisCompletionInput {
   keys?: string[];
-  /** Commands reported by the connected Redis server through `COMMAND DOCS`. */
-  commands?: RedisCommandDocumentation[];
+  /** Commands reported by the connected Redis server through `COMMAND DOCS` or `COMMAND`. */
+  commands: readonly RedisCommandDocumentation[];
 }
 
-// ---- Static and server-reported command indexes ----
+// ---- Server-reported command index ----
 
 interface CompletionCommandEntry {
   name: string;
-  spec: RedisCommandSpec;
+  arity: number;
+  group: string;
   summary?: string;
   since?: string;
-  firstArgumentIsKey: boolean;
+  keySpecs: readonly RedisCommandKeySpec[];
 }
 
 interface CompletionIndex {
   commands: Map<string, CompletionCommandEntry>;
   mainCommands: CompletionCommandEntry[];
   subcommands: Map<string, CompletionCommandEntry[]>;
-  subcommandMains: Set<string>;
 }
-
-// Groups whose first argument is a key name (enable key completion there).
-const KEY_ARGUMENT_GROUPS = new Set(["string", "generic", "list", "hash", "set", "zset", "bitmap", "hyperloglog", "geo", "stream"]);
-
-// Commands that accept a variadic list of keys (keep suggesting keys beyond the
-// first argument slot). Most key commands take exactly one key; these keep going.
-const MULTI_KEY_COMMANDS = new Set(["DEL", "UNLINK", "EXISTS", "TOUCH", "MGET"]);
 
 // Boost tuning: common groups surface higher.
 const GROUP_BOOST: Record<string, number> = {
@@ -85,58 +78,37 @@ function describeArity(arity: number): string {
   return "variable arguments";
 }
 
-function commandFirstArgumentIsKey(spec: RedisCommandSpec): boolean {
-  if (KEY_ARGUMENT_GROUPS.has(spec.group)) return true;
-  return false;
-}
-
-function createCompletionIndex(commandDocs: RedisCommandDocumentation[] = [], includeStaticCommands = true): CompletionIndex {
+function createCompletionIndex(commandDocs: readonly RedisCommandDocumentation[]): CompletionIndex {
   const commands = new Map<string, CompletionCommandEntry>();
-  if (includeStaticCommands) {
-    for (const [name, spec] of Object.entries(REDIS_COMMAND_TABLE)) {
-      commands.set(name, {
-        name,
-        spec,
-        firstArgumentIsKey: commandFirstArgumentIsKey(spec),
-      });
-    }
-  }
   for (const doc of commandDocs) {
     const name = doc.name.trim().toUpperCase();
     if (!name) continue;
-    const current = REDIS_COMMAND_TABLE[name];
-    const spec: RedisCommandSpec = {
-      arity: doc.arity ?? current?.arity ?? 0,
-      group: doc.group ?? current?.group ?? "server",
-      // Commands absent from DBX's execution safety table remain visibly blocked.
-      safety: current?.safety ?? "blocked",
-    };
     commands.set(name, {
       name,
-      spec,
+      arity: doc.arity ?? 0,
+      group: doc.group ?? "unknown",
       summary: doc.summary,
       since: doc.since,
-      firstArgumentIsKey: doc.firstArgumentIsKey ?? (current ? commandFirstArgumentIsKey(current) : false),
+      keySpecs: doc.keySpecs,
     });
   }
 
   const mainCommands = new Map<string, CompletionCommandEntry>();
   const subcommands = new Map<string, CompletionCommandEntry[]>();
-  const subcommandMains = new Set<string>();
   for (const entry of commands.values()) {
-    const space = entry.name.indexOf(" ");
-    if (space < 0) {
-      mainCommands.set(entry.name, entry);
-      continue;
+    const tokens = entry.name.split(" ");
+    const main = tokens[0]!;
+    if (!mainCommands.has(main)) {
+      mainCommands.set(main, commands.get(main) ?? { ...entry, name: main, summary: undefined, since: undefined });
     }
-    const main = entry.name.slice(0, space);
-    subcommandMains.add(main);
-    const entries = subcommands.get(main) ?? [];
-    entries.push(entry);
-    subcommands.set(main, entries);
-    // A command family may not have a root entry (for example old metadata for XGROUP).
-    if (!mainCommands.has(main) && !commands.has(main)) {
-      mainCommands.set(main, { ...entry, name: main, summary: undefined, since: undefined });
+    for (let tokenIndex = 1; tokenIndex < tokens.length; tokenIndex++) {
+      const parent = tokens.slice(0, tokenIndex).join(" ");
+      const childName = tokens.slice(0, tokenIndex + 1).join(" ");
+      const entries = subcommands.get(parent) ?? [];
+      if (!entries.some((candidate) => candidate.name === childName)) {
+        entries.push(commands.get(childName) ?? { ...entry, name: childName, summary: undefined, since: undefined });
+      }
+      subcommands.set(parent, entries);
     }
   }
 
@@ -144,39 +116,42 @@ function createCompletionIndex(commandDocs: RedisCommandDocumentation[] = [], in
     commands,
     mainCommands: [...mainCommands.values()],
     subcommands,
-    subcommandMains,
   };
 }
 
-const STATIC_COMPLETION_INDEX = createCompletionIndex();
+const completionIndexes = new WeakMap<ReadonlyArray<RedisCommandDocumentation>, CompletionIndex>();
 
-function completionIndex(input: Pick<RedisCompletionInput, "commands"> = {}): CompletionIndex {
-  return input.commands?.length ? createCompletionIndex(input.commands, false) : STATIC_COMPLETION_INDEX;
+function completionIndex(input: Pick<RedisCompletionInput, "commands">): CompletionIndex {
+  const cached = completionIndexes.get(input.commands);
+  if (cached) return cached;
+  const index = createCompletionIndex(input.commands);
+  completionIndexes.set(input.commands, index);
+  return index;
 }
 
 function matchesPrefix(value: string, prefix: string): boolean {
   return value.toLowerCase().startsWith(prefix.toLowerCase());
 }
 
-function buildSpecDetail(spec: RedisCommandSpec): string {
-  return spec.safety === "allowed" ? spec.group : `${spec.group} · ${spec.safety}`;
+function buildSpecDetail(entry: CompletionCommandEntry): string {
+  return entry.group;
 }
 
 function buildSpecInfo(entry: CompletionCommandEntry, label: string): string {
   const info = [];
   if (entry.summary) info.push(entry.summary);
-  info.push(`Command: ${label}`, `Group: ${entry.spec.group}`, `Arity: ${describeArity(entry.spec.arity)}`, `Safety: ${entry.spec.safety}`);
+  info.push(`Command: ${label}`, `Group: ${entry.group}`, `Arity: ${describeArity(entry.arity)}`);
   if (entry.since) info.push(`Since: ${entry.since}`);
   return info.join("\n");
 }
 
-function boostFor(spec: RedisCommandSpec): number {
-  return GROUP_BOOST[spec.group] ?? 90;
+function boostFor(entry: CompletionCommandEntry): number {
+  return GROUP_BOOST[entry.group] ?? 90;
 }
 
 // ---- Context parsing ----
 
-export function getRedisCompletionContext(text: string, cursor: number, input: Pick<RedisCompletionInput, "commands"> = {}): RedisCompletionContext {
+export function getRedisCompletionContext(text: string, cursor: number, input: Pick<RedisCompletionInput, "commands">): RedisCompletionContext {
   const index = completionIndex(input);
   const safeCursor = Math.max(0, Math.min(cursor, text.length));
   const lineStart = text.lastIndexOf("\n", safeCursor - 1) + 1;
@@ -198,21 +173,34 @@ export function getRedisCompletionContext(text: string, cursor: number, input: P
     return { mode: "command", prefix: currentWord, from };
   }
 
-  const main = typedTokens[0]!.toUpperCase();
+  const normalizedTokens = typedTokens.map((token) => token.toUpperCase());
+  const main = normalizedTokens[0]!;
+  const commandPrefix = normalizedTokens.join(" ");
 
-  // First token done + space → maybe a subcommand of a command that has them.
-  if (typedTokens.length === 1 && index.subcommandMains.has(main)) {
-    return { mode: "subcommand", prefix: currentWord, from, mainCommand: main };
+  // Command docs can nest subcommands more than one level deep. Treat every
+  // documented command prefix as a potential next-token completion context.
+  if (index.subcommands.has(commandPrefix)) {
+    return { mode: "subcommand", prefix: currentWord, from, mainCommand: main, commandName: commandPrefix };
   }
 
-  // Past the command (and any subcommand slot) → an argument. Track which
-  // argument position the cursor is at so we only suggest key names for the
-  // first key argument (e.g. GET <key>, not after the key is filled in).
-  const subcommandName = typedTokens.length >= 2 ? `${main} ${typedTokens[1]!.toUpperCase()}` : undefined;
-  const commandName = subcommandName && index.commands.has(subcommandName) ? subcommandName : subcommandName && index.subcommandMains.has(main) ? undefined : main;
-  const commandHeadTokens = commandName === subcommandName ? 2 : 1;
+  let commandName: string | undefined;
+  for (let tokenCount = normalizedTokens.length; tokenCount > 0; tokenCount--) {
+    const candidate = normalizedTokens.slice(0, tokenCount).join(" ");
+    if (!index.commands.has(candidate)) continue;
+    commandName = candidate;
+    break;
+  }
+  const commandHeadTokens = commandName ? commandName.split(" ").length : normalizedTokens.length;
   const argumentIndex = Math.max(typedTokens.length - commandHeadTokens, 0);
-  return { mode: "argument", prefix: currentWord, from, mainCommand: main, commandName, argumentIndex };
+  return {
+    mode: "argument",
+    prefix: currentWord,
+    from,
+    mainCommand: main,
+    commandName,
+    argumentIndex,
+    argumentValues: typedTokens.slice(commandHeadTokens),
+  };
 }
 
 // ---- Item builders ----
@@ -223,26 +211,26 @@ function commandItems(index: CompletionIndex, prefix: string): RedisCompletionIt
     .map((entry) => ({
       label: entry.name,
       type: "keyword" as const,
-      detail: buildSpecDetail(entry.spec),
+      detail: buildSpecDetail(entry),
       info: buildSpecInfo(entry, entry.name),
       summary: entry.summary,
       since: entry.since,
-      boost: boostFor(entry.spec),
+      boost: boostFor(entry),
     }));
   return items.sort((a, b) => b.boost - a.boost);
 }
 
-function subcommandItems(index: CompletionIndex, main: string, prefix: string): RedisCompletionItem[] {
-  const items = (index.subcommands.get(main) ?? [])
-    .filter((entry) => matchesPrefix(entry.name.slice(main.length + 1), prefix))
+function subcommandItems(index: CompletionIndex, commandPrefix: string, prefix: string): RedisCompletionItem[] {
+  const items = (index.subcommands.get(commandPrefix) ?? [])
+    .filter((entry) => matchesPrefix(entry.name.slice(commandPrefix.length + 1), prefix))
     .map((entry) => ({
-      label: entry.name.slice(main.length + 1),
+      label: entry.name.slice(commandPrefix.length + 1),
       type: "keyword" as const,
-      detail: buildSpecDetail(entry.spec),
+      detail: buildSpecDetail(entry),
       info: buildSpecInfo(entry, entry.name),
       summary: entry.summary,
       since: entry.since,
-      boost: boostFor(entry.spec),
+      boost: boostFor(entry),
     }));
   return items.sort((a, b) => b.boost - a.boost);
 }
@@ -268,36 +256,69 @@ function keyItems(prefix: string, keys: string[]): RedisCompletionItem[] {
     }));
 }
 
-export function buildRedisCompletionItemsFromContext(context: RedisCompletionContext, input: RedisCompletionInput = {}): RedisCompletionItem[] {
+export function buildRedisCompletionItemsFromContext(context: RedisCompletionContext, input: RedisCompletionInput): RedisCompletionItem[] {
   const index = completionIndex(input);
   if (context.mode === "command") return commandItems(index, context.prefix);
-  if (context.mode === "subcommand" && context.mainCommand) {
-    return subcommandItems(index, context.mainCommand, context.prefix);
+  if (context.mode === "subcommand" && context.commandName) {
+    return subcommandItems(index, context.commandName, context.prefix);
   }
-  // argument mode: offer key names at the key-argument slot only. Most key
-  // commands take a single key (first slot); variadic key-list commands
-  // (DEL/UNLINK/EXISTS/...) keep suggesting at every slot.
-  const commandName = context.commandName ?? context.mainCommand;
-  if (context.mode === "argument" && takesKeyArgument(commandName, input) && shouldSuggestKeyAt(context.mainCommand, context.argumentIndex)) {
+  if (context.mode === "argument" && takesKeyArgument(context.commandName, input, context.argumentIndex, context.argumentValues)) {
     return keyItems(context.prefix, input.keys ?? []);
   }
   return [];
 }
 
-function shouldSuggestKeyAt(mainCommand: string | undefined, argumentIndex: number | undefined): boolean {
-  if (argumentIndex == null) return false;
-  if (mainCommand && MULTI_KEY_COMMANDS.has(mainCommand)) return true;
-  return argumentIndex === 0;
+function keySpecStart(spec: RedisCommandKeySpec, argumentIndex: number, argumentsBeforeCursor: readonly string[]): number | undefined {
+  const beginSearch = spec.beginSearch;
+  if (beginSearch.type === "index") return beginSearch.index - 1;
+  const searchStart = beginSearch.startFrom >= 0 ? Math.max(0, beginSearch.startFrom - 1) : Math.max(0, Math.max(argumentsBeforeCursor.length, argumentIndex + 1) + beginSearch.startFrom);
+  if (beginSearch.startFrom < 0) {
+    for (let index = Math.min(searchStart, argumentsBeforeCursor.length - 1); index >= 0; index--) {
+      if (argumentsBeforeCursor[index]?.toUpperCase() === beginSearch.keyword) return index + 1;
+    }
+    return undefined;
+  }
+  const keywordIndex = argumentsBeforeCursor.findIndex((argument, index) => index >= searchStart && argument.toUpperCase() === beginSearch.keyword);
+  return keywordIndex < 0 ? undefined : keywordIndex + 1;
 }
 
-export function buildRedisCompletionItems(text: string, cursor: number, input: RedisCompletionInput = {}): RedisCompletionItem[] {
+function keySpecMatchesArgument(spec: RedisCommandKeySpec, argumentIndex: number, argumentsBeforeCursor: readonly string[]): boolean {
+  const start = keySpecStart(spec, argumentIndex, argumentsBeforeCursor);
+  if (start == null || argumentIndex < start) return false;
+
+  if (spec.findKeys.type === "range") {
+    // Redis uses negative lastkey values relative to the final argv position.
+    // The active argument is included so a completed tail argument is never
+    // offered as a key (for example, BLPOP's timeout).
+    const argumentCount = Math.max(argumentsBeforeCursor.length, argumentIndex + 1);
+    let last = spec.findKeys.lastKey < 0 ? argumentCount + spec.findKeys.lastKey : start + spec.findKeys.lastKey;
+    if (argumentIndex === start && argumentsBeforeCursor.length === start) last = start;
+    if (spec.findKeys.lastKey === -1 && spec.findKeys.limit > 1) {
+      const completedAfterStart = Math.max(0, argumentsBeforeCursor.length - start);
+      // With no key entered yet, the first key is unambiguous. Once arguments
+      // exist, `limit` separates the key list from its equally sized tail.
+      last = completedAfterStart === 0 ? start : start + (Math.ceil(completedAfterStart / spec.findKeys.limit) - 1) * spec.findKeys.keyStep;
+    }
+    return argumentIndex <= last && (argumentIndex - start) % spec.findKeys.keyStep === 0;
+  }
+
+  const keyCountArgument = argumentsBeforeCursor[start + spec.findKeys.keyNumIndex];
+  if (!keyCountArgument || !/^\d+$/.test(keyCountArgument)) return false;
+  const keyCount = Number(keyCountArgument);
+  const firstKey = start + spec.findKeys.firstKey;
+  const lastKey = firstKey + Math.max(0, keyCount - 1) * spec.findKeys.keyStep;
+  return argumentIndex >= firstKey && argumentIndex <= lastKey && (argumentIndex - firstKey) % spec.findKeys.keyStep === 0;
+}
+
+export function buildRedisCompletionItems(text: string, cursor: number, input: RedisCompletionInput): RedisCompletionItem[] {
   return buildRedisCompletionItemsFromContext(getRedisCompletionContext(text, cursor, input), input);
 }
 
-/** True when the active command metadata marks its first argument as a key. */
-export function takesKeyArgument(commandName?: string, input: Pick<RedisCompletionInput, "commands"> = {}): boolean {
-  if (!commandName) return false;
-  return completionIndex(input).commands.get(commandName.toUpperCase())?.firstArgumentIsKey ?? false;
+/** True when the server's key specs identify the active argument as a key. */
+export function takesKeyArgument(commandName: string | undefined, input: Pick<RedisCompletionInput, "commands">, argumentIndex = 0, argumentsBeforeCursor: readonly string[] = []): boolean {
+  if (!commandName || argumentIndex < 0) return false;
+  const command = completionIndex(input).commands.get(commandName.toUpperCase());
+  return command?.keySpecs.some((spec) => keySpecMatchesArgument(spec, argumentIndex, argumentsBeforeCursor)) ?? false;
 }
 
 export function shouldAutoOpenRedisCompletion(text: string, cursor: number): boolean {

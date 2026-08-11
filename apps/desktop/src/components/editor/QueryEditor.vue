@@ -3162,11 +3162,22 @@ async function provideRedisCompletions(currentState: import("@codemirror/state")
   const fullDoc = currentState.doc.toString();
   if (!explicit && !shouldAutoOpenRedisCompletion(fullDoc, position)) return null;
 
-  const completionContext = getRedisCompletionContext(fullDoc, position);
+  let commands;
+  try {
+    commands = await connectionStore.listRedisCompletionCommandDocs(props.connectionId, props.database ?? "0");
+  } catch {
+    // Completion is deliberately instance-driven: do not substitute a bundled
+    // command list when the server does not expose command metadata.
+    return null;
+  }
+  if (epoch !== completionEpoch) return null;
+
+  const completionInput = { commands };
+  const completionContext = getRedisCompletionContext(fullDoc, position, completionInput);
   // Key-name completion needs a reliable db index; props.database may briefly be "" on
   // the New Query path before the active db resolves, and only key-argument commands warrant it.
   let keys: string[] = [];
-  if (completionContext.mode === "argument" && props.database && takesKeyArgument(completionContext.mainCommand)) {
+  if (completionContext.mode === "argument" && props.database && takesKeyArgument(completionContext.commandName, completionInput, completionContext.argumentIndex, completionContext.argumentValues)) {
     try {
       keys = await connectionStore.listRedisCompletionKeys(props.connectionId, props.database);
     } catch {
@@ -3177,6 +3188,7 @@ async function provideRedisCompletions(currentState: import("@codemirror/state")
 
   const items = buildRedisCompletionItemsFromContext(completionContext, {
     keys,
+    commands,
   });
   if (items.length === 0) return null;
   // Use the built-in filter (the default) so typing narrows the list and moves

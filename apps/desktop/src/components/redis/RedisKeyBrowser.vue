@@ -126,7 +126,8 @@ const commandCompletionLoading = ref(false);
 const commandCompletionListboxId = `redis-command-completions-${uuid()}`;
 const commandCompletionSelectedItem = computed(() => commandCompletionItems.value[commandCompletionSelectedIndex.value]);
 const commandCompletionActiveDescendant = computed(() => (commandCompletionSelectedItem.value ? `${commandCompletionListboxId}-option-${commandCompletionSelectedIndex.value}` : undefined));
-const commandCompletionOpen = computed(() => commandCompletionLoading.value || commandCompletionItems.value.length > 0);
+const commandDocumentationLoading = ref(false);
+const commandCompletionOpen = computed(() => commandDocumentationLoading.value || commandCompletionLoading.value || commandCompletionItems.value.length > 0);
 const commandDocumentation = shallowRef<RedisCommandDocumentation[]>([]);
 const activeSidePanel = ref<RedisSidePanel>("detail");
 const showCreateKeyDialog = ref(false);
@@ -165,7 +166,6 @@ const REDIS_COMMAND_COMPLETION_MENU_LIMIT = 12;
 let commandCompletionRequestId = 0;
 let commandDocumentationConnectionId: string | null = null;
 let commandDocumentationRequestId = 0;
-let commandDocumentationLoading = false;
 
 const valueQuery = computed(() => searchPattern.value.trim());
 const isValueSearchMode = computed(() => searchMode.value === "value" || searchMode.value === "all");
@@ -1364,16 +1364,16 @@ function getCommandInput(): HTMLInputElement | null {
 function resetCommandDocumentation() {
   commandDocumentationRequestId++;
   commandDocumentationConnectionId = null;
-  commandDocumentationLoading = false;
+  commandDocumentationLoading.value = false;
   commandDocumentation.value = [];
 }
 
 function requestCommandDocumentation() {
-  if (commandDocumentationLoading || commandDocumentationConnectionId === props.connectionId) return;
+  if (commandDocumentationLoading.value || commandDocumentationConnectionId === props.connectionId) return;
   const requestId = ++commandDocumentationRequestId;
   const connectionId = props.connectionId;
   const database = String(commandDb.value);
-  commandDocumentationLoading = true;
+  commandDocumentationLoading.value = true;
   void connectionStore
     .listRedisCompletionCommandDocs(connectionId, database)
     .then((docs) => {
@@ -1384,12 +1384,12 @@ function requestCommandDocumentation() {
     })
     .catch(() => {
       if (requestId !== commandDocumentationRequestId || connectionId !== props.connectionId) return;
-      // Older Redis versions or restricted ACLs can reject COMMAND DOCS; use the offline table.
+      // Do not offer guessed commands when the instance's metadata is unavailable.
       commandDocumentation.value = [];
       commandDocumentationConnectionId = connectionId;
     })
     .finally(() => {
-      if (requestId === commandDocumentationRequestId) commandDocumentationLoading = false;
+      if (requestId === commandDocumentationRequestId) commandDocumentationLoading.value = false;
     });
 }
 
@@ -1417,7 +1417,7 @@ async function refreshCommandCompletions(options: { force?: boolean } = {}) {
   commandCompletionSelectedIndex.value = 0;
 
   let keys: string[] = [];
-  const needsKeys = context.mode === "argument" && takesKeyArgument(context.commandName ?? context.mainCommand, completionInput);
+  const needsKeys = context.mode === "argument" && takesKeyArgument(context.commandName, completionInput, context.argumentIndex, context.argumentValues);
   commandCompletionLoading.value = needsKeys;
   if (needsKeys) {
     try {
@@ -1590,6 +1590,11 @@ function onCommandInputKeydown(event: KeyboardEvent) {
     return;
   }
   if (event.key === "ArrowDown" && moveCommandCompletionSelection(1)) {
+    event.preventDefault();
+    return;
+  }
+  // Do not execute a partial command before instance metadata can resolve it.
+  if (event.key === "Enter" && commandDocumentationLoading.value) {
     event.preventDefault();
     return;
   }
@@ -1915,7 +1920,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                   <span class="shrink-0 text-[#d7ba7d]">{{ commandPrompt }}</span>
                   <div class="relative min-w-0 flex-1">
                     <div v-if="commandCompletionOpen" class="absolute bottom-[calc(100%+0.5rem)] left-0 z-20 w-full overflow-hidden rounded-md border border-white/15 bg-[#20262f] py-1 shadow-xl">
-                      <div v-if="commandCompletionLoading" class="flex items-center justify-center px-3 py-2 text-slate-400">
+                      <div v-if="commandDocumentationLoading || commandCompletionLoading" class="flex items-center justify-center px-3 py-2 text-slate-400">
                         <Loader2 class="h-3.5 w-3.5 animate-spin" />
                       </div>
                       <div v-else :id="commandCompletionListboxId" role="listbox" aria-label="Redis command completions" class="max-h-60 overflow-y-auto">

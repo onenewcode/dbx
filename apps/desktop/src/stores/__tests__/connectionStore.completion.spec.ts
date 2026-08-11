@@ -191,7 +191,16 @@ describe("connectionStore completion assistant", () => {
     expect(redisExecuteCommand).toHaveBeenNthCalledWith(1, "redis-1", 0, "COMMAND DOCS");
     expect(redisExecuteCommand).toHaveBeenNthCalledWith(2, "redis-1", 0, "COMMAND");
     expect(redisExecuteCommand).toHaveBeenCalledTimes(2);
-    expect(docs).toEqual([{ name: "GET", summary: undefined, since: undefined, group: undefined, arity: 2, firstArgumentIsKey: true }]);
+    expect(docs).toEqual([
+      {
+        name: "GET",
+        summary: undefined,
+        since: undefined,
+        group: undefined,
+        arity: 2,
+        keySpecs: [{ beginSearch: { type: "index", index: 1 }, findKeys: { type: "range", lastKey: 0, keyStep: 1, limit: 0 } }],
+      },
+    ]);
     expect(cached).toEqual(docs);
   });
 

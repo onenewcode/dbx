@@ -117,7 +117,6 @@ const RAW_COMMANDS: Record<string, Spec> = {
   MOVE: [3, "generic", "confirm"],
   // Redis exposes OBJECT operations as space-delimited subcommands; keep these
   // keys aligned with COMMAND metadata so shared parsing and completion work.
-  OBJECT: [-2, "generic"],
   "OBJECT ENCODING": [3, "generic"],
   "OBJECT FREQ": [3, "generic"],
   "OBJECT IDLETIME": [3, "generic"],
@@ -258,9 +257,7 @@ const RAW_COMMANDS: Record<string, Spec> = {
   // ---- Hyperloglog ----
   PFADD: [-2, "hyperloglog", "confirm"],
   PFCOUNT: [-2, "hyperloglog"],
-  PFDEBUG: [3, "hyperloglog", "blocked"],
   PFMERGE: [-2, "hyperloglog", "confirm"],
-  PFSELFTEST: [1, "hyperloglog", "blocked"],
 
   // ---- Geo ----
   GEOADD: [-5, "geo", "confirm"],
@@ -280,7 +277,6 @@ const RAW_COMMANDS: Record<string, Spec> = {
   XAUTOCLAIM: [-7, "stream", "confirm"],
   XCLAIM: [-6, "stream", "confirm"],
   XDEL: [-3, "stream", "confirm"],
-  XGROUP: [-2, "stream"],
   "XGROUP CREATE": [-6, "stream", "confirm"],
   "XGROUP CREATECONSUMER": [5, "stream", "confirm"],
   "XGROUP DELCONSUMER": [4, "stream", "confirm"],
@@ -291,7 +287,6 @@ const RAW_COMMANDS: Record<string, Spec> = {
   "XINFO GROUPS": [3, "stream"],
   "XINFO HELP": [2, "stream"],
   "XINFO STREAM": [-3, "stream"],
-  XINFO: [-2, "stream"],
   XLEN: [2, "stream"],
   XPENDING: [-3, "stream"],
   XRANGE: [-4, "stream"],
@@ -304,9 +299,7 @@ const RAW_COMMANDS: Record<string, Spec> = {
   // ---- Pub/Sub ----
   PSUBSCRIBE: [-2, "pubsub"],
   PUBLISH: [3, "pubsub"],
-  PUBSUB: [-2, "pubsub"],
   "PUBSUB CHANNELS": [-2, "pubsub"],
-  "PUBSUB HELP": [2, "pubsub"],
   "PUBSUB NUMPAT": [1, "pubsub"],
   "PUBSUB NUMSUB": [-2, "pubsub"],
   "PUBSUB SHARDCHANNELS": [-2, "pubsub"],
@@ -332,23 +325,17 @@ const RAW_COMMANDS: Record<string, Spec> = {
   EVALSHA_RO: [-3, "scripting", "blocked"],
   FCALL: [-3, "scripting"],
   FCALL_RO: [-3, "scripting"],
-  FUNCTION: [-2, "scripting"],
   "FUNCTION DELETE": [3, "scripting", "confirm"],
   "FUNCTION DUMP": [2, "scripting"],
   "FUNCTION FLUSH": [-2, "scripting", "confirm"],
-  "FUNCTION HELP": [2, "scripting"],
-  "FUNCTION KILL": [2, "scripting", "confirm"],
   "FUNCTION LIST": [-2, "scripting"],
   "FUNCTION LOAD": [-3, "scripting", "confirm"],
   "FUNCTION RESTORE": [-4, "scripting", "confirm"],
   "FUNCTION STATS": [1, "scripting"],
-  SCRIPT: [-2, "scripting", "blocked"],
-  "SCRIPT DEBUG": [3, "scripting", "blocked"],
   "SCRIPT EXISTS": [-2, "scripting", "blocked"],
   "SCRIPT FLUSH": [-2, "scripting", "blocked"],
   "SCRIPT KILL": [1, "scripting", "blocked"],
   "SCRIPT LOAD": [2, "scripting", "blocked"],
-  "SCRIPT HELP": [2, "scripting", "blocked"],
 
   // ---- Connection ----
   AUTH: [-2, "connection"],
@@ -358,7 +345,6 @@ const RAW_COMMANDS: Record<string, Spec> = {
   QUIT: [1, "connection"],
   RESET: [1, "connection"],
   SELECT: [2, "connection"],
-  CLIENT: [-2, "connection"],
   "CLIENT CACHING": [3, "connection"],
   "CLIENT GETNAME": [1, "connection"],
   "CLIENT GETREDIR": [1, "connection"],
@@ -375,82 +361,39 @@ const RAW_COMMANDS: Record<string, Spec> = {
   "CLIENT TRACKING": [-3, "connection"],
   "CLIENT TRACKINGINFO": [1, "connection"],
   "CLIENT UNPAUSE": [1, "connection"],
-  "CLIENT UNBLOCK": [-3, "connection", "confirm"],
-  "CLIENT HELP": [2, "connection"],
 
   // ---- Server ----
-  ACL: [-2, "server", "blocked"],
-  "ACL CAT": [-2, "server", "blocked"],
-  "ACL DELUSER": [-3, "server", "blocked"],
-  "ACL DRYRUN": [-4, "server", "blocked"],
-  "ACL GENPASS": [-2, "server", "blocked"],
-  "ACL GETUSER": [3, "server", "blocked"],
-  "ACL HELP": [2, "server", "blocked"],
-  "ACL LIST": [2, "server", "blocked"],
-  "ACL LOAD": [2, "server", "blocked"],
-  "ACL LOG": [-2, "server", "blocked"],
-  "ACL SAVE": [2, "server", "blocked"],
-  "ACL SETUSER": [-3, "server", "blocked"],
-  "ACL USERS": [2, "server", "blocked"],
-  "ACL WHOAMI": [2, "server", "blocked"],
   BGREWRITEAOF: [1, "server"],
   BGSAVE: [-1, "server", "blocked"],
-  COMMAND: [-1, "server"],
   "COMMAND COUNT": [1, "server"],
   "COMMAND DOCS": [-2, "server"],
-  "COMMAND GETKEYSANDFLAGS": [-3, "server"],
   "COMMAND GETKEYS": [-3, "server"],
-  "COMMAND HELP": [2, "server"],
   "COMMAND INFO": [-2, "server"],
   "COMMAND LIST": [-2, "server"],
-  CONFIG: [-2, "server", "blocked"],
   "CONFIG GET": [-2, "server", "blocked"],
-  "CONFIG HELP": [2, "server", "blocked"],
   "CONFIG RESETSTAT": [1, "server", "blocked"],
   "CONFIG REWRITE": [1, "server", "blocked"],
   "CONFIG SET": [-3, "server", "blocked"],
   DBSIZE: [1, "server"],
-  DEBUG: [-2, "server", "blocked"],
-  EXPIRETIME: [2, "generic"],
   FAILOVER: [-1, "server", "confirm"],
   FLUSHALL: [-1, "server", "blocked"],
   FLUSHDB: [-1, "server", "confirm"],
   INFO: [-1, "server"],
   LASTSAVE: [1, "server"],
-  LATENCY: [-2, "server", "blocked"],
-  "LATENCY DOCTOR": [2, "server", "blocked"],
-  "LATENCY GRAPH": [3, "server", "blocked"],
-  "LATENCY HELP": [2, "server", "blocked"],
-  "LATENCY HISTOGRAM": [-2, "server", "blocked"],
-  "LATENCY HISTORY": [3, "server", "blocked"],
-  "LATENCY LATEST": [2, "server", "blocked"],
-  "LATENCY RESET": [-2, "server", "blocked"],
-  LOLWUT: [-1, "server"],
-  MEMORY: [-2, "server"],
-  "MEMORY DOCTOR": [2, "server"],
   "MEMORY USAGE": [-3, "server"],
-  "MEMORY HELP": [2, "server"],
-  "MEMORY MALLOC-STATS": [2, "server"],
   "MEMORY STATS": [1, "server"],
   "MEMORY PURGE": [1, "server"],
   "MEMORY DOCS": [1, "server"],
-  MODULE: [-2, "server", "blocked"],
-  "MODULE HELP": [2, "server", "blocked"],
   "MODULE LIST": [1, "server", "blocked"],
   "MODULE LOAD": [-3, "server", "blocked"],
   "MODULE LOADEX": [-3, "server", "blocked"],
   "MODULE UNLOAD": [3, "server", "blocked"],
   MONITOR: [1, "server"],
-  PEXPIRETIME: [2, "generic"],
-  PSYNC: [-3, "server", "blocked"],
-  REPLCONF: [-1, "server", "blocked"],
   REPLICAOF: [3, "server", "blocked"],
-  "RESTORE-ASKING": [-4, "server", "confirm"],
   ROLE: [1, "server"],
   SAVE: [1, "server", "blocked"],
   SHUTDOWN: [-1, "server", "blocked"],
   SLAVEOF: [3, "server", "blocked"],
-  SLOWLOG: [-2, "server"],
   "SLOWLOG GET": [-2, "server"],
   "SLOWLOG LEN": [1, "server"],
   "SLOWLOG RESET": [1, "server"],
@@ -458,29 +401,21 @@ const RAW_COMMANDS: Record<string, Spec> = {
   SWAPDB: [3, "server", "confirm"],
   SYNC: [1, "server"],
   TIME: [1, "server"],
-  SUBSTR: [4, "string"],
 
   // ---- Cluster ----
-  ASKING: [1, "cluster"],
-  CLUSTER: [-2, "cluster"],
   "CLUSTER ADDSLOTS": [-3, "cluster", "confirm"],
-  "CLUSTER ADDSLOTSRANGE": [-4, "cluster", "confirm"],
-  "CLUSTER BUMPEPOCH": [2, "cluster", "confirm"],
   "CLUSTER COUNT-FAILURE-REPORTS": [2, "cluster"],
   "CLUSTER COUNTKEYSINSLOT": [3, "cluster"],
   "CLUSTER DELSLOTS": [-3, "cluster", "confirm"],
-  "CLUSTER DELSLOTSRANGE": [-4, "cluster", "confirm"],
   "CLUSTER FAILOVER": [-2, "cluster", "confirm"],
   "CLUSTER FLUSHSLOTS": [1, "cluster", "confirm"],
   "CLUSTER FORGET": [2, "cluster", "confirm"],
   "CLUSTER GETKEYSINSLOT": [4, "cluster"],
-  "CLUSTER HELP": [2, "cluster"],
   "CLUSTER INFO": [1, "cluster"],
   "CLUSTER KEYSLOT": [2, "cluster"],
   "CLUSTER LINKS": [1, "cluster"],
   "CLUSTER MEET": [-4, "cluster", "confirm"],
   "CLUSTER MYID": [1, "cluster"],
-  "CLUSTER MYSHARDID": [2, "cluster"],
   "CLUSTER NODES": [1, "cluster"],
   "CLUSTER REPLICAS": [2, "cluster"],
   "CLUSTER REPLICATE": [2, "cluster", "confirm"],
@@ -502,17 +437,9 @@ function commandTableSafety(name: string, safety?: RedisCommandSafety): RedisCom
 
 export const REDIS_COMMAND_TABLE: Record<string, RedisCommandSpec> = Object.fromEntries(Object.entries(RAW_COMMANDS).map(([name, [arity, group, safety]]) => [name.toUpperCase(), { arity, group, safety: commandTableSafety(name, safety) }]));
 
-const REDIS_COMMANDS_WITH_SUBCOMMANDS = new Set(
-  Object.keys(REDIS_COMMAND_TABLE).flatMap((name) => {
-    const separator = name.indexOf(" ");
-    return separator < 0 ? [] : [name.slice(0, separator)];
-  }),
-);
-
 /**
- * Resolve a command spec. A command family with known subcommands (for example
- * `XGROUP` or `OBJECT`) must match one of them instead of accepting an unknown
- * second token through its container spec.
+ * Resolve a command spec. Handles two-token subcommands (e.g. `XGROUP CREATE`,
+ * `CONFIG GET`) by trying `MAIN SUB` first, then falling back to the main token.
  */
 export function resolveRedisCommandSpec(argvUpper: readonly string[]): RedisCommandSpec | undefined {
   if (argvUpper.length === 0) return undefined;
@@ -521,7 +448,6 @@ export function resolveRedisCommandSpec(argvUpper: readonly string[]): RedisComm
     const sub = `${main} ${argvUpper[1]}`;
     const subSpec = REDIS_COMMAND_TABLE[sub];
     if (subSpec) return subSpec;
-    if (REDIS_COMMANDS_WITH_SUBCOMMANDS.has(main)) return undefined;
   }
   return REDIS_COMMAND_TABLE[main];
 }

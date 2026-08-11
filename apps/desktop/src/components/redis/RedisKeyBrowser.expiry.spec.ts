@@ -352,6 +352,15 @@ function redisKeyInfo(keyType = "json") {
   return { key_display: KEY_NAME, key_raw: KEY_RAW, key_type: keyType, ttl: 90, size: 7, value_preview: "{}" };
 }
 
+const completionCommands = [
+  { name: "GET", group: "string", arity: 2, keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }] },
+  { name: "GETEX", group: "string", arity: -2, keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }] },
+  { name: "GETSET", group: "string", arity: 3, keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }] },
+  { name: "PING", group: "connection", arity: -1, keySpecs: [] },
+  { name: "SET", group: "string", arity: -3, keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }] },
+  { name: "VGET", group: "string", arity: 2, summary: "Reads a vendor key.", keySpecs: [{ beginSearch: { type: "index" as const, index: 1 }, findKeys: { type: "range" as const, lastKey: 0, keyStep: 1, limit: 0 } }] },
+];
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -383,7 +392,7 @@ function resetApiMocks() {
   mocks.redisDeleteKeys.mockResolvedValue(0);
   mocks.redisExecuteCommand.mockResolvedValue({ value: "OK" });
   mocks.saveHistory.mockResolvedValue(undefined);
-  mocks.listRedisCompletionCommandDocs.mockResolvedValue([{ name: "VGET", group: "string", arity: 2, summary: "Reads a vendor key.", firstArgumentIsKey: true }]);
+  mocks.listRedisCompletionCommandDocs.mockResolvedValue(completionCommands);
   mocks.listRedisCompletionKeys.mockResolvedValue(["user:1"]);
   mocks.canBuildRedisFuzzyTree.mockImplementation((loadedKeyCount: number) => loadedKeyCount <= 200_000);
 }
@@ -630,7 +639,7 @@ describe("RedisKeyBrowser command completion", () => {
     await setCommandInput("VGE");
 
     expect(mocks.listRedisCompletionCommandDocs).toHaveBeenCalledWith("connection", "0");
-    expect(commandCompletionLabels()).toContain("VGETReads a vendor key.string · blocked");
+    expect(commandCompletionLabels()).toContain("VGETReads a vendor key.string");
 
     const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
     input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true }));
@@ -657,18 +666,17 @@ describe("RedisKeyBrowser command completion", () => {
     expect(input.value).toBe("VGET user:1");
   });
 
-  it("falls back to the bundled command table when COMMAND DOCS is unavailable", async () => {
+  it("does not guess command candidates when server metadata is unavailable", async () => {
     mocks.listRedisCompletionCommandDocs.mockRejectedValueOnce(new Error("unknown subcommand 'DOCS'"));
     mountBrowser();
     await settle();
     await openCommandPanel();
     await setCommandInput("GE");
 
-    expect(commandCompletionLabels().some((label) => label.startsWith("GET"))).toBe(true);
+    expect(commandCompletionLabels()).toEqual([]);
   });
 
   it("keeps one selected completion while pointer and keyboard move it", async () => {
-    mocks.listRedisCompletionCommandDocs.mockRejectedValueOnce(new Error("unknown subcommand 'DOCS'"));
     mountBrowser();
     await settle();
     await openCommandPanel();
@@ -694,7 +702,6 @@ describe("RedisKeyBrowser command completion", () => {
   });
 
   it("accepts the selected completion before executing on Enter", async () => {
-    mocks.listRedisCompletionCommandDocs.mockRejectedValueOnce(new Error("unknown subcommand 'DOCS'"));
     mountBrowser();
     await settle();
     await openCommandPanel();
@@ -708,8 +715,30 @@ describe("RedisKeyBrowser command completion", () => {
     expect(commandCompletionLabels()).toContain("user:1key");
   });
 
+  it("waits for command metadata instead of sending a partial command on Enter", async () => {
+    const docs = deferred<typeof completionCommands>();
+    mocks.listRedisCompletionCommandDocs.mockReturnValueOnce(docs.promise);
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput("SE");
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+
+    expect(input.value).toBe("SE");
+    expect(mocks.redisExecuteCommand).not.toHaveBeenCalled();
+
+    docs.resolve(completionCommands);
+    await settle();
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    await settle();
+    expect(input.value).toBe("SET ");
+    expect(mocks.redisExecuteCommand).not.toHaveBeenCalled();
+  });
+
   it("executes an exact command instead of completing it a second time", async () => {
-    mocks.listRedisCompletionCommandDocs.mockRejectedValueOnce(new Error("unknown subcommand 'DOCS'"));
     mountBrowser();
     await settle();
     await openCommandPanel();

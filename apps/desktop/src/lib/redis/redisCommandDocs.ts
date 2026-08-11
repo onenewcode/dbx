@@ -8,7 +8,13 @@ export interface RedisCommandDocumentation {
   since?: string;
   group?: string;
   arity?: number;
-  firstArgumentIsKey?: boolean;
+  keySpecs: RedisCommandKeySpec[];
+}
+
+/** The key-position information Redis publishes through `COMMAND DOCS`. */
+export interface RedisCommandKeySpec {
+  beginSearch: { type: "index"; index: number } | { type: "keyword"; keyword: string; startFrom: number };
+  findKeys: { type: "range"; lastKey: number; keyStep: number; limit: number } | { type: "keynum"; keyNumIndex: number; firstKey: number; keyStep: number };
 }
 
 type RedisRecord = Record<string, unknown>;
@@ -60,15 +66,49 @@ function normalizeCommandName(value: string): string {
   return value.trim().replaceAll("|", " ").toUpperCase();
 }
 
-function firstArgumentIsKey(value: unknown): boolean | undefined {
-  if (!Array.isArray(value)) return undefined;
-  for (const argument of value) {
-    const record = recordFromMap(argument);
-    const type = optionalString(record.type);
-    if (!type) continue;
-    return type === "key";
+function commandKeySpecs(value: unknown): RedisCommandKeySpec[] {
+  const specs: RedisCommandKeySpec[] = [];
+  for (const rawSpec of Array.isArray(value) ? value : []) {
+    const spec = recordFromMap(rawSpec);
+    const beginSearch = recordFromMap(spec.begin_search);
+    const findKeys = recordFromMap(spec.find_keys);
+    const beginSpec = recordFromMap(beginSearch.spec);
+    const findSpec = recordFromMap(findKeys.spec);
+    const beginType = optionalString(beginSearch.type);
+    const findType = optionalString(findKeys.type);
+    const keyStep = optionalNumber(findSpec.keystep);
+    if (!beginType || !findType || !keyStep || keyStep < 1) continue;
+
+    const begin = beginType === "index" ? optionalNumber(beginSpec.index) : beginType === "keyword" ? optionalString(beginSpec.keyword) : undefined;
+    const normalizedBegin = typeof begin === "number" && begin > 0 ? { type: "index" as const, index: begin } : typeof begin === "string" ? { type: "keyword" as const, keyword: begin.toUpperCase(), startFrom: optionalNumber(beginSpec.startfrom) ?? 1 } : undefined;
+    if (!normalizedBegin) continue;
+
+    if (findType === "range") {
+      const lastKey = optionalNumber(findSpec.lastkey);
+      if (lastKey == null) continue;
+      const limit = optionalNumber(findSpec.limit) ?? 0;
+      if (limit < 0) continue;
+      specs.push({ beginSearch: normalizedBegin, findKeys: { type: "range", lastKey, keyStep, limit } });
+      continue;
+    }
+    if (findType === "keynum") {
+      const keyNumIndex = optionalNumber(findSpec.keynumidx);
+      const firstKey = optionalNumber(findSpec.firstkey);
+      if (keyNumIndex == null || firstKey == null) continue;
+      specs.push({ beginSearch: normalizedBegin, findKeys: { type: "keynum", keyNumIndex, firstKey, keyStep } });
+    }
   }
-  return undefined;
+  return specs;
+}
+
+function legacyCommandKeySpecs(value: readonly unknown[]): RedisCommandKeySpec[] {
+  const firstKey = optionalNumber(value[3]);
+  const lastKey = optionalNumber(value[4]);
+  const keyStep = optionalNumber(value[5]);
+  if (firstKey == null || firstKey < 1 || lastKey == null || keyStep == null || keyStep < 1) return [];
+  // `COMMAND` reports an absolute last-key position, while `COMMAND DOCS`
+  // range specs express it relative to the begin-search position.
+  return [{ beginSearch: { type: "index", index: firstKey }, findKeys: { type: "range", lastKey: lastKey < 0 ? lastKey : Math.max(0, lastKey - firstKey), keyStep, limit: 0 } }];
 }
 
 function isCommandInfo(value: unknown): value is unknown[] {
@@ -89,7 +129,7 @@ export function parseRedisCommandDocumentation(value: unknown): RedisCommandDocu
         since: optionalString(doc.since),
         group: optionalString(doc.group),
         arity: optionalNumber(doc.arity),
-        firstArgumentIsKey: firstArgumentIsKey(doc.arguments),
+        keySpecs: commandKeySpecs(doc.key_specs),
       });
       // COMMAND DOCS returns only command families at the top level; their
       // concrete subcommands are nested in a map keyed as `parent|child`.
@@ -113,14 +153,13 @@ export function parseRedisCommandCatalog(value: unknown): RedisCommandDocumentat
       if (typeof rawName !== "string") return;
       const name = normalizeCommandName(rawName);
       if (name) {
-        const firstKeyPosition = optionalNumber(rawValue[3]);
         docs.set(name, {
           name,
           summary: undefined,
           since: undefined,
           group: undefined,
           arity: optionalNumber(rawValue[1]),
-          firstArgumentIsKey: firstKeyPosition == null ? undefined : firstKeyPosition === 1,
+          keySpecs: legacyCommandKeySpecs(rawValue),
         });
       }
       // Redis 7+ appends subcommand command-info replies in slot 10.
