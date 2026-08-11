@@ -204,6 +204,31 @@ describe("connectionStore completion assistant", () => {
     expect(cached).toEqual(docs);
   });
 
+  it("does not suggest binary Redis key displays that the command input cannot execute", async () => {
+    const redisScanKeysBatch = vi.fn().mockResolvedValue({
+      cursor: 0,
+      keys: [
+        { key_display: "plain", key_raw: "cGxhaW4=", key_type: "string", ttl: -1 },
+        { key_display: String.raw`literal\\xAC`, key_raw: "bGl0ZXJhbFx4QUM=", key_type: "string", ttl: -1 },
+        { key_display: "\\xac", key_raw: "rA==", key_type: "string", ttl: -1 },
+      ],
+      total_keys: 3,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      redisScanKeysBatch,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [redisConnection()];
+    store.connectedIds.add("redis-1");
+
+    await expect(store.listRedisCompletionKeys("redis-1", "0")).resolves.toEqual(["plain", String.raw`literal\\xAC`]);
+  });
+
   it("preserves TDengine stable type in completion metadata", async () => {
     const listTables = vi.fn().mockResolvedValue([
       { name: "test_tb", table_type: "STABLE", comment: null },

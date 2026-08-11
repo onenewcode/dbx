@@ -8,6 +8,7 @@
  * remains in the command execution path and is not inferred for completion.
  */
 import type { RedisCommandDocumentation, RedisCommandKeySpec } from "@/lib/redis/redisCommandDocs";
+import { tokenizeRedisLine } from "@/lib/redis/redisCommandTokenizer";
 
 export interface RedisCompletionItem {
   label: string;
@@ -157,15 +158,12 @@ export function getRedisCompletionContext(text: string, cursor: number, input: P
   const lineStart = text.lastIndexOf("\n", safeCursor - 1) + 1;
   const beforeCursor = text.slice(lineStart, safeCursor);
 
-  // Tokenize the part before the cursor by whitespace.
-  const tokens = beforeCursor.trimStart().length === 0 ? [] : beforeCursor.trim().split(/\s+/);
+  const tokenized = tokenizeRedisLine(beforeCursor);
   const endsWithSpace = beforeCursor.length > 0 && /\s$/.test(beforeCursor);
-
-  // Current word being typed (no trailing space yet).
-  const currentWord = endsWithSpace ? "" : (tokens[tokens.length - 1] ?? "");
-  const wordStartFromEnd = currentWord.length;
-  const from = safeCursor - wordStartFromEnd;
-
+  const currentToken = endsWithSpace ? undefined : tokenized.argv[tokenized.argv.length - 1];
+  const currentWord = currentToken?.value ?? "";
+  const from = currentToken ? lineStart + currentToken.startColumn - 1 : safeCursor;
+  const tokens = tokenized.argv.map((token) => token.value);
   const typedTokens = endsWithSpace ? tokens : tokens.slice(0, -1);
 
   // No command yet (or typing the very first token).
@@ -235,6 +233,11 @@ function subcommandItems(index: CompletionIndex, commandPrefix: string, prefix: 
   return items.sort((a, b) => b.boost - a.boost);
 }
 
+function redisArgumentApply(value: string): string {
+  if (value && !/[\s"']/.test(value) && !value.endsWith(";")) return value;
+  return `"${value.replaceAll("\n", "\\n").replaceAll("\r", "\\r").replaceAll("\t", "\\t").replaceAll('"', '\\"')}"`;
+}
+
 function keyItems(prefix: string, keys: string[]): RedisCompletionItem[] {
   if (!prefix) {
     // No partial key typed yet: offer a bounded sample (sorted) so the menu isn't empty.
@@ -242,6 +245,7 @@ function keyItems(prefix: string, keys: string[]): RedisCompletionItem[] {
       label: key,
       type: "text" as const,
       detail: "key",
+      apply: redisArgumentApply(key),
       boost: 60,
     }));
   }
@@ -252,6 +256,7 @@ function keyItems(prefix: string, keys: string[]): RedisCompletionItem[] {
       label: key,
       type: "text" as const,
       detail: "key",
+      apply: redisArgumentApply(key),
       boost: key.toLowerCase().startsWith(prefix.toLowerCase()) ? 70 : 55,
     }));
 }

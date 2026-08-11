@@ -666,6 +666,20 @@ describe("RedisKeyBrowser command completion", () => {
     expect(input.value).toBe("VGET user:1");
   });
 
+  it("replaces an incomplete quoted key with the executable completion text", async () => {
+    mocks.listRedisCompletionKeys.mockResolvedValueOnce(["user name"]);
+    mountBrowser();
+    await settle();
+    await openCommandPanel();
+    await setCommandInput('VGET "user');
+
+    const input = requiredElement<HTMLInputElement>("[data-redis-command-input]");
+    input.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true }));
+    await settle();
+
+    expect(input.value).toBe('VGET "user name"');
+  });
+
   it("does not guess command candidates when server metadata is unavailable", async () => {
     mocks.listRedisCompletionCommandDocs.mockRejectedValueOnce(new Error("unknown subcommand 'DOCS'"));
     mountBrowser();

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "vitest";
 import { buildRedisCompletionItems, getRedisCompletionContext, getRedisCompletionResultValidFor, shouldAutoOpenRedisCompletion, takesKeyArgument, type RedisCompletionInput } from "../../apps/desktop/src/lib/redis/redisCompletion.ts";
 import type { RedisCommandDocumentation, RedisCommandKeySpec } from "../../apps/desktop/src/lib/redis/redisCommandDocs.ts";
+import { tokenizeRedisLine } from "../../apps/desktop/src/lib/redis/redisCommandTokenizer.ts";
 
 const oneKey: RedisCommandKeySpec[] = [{ beginSearch: { type: "index", index: 1 }, findKeys: { type: "range", lastKey: 0, keyStep: 1, limit: 0 } }];
 const allRemainingKeys: RedisCommandKeySpec[] = [{ beginSearch: { type: "index", index: 1 }, findKeys: { type: "range", lastKey: -1, keyStep: 1, limit: 0 } }];
@@ -9,7 +10,15 @@ const allRemainingKeys: RedisCommandKeySpec[] = [{ beginSearch: { type: "index",
 const commands: RedisCommandDocumentation[] = [
   { name: "ACL", group: "server", arity: -2, summary: "Access control commands.", keySpecs: [] },
   { name: "ACL CAT", group: "server", arity: -2, summary: "Lists ACL categories.", keySpecs: [] },
-  { name: "BITOP", group: "bitmap", arity: -4, keySpecs: [{ beginSearch: { type: "index", index: 2 }, findKeys: { type: "range", lastKey: 0, keyStep: 1, limit: 0 } }, { beginSearch: { type: "index", index: 3 }, findKeys: { type: "range", lastKey: -1, keyStep: 1, limit: 0 } }] },
+  {
+    name: "BITOP",
+    group: "bitmap",
+    arity: -4,
+    keySpecs: [
+      { beginSearch: { type: "index", index: 2 }, findKeys: { type: "range", lastKey: 0, keyStep: 1, limit: 0 } },
+      { beginSearch: { type: "index", index: 3 }, findKeys: { type: "range", lastKey: -1, keyStep: 1, limit: 0 } },
+    ],
+  },
   { name: "BLPOP", group: "list", arity: -3, keySpecs: [{ beginSearch: { type: "index", index: 1 }, findKeys: { type: "range", lastKey: -2, keyStep: 1, limit: 0 } }] },
   { name: "DEL", group: "generic", arity: -2, keySpecs: allRemainingKeys },
   { name: "EVAL", group: "scripting", arity: -3, keySpecs: [{ beginSearch: { type: "index", index: 2 }, findKeys: { type: "keynum", keyNumIndex: 0, firstKey: 1, keyStep: 1 } }] },
@@ -19,7 +28,15 @@ const commands: RedisCommandDocumentation[] = [
   { name: "GETRANGE", group: "string", arity: 4, keySpecs: oneKey },
   { name: "GETSET", group: "string", arity: 3, keySpecs: oneKey },
   { name: "HSET", group: "hash", arity: -4, keySpecs: oneKey },
-  { name: "MIGRATE", group: "generic", arity: -6, keySpecs: [{ beginSearch: { type: "index", index: 3 }, findKeys: { type: "range", lastKey: 0, keyStep: 1, limit: 0 } }, { beginSearch: { type: "keyword", keyword: "KEYS", startFrom: -2 }, findKeys: { type: "range", lastKey: -1, keyStep: 1, limit: 0 } }] },
+  {
+    name: "MIGRATE",
+    group: "generic",
+    arity: -6,
+    keySpecs: [
+      { beginSearch: { type: "index", index: 3 }, findKeys: { type: "range", lastKey: 0, keyStep: 1, limit: 0 } },
+      { beginSearch: { type: "keyword", keyword: "KEYS", startFrom: -2 }, findKeys: { type: "range", lastKey: -1, keyStep: 1, limit: 0 } },
+    ],
+  },
   { name: "OBJECT", group: "generic", arity: -2, keySpecs: [] },
   { name: "OBJECT ENCODING", group: "generic", arity: 3, keySpecs: oneKey },
   { name: "OBJECT FREQ", group: "generic", arity: 3, keySpecs: oneKey },
@@ -86,12 +103,31 @@ test("key candidates follow documented range, key-count, and keyword key specs",
   assert.ok(labels(complete("BITOP AND dest ", 15, keys)).includes("source:1"));
   assert.ok(labels(complete("EVAL script 2 ", 14, keys)).includes("dest"));
   assert.ok(labels(complete("EVAL script 2 dest ", 19, keys)).includes("source:1"));
+  assert.ok(labels(complete('EVAL "return 1" 2 ', undefined, keys)).includes("dest"));
   assert.equal(complete("EVAL script 2 dest source:1 ", 29, keys).length, 0);
   assert.ok(labels(complete("XREAD STREAMS ", 14, keys)).includes("dest"));
   assert.equal(complete("XREAD STREAMS dest 0-0 ", 25, keys).length, 0);
   assert.ok(labels(complete("BLPOP ", 6, keys)).includes("dest"));
   assert.equal(complete("BLPOP dest ", 11, keys).length, 0);
   assert.ok(labels(complete("MIGRATE host 6379 source 0 100 KEYS ", 39, keys)).includes("dest"));
+});
+
+test("completion parses quoted arguments and safely applies special key names", () => {
+  const completionInput = input(["user name", 'quote"key', "plain", "path\\\\name"]);
+  const quotedScript = getRedisCompletionContext('EVAL "return 1" 2 ', 18, completionInput);
+  assert.deepEqual(quotedScript.argumentValues, ["return 1", "2"]);
+  assert.equal(quotedScript.argumentIndex, 2);
+
+  const keyItems = buildRedisCompletionItems('GET "user', 9, completionInput);
+  assert.equal(keyItems.find((item) => item.label === "user name")?.apply, '"user name"');
+  assert.equal(buildRedisCompletionItems("GET quote", 9, completionInput).find((item) => item.label === 'quote"key')?.apply, '"quote\\"key"');
+  assert.equal(buildRedisCompletionItems("GET pl", 6, completionInput).find((item) => item.label === "plain")?.apply, "plain");
+  const escapedKey = buildRedisCompletionItems("GET path", 8, completionInput).find((item) => item.label === "path\\\\name")?.apply;
+  assert.equal(escapedKey, "path\\\\name");
+  assert.deepEqual(
+    tokenizeRedisLine(`GET ${escapedKey}`).argv.map((token) => token.value),
+    ["GET", "path\\name"],
+  );
 });
 
 test("non-key arguments and unknown subcommands never produce key candidates", () => {
