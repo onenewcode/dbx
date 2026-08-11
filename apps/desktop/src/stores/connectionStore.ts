@@ -98,7 +98,7 @@ import { decodeSchemaTreeCache, encodeSchemaTreeCache } from "@/lib/metadata/sch
 import { sortSidebarTreeChildrenForParent } from "@/lib/sidebar/sidebarNodeOrdering";
 import { connectionSupportsDatabaseUserAdmin } from "@/lib/database/databaseUserAdmin";
 import { getTableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
-import { parseRedisCommandCatalog, parseRedisCommandDocumentation, type RedisCommandDocumentation } from "@/lib/redis/redisCommandDocs";
+import { mergeRedisCommandDocumentation, parseRedisCommandCatalog, parseRedisCommandDocumentation, type RedisCommandDocumentation } from "@/lib/redis/redisCommandDocs";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { encodeSqlServerLinkedSchema, parseSqlServerLinkedSchema } from "@/lib/database/sqlServerLinkedServers";
 import { inferMongoCompletionFields, type MongoCompletionField } from "@/lib/mongo/mongoCompletion";
@@ -356,6 +356,7 @@ export const useConnectionStore = defineStore("connection", () => {
   const elasticsearchCompletionIndicesCache = ref<Record<string, string[]>>({});
   const redisCompletionKeysCache = ref<Record<string, string[]>>({});
   const redisCommandDocsCache = ref<Record<string, RedisCommandDocumentation[]>>({});
+  const redisCommandDocsCacheGeneration = new Map<string, number>();
   const mongoCompletionCollectionsCache = ref<Record<string, string[]>>({});
   const mongoCompletionFieldsCache = ref<Record<string, MongoCompletionField[]>>({});
   const schemaListCache = ref<Record<string, string[]>>({});
@@ -2377,7 +2378,10 @@ export const useConnectionStore = defineStore("connection", () => {
     for (const key of Object.keys(redisCompletionKeysCache.value)) {
       if (key === exactCacheKey || key.startsWith(cachePrefix)) delete redisCompletionKeysCache.value[key];
     }
-    if (database == null) delete redisCommandDocsCache.value[connectionId];
+    if (database == null) {
+      delete redisCommandDocsCache.value[connectionId];
+      redisCommandDocsCacheGeneration.set(connectionId, (redisCommandDocsCacheGeneration.get(connectionId) ?? 0) + 1);
+    }
     for (const key of Object.keys(mongoCompletionCollectionsCache.value)) {
       if (key === exactCacheKey || key.startsWith(cachePrefix)) delete mongoCompletionCollectionsCache.value[key];
     }
@@ -6191,13 +6195,20 @@ export const useConnectionStore = defineStore("connection", () => {
     const cached = redisCommandDocsCache.value[connectionId];
     if (cached) return cached;
     return withCompletionInFlight(`${connectionId}:redis-command-docs`, async () => {
+      const generation = redisCommandDocsCacheGeneration.get(connectionId) ?? 0;
       await ensureConnected(connectionId);
       const db = Number.parseInt(database, 10) || 0;
       let docs: RedisCommandDocumentation[];
       try {
         // Redis recommends COMMAND DOCS for complete, version-aware client metadata.
-        const result = await api.redisExecuteCommand(connectionId, db, "COMMAND DOCS");
-        docs = parseRedisCommandDocumentation(result.value);
+        const docsResult = await api.redisExecuteCommand(connectionId, db, "COMMAND DOCS");
+        docs = parseRedisCommandDocumentation(docsResult.value);
+        try {
+          const catalogResult = await api.redisExecuteCommand(connectionId, db, "COMMAND");
+          docs = mergeRedisCommandDocumentation(docs, parseRedisCommandCatalog(catalogResult.value));
+        } catch {
+          // Documentation still provides useful grammar when COMMAND is restricted.
+        }
       } catch (docsError) {
         // Redis before 7.0 lacks COMMAND DOCS; COMMAND still reports its actual command inventory.
         try {
@@ -6207,8 +6218,10 @@ export const useConnectionStore = defineStore("connection", () => {
           throw docsError;
         }
       }
-      redisCommandDocsCache.value[connectionId] = docs;
-      evictOldestCacheEntries(redisCommandDocsCache.value, COMPLETION_CACHE_MAX);
+      if ((redisCommandDocsCacheGeneration.get(connectionId) ?? 0) === generation) {
+        redisCommandDocsCache.value[connectionId] = docs;
+        evictOldestCacheEntries(redisCommandDocsCache.value, COMPLETION_CACHE_MAX);
+      }
       return docs;
     });
   }

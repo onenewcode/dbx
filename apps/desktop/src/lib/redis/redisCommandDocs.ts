@@ -80,6 +80,15 @@ function enabledFlag(value: unknown): boolean {
   return value === true || value === 1 || value === "1";
 }
 
+function argumentFlags(value: unknown): Set<string> {
+  return new Set(
+    (Array.isArray(value) ? value : [])
+      .filter((flag): flag is string => typeof flag === "string")
+      .map((flag) => flag.trim().toLowerCase().replaceAll("-", "_"))
+      .filter(Boolean),
+  );
+}
+
 function normalizeCommandName(value: string): string {
   // Redis represents subcommands as `parent|child` in COMMAND metadata.
   return value.trim().replaceAll("|", " ").toUpperCase();
@@ -97,15 +106,16 @@ function commandArguments(value: unknown): RedisCommandArgument[] {
     const since = optionalString(argument.since);
     const nested = commandArguments(argument.arguments);
     const enumValues = (Array.isArray(argument.enum) ? argument.enum : []).filter((item): item is string => typeof item === "string" && item.length > 0);
+    const flags = argumentFlags(argument.flags);
     arguments_.push({
       name,
       ...(token ? { token: token.toUpperCase() } : {}),
       ...(type ? { type } : {}),
       ...(summary ? { summary } : {}),
       ...(since ? { since } : {}),
-      ...(enabledFlag(argument.optional) ? { optional: true } : {}),
-      ...(enabledFlag(argument.multiple) ? { multiple: true } : {}),
-      ...(enabledFlag(argument.multiple_token) ? { multipleToken: true } : {}),
+      ...(enabledFlag(argument.optional) || flags.has("optional") ? { optional: true } : {}),
+      ...(enabledFlag(argument.multiple) || flags.has("multiple") ? { multiple: true } : {}),
+      ...(enabledFlag(argument.multiple_token) || flags.has("multiple_token") ? { multipleToken: true } : {}),
       ...(enumValues.length ? { enum: enumValues } : {}),
       ...(nested.length ? { arguments: nested } : {}),
     });
@@ -230,4 +240,18 @@ export function parseRedisCommandCatalog(value: unknown): RedisCommandDocumentat
   };
   collect(value);
   return [...docs.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+export function mergeRedisCommandDocumentation(documentation: readonly RedisCommandDocumentation[], catalog: readonly RedisCommandDocumentation[]): RedisCommandDocumentation[] {
+  const merged = new Map(catalog.map((command) => [command.name, command]));
+  for (const command of documentation) {
+    const catalogCommand = merged.get(command.name);
+    merged.set(command.name, {
+      ...catalogCommand,
+      ...command,
+      arity: command.arity ?? catalogCommand?.arity,
+      keySpecs: command.keySpecs.length ? command.keySpecs : (catalogCommand?.keySpecs ?? []),
+    });
+  }
+  return [...merged.values()].sort((left, right) => left.name.localeCompare(right.name));
 }

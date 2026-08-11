@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { parseRedisCommandCatalog, parseRedisCommandDocumentation } from "../../apps/desktop/src/lib/redis/redisCommandDocs.ts";
+import { mergeRedisCommandDocumentation, parseRedisCommandCatalog, parseRedisCommandDocumentation } from "../../apps/desktop/src/lib/redis/redisCommandDocs.ts";
 
 test("parses COMMAND DOCS maps emitted by the Redis bridge", () => {
   const docs = parseRedisCommandDocumentation([
@@ -194,6 +194,22 @@ test("parses the recursive argument grammar from COMMAND DOCS", () => {
   ]);
 });
 
+test("parses argument behavior from Redis flags arrays", () => {
+  const [command] = parseRedisCommandDocumentation({
+    example: {
+      arguments: [
+        { name: "key", type: "key", flags: ["optional", "multiple"] },
+        { name: "value", type: "string", flags: ["multiple-token"] },
+      ],
+    },
+  });
+
+  assert.deepEqual(command?.arguments, [
+    { name: "key", type: "key", optional: true, multiple: true },
+    { name: "value", type: "string", multipleToken: true },
+  ]);
+});
+
 test("parses the legacy COMMAND catalog including nested subcommands", () => {
   const docs = parseRedisCommandCatalog([
     ["get", 2, ["readonly", "fast"], 1, 1, 1, ["@read"], [], [], []],
@@ -206,5 +222,26 @@ test("parses the legacy COMMAND catalog including nested subcommands", () => {
     { name: "ACL CAT", summary: undefined, since: undefined, group: undefined, arity: -2, keySpecs: [] },
     { name: "BLPOP", summary: undefined, since: undefined, group: undefined, arity: -3, keySpecs: [{ beginSearch: { type: "index", index: 1 }, findKeys: { type: "range", lastKey: -2, keyStep: 1, limit: 0 } }] },
     { name: "GET", summary: undefined, since: undefined, group: undefined, arity: 2, keySpecs: [{ beginSearch: { type: "index", index: 1 }, findKeys: { type: "range", lastKey: 0, keyStep: 1, limit: 0 } }] },
+  ]);
+});
+
+test("fills COMMAND DOCS key positions and arity from COMMAND", () => {
+  const docs = parseRedisCommandDocumentation({
+    get: { summary: "Returns a value.", arguments: [{ name: "key", type: "key" }] },
+  });
+  const catalog = parseRedisCommandCatalog([
+    ["get", 2, ["readonly"], 1, 1, 1, ["@read"], [], [], []],
+  ]);
+
+  assert.deepEqual(mergeRedisCommandDocumentation(docs, catalog), [
+    {
+      name: "GET",
+      summary: "Returns a value.",
+      since: undefined,
+      group: undefined,
+      arity: 2,
+      keySpecs: [{ beginSearch: { type: "index", index: 1 }, findKeys: { type: "range", lastKey: 0, keyStep: 1, limit: 0 } }],
+      arguments: [{ name: "key", type: "key" }],
+    },
   ]);
 });
