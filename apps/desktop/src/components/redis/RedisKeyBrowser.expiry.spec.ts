@@ -510,11 +510,11 @@ function groupRow(label: string): HTMLElement {
 }
 
 function redisCheckboxes(): HTMLElement[] {
-  return Array.from(document.querySelectorAll<HTMLElement>('[role="checkbox"]'));
+  return Array.from(document.querySelectorAll<HTMLElement>('input[type="checkbox"]'));
 }
 
 function groupCheckbox(label: string): HTMLElement {
-  const checkbox = groupRow(label).querySelector<HTMLElement>('[role="checkbox"]');
+  const checkbox = groupRow(label).querySelector<HTMLElement>('input[type="checkbox"]');
   expect(checkbox, label).toBeDefined();
   return checkbox!;
 }
@@ -526,11 +526,11 @@ function leafCheckbox(label: string): HTMLElement {
 }
 
 function isCheckboxChecked(el: HTMLElement): boolean {
-  return el.getAttribute("aria-checked") === "true";
+  return (el as HTMLInputElement).checked;
 }
 
 function isCheckboxMixed(el: HTMLElement): boolean {
-  return el.getAttribute("aria-checked") === "mixed";
+  return (el as HTMLInputElement).indeterminate;
 }
 
 /** Select a folder via its left-side checkbox (same single-click path as leaf keys). */
@@ -1185,13 +1185,13 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
 
     await submitKeySearch("user");
     // Regular glob search keeps the pre-existing flat, virtualized result path.
-    expect(document.querySelectorAll('[role="checkbox"]')).toHaveLength(keys.length);
+    expect(document.querySelectorAll('input[type="checkbox"]')).toHaveLength(keys.length);
 
     clickButtonWithText("redis.fuzzyMatch");
     await settle();
 
     // Hierarchy restores leaf + group checkboxes (groups stay opacity-0 until hover/selection).
-    expect(document.querySelectorAll('[role="checkbox"]')).toHaveLength(keys.length + 2);
+    expect(document.querySelectorAll('input[type="checkbox"]')).toHaveLength(keys.length + 2);
     await selectGroup("user");
 
     const deleteButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === String(keys.length));
@@ -1206,7 +1206,7 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     expect(connectionId).toBe("connection");
     expect(db).toBe(0);
     expect(new Set(deletedKeyRaws)).toEqual(new Set(keys.map((key) => key.key_raw)));
-    expect(document.querySelectorAll('[role="checkbox"]')).toHaveLength(0);
+    expect(document.querySelectorAll('input[type="checkbox"]')).toHaveLength(0);
   });
 
   it("selects hierarchy folders in the normal tree the same way as fuzzy groups", async () => {
@@ -1267,10 +1267,10 @@ describe("RedisKeyBrowser fuzzy key hierarchy", () => {
     await settle();
 
     // The group controls disappear when the view falls back to virtualized rows.
-    expect(document.querySelectorAll('[role="checkbox"]')).toHaveLength(keys.length);
+    expect(document.querySelectorAll('input[type="checkbox"]')).toHaveLength(keys.length);
     expect(document.body.textContent).toContain("redis.fuzzyTreeLimit");
 
-    requiredElement<HTMLElement>('[role="checkbox"]').click();
+    requiredElement<HTMLElement>('input[type="checkbox"]').click();
     await settle();
     const deleteButton = Array.from(document.querySelectorAll<HTMLButtonElement>("button")).find((button) => button.textContent?.trim() === "1");
     expect(deleteButton).toBeDefined();
@@ -1463,7 +1463,7 @@ describe("RedisKeyBrowser interrupted Fetch All", () => {
     selectAll.click();
     await settle();
 
-    const checkboxes = Array.from(document.querySelectorAll<HTMLElement>('[role="checkbox"]'));
+    const checkboxes = Array.from(document.querySelectorAll<HTMLElement>('input[type="checkbox"]'));
     expect(checkboxes).toHaveLength(keys.length);
     expect(checkboxes.every((checkbox) => isCheckboxChecked(checkbox as HTMLElement))).toBe(true);
     expect(document.querySelector("[data-redis-select-all]")).toBeNull();
@@ -1472,7 +1472,7 @@ describe("RedisKeyBrowser interrupted Fetch All", () => {
 
     requiredElement<HTMLButtonElement>("[data-redis-deselect-all]").click();
     await settle();
-    expect(Array.from(document.querySelectorAll<HTMLElement>('[role="checkbox"]')).every((checkbox) => !isCheckboxChecked(checkbox))).toBe(true);
+    expect(Array.from(document.querySelectorAll<HTMLElement>('input[type="checkbox"]')).every((checkbox) => !isCheckboxChecked(checkbox))).toBe(true);
     expect(document.querySelector("[data-redis-batch-delete]")).toBeNull();
     expect(document.querySelector("[data-redis-select-all]")).not.toBeNull();
     expect(document.activeElement).toBe(document.querySelector(".redis-key-pane"));
@@ -1495,7 +1495,7 @@ describe("RedisKeyBrowser interrupted Fetch All", () => {
     await vi.waitFor(() => expect(document.querySelector("[data-redis-batch-delete]")?.textContent).toContain("2"));
 
     expect(document.body.textContent).toContain("second");
-    expect(Array.from(document.querySelectorAll<HTMLElement>('[role="checkbox"]')).every(isCheckboxChecked)).toBe(true);
+    expect(Array.from(document.querySelectorAll<HTMLElement>('input[type="checkbox"]')).every(isCheckboxChecked)).toBe(true);
     expect(document.querySelector("[data-redis-select-all]")).toBeNull();
   });
 
@@ -1555,7 +1555,8 @@ describe("RedisKeyBrowser interrupted Fetch All", () => {
     await settle();
 
     const leafA = leafCheckbox("solo-a");
-    expect(leafA.className).toContain("rounded-none");
+    expect(leafA.className).toContain("accent-primary");
+    expect(leafA.className).toContain("h-3.5");
     leafA.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     await settle();
     expect(isCheckboxChecked(leafCheckbox("solo-a"))).toBe(true);
@@ -1599,7 +1600,7 @@ describe("RedisKeyBrowser interrupted Fetch All", () => {
     mountBrowser();
     await settle();
 
-    const checkboxes = Array.from(document.querySelectorAll<HTMLElement>('[role="checkbox"]'));
+    const checkboxes = Array.from(document.querySelectorAll<HTMLElement>('input[type="checkbox"]'));
     expect(checkboxes).toHaveLength(keys.length);
 
     checkboxes[0]!.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));

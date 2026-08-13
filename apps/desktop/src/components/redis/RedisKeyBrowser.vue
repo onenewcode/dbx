@@ -2,7 +2,7 @@
 import { computed, nextTick, ref, shallowRef, onMounted, onUnmounted, onActivated, onDeactivated, watch } from "vue";
 import type { CalendarDateTime } from "@internationalized/date";
 import { useI18n } from "vue-i18n";
-import { Search, RefreshCw, Loader2, ChevronRight, ChevronDown, FolderClosed, FolderOpen, Trash2, Plus, KeyRound, TerminalSquare, Asterisk, History, Radio, Clock, Copy, Check, Minus } from "@lucide/vue";
+import { Search, RefreshCw, Loader2, ChevronRight, ChevronDown, FolderClosed, FolderOpen, Trash2, Plus, KeyRound, TerminalSquare, Asterisk, History, Radio, Clock, Copy } from "@lucide/vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import { Splitpanes, Pane } from "splitpanes";
@@ -186,8 +186,6 @@ const selectionBusy = computed(() => deletingKeys.value || loading.value || load
 // checkedKeys is always a subset of loaded keys, so size equality is enough.
 const allLoadedKeysSelected = computed(() => flatKeys.value.length > 0 && checkedKeys.value.size === flatKeys.value.length);
 const allKeysSelected = computed(() => allLoadedKeysSelected.value && !hasMore.value);
-/** Folder checkboxes appear only while multi-select is active (same idea as leaf key selection). */
-const multiSelectActive = computed(() => checkedKeys.value.size > 0);
 const searchPlaceholder = computed(() => {
   if (searchMode.value === "key") return fuzzyKeySearch.value ? t("redis.fuzzyPattern") : t("redis.pattern");
   return searchMode.value === "all" ? t("redis.allSearchPlaceholder") : t("redis.valueSearchPlaceholder");
@@ -394,12 +392,6 @@ function isGroupPartiallyChecked(group: RedisKeyTreeGroupNode): boolean {
 function isLeafChecked(keyRaw: string): boolean {
   void selectionEpoch.value;
   return checkedKeys.value.has(keyRaw);
-}
-
-function groupAriaChecked(group: RedisKeyTreeGroupNode): "true" | "false" | "mixed" {
-  if (isNodeChecked(group)) return "true";
-  if (isGroupPartiallyChecked(group)) return "mixed";
-  return "false";
 }
 
 /** Check/uncheck a leaf or folder; Shift expands an inclusive visible-row range. */
@@ -1920,24 +1912,16 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                 >
                   <div class="min-w-0 flex flex-1 items-center gap-1 overflow-hidden" :style="{ paddingLeft: `${12 + row.depth * 16}px` }">
                     <template v-if="row.node.kind === 'group'">
-                      <!-- Custom checkbox: pure Vue state, no native input (avoids virtual-scroller checked bugs). -->
-                      <button
-                        type="button"
-                        role="checkbox"
-                        class="flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-none border transition-opacity"
-                        :class="[
-                          multiSelectActive || isNodeChecked(row.node) || isGroupPartiallyChecked(row.node) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
-                          isNodeChecked(row.node) || isGroupPartiallyChecked(row.node) ? 'border-primary bg-primary text-primary-foreground' : 'border-muted-foreground/60 bg-background',
-                        ]"
-                        :aria-checked="groupAriaChecked(row.node)"
+                      <input
+                        type="checkbox"
+                        class="h-3.5 w-3.5 shrink-0 accent-primary cursor-pointer"
+                        :checked="isNodeChecked(row.node)"
+                        :indeterminate="isGroupPartiallyChecked(row.node)"
                         :aria-label="t('redis.selectLoadedGroupKeys', { count: row.node.loadedLeafCount })"
                         :disabled="selectionBusy"
                         :data-redis-group="row.node.id"
                         @click="toggleNodeCheck(row.node, $event)"
-                      >
-                        <Check v-if="isNodeChecked(row.node)" class="h-2.5 w-2.5" />
-                        <Minus v-else-if="isGroupPartiallyChecked(row.node)" class="h-2.5 w-2.5" />
-                      </button>
+                      />
                       <component :is="expandedGroupIds.has(row.node.id) ? ChevronDown : ChevronRight" class="w-3 h-3 shrink-0 text-muted-foreground" />
                       <component :is="expandedGroupIds.has(row.node.id) ? FolderOpen : FolderClosed" class="h-3.5 w-3.5 shrink-0 text-amber-500" />
                       <span class="dbx-editor-font-family truncate">{{ row.node.label }}</span>
@@ -1945,19 +1929,16 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                     </template>
                     <template v-else>
                       <span class="relative flex h-4 w-4 shrink-0 items-center justify-center">
-                        <KeyRound class="h-3.5 w-3.5 text-muted-foreground/70 transition-opacity" :class="isLeafChecked(row.node.keyRaw) || multiSelectActive ? 'opacity-0' : 'group-hover:opacity-0'" />
-                        <button
-                          type="button"
-                          role="checkbox"
-                          class="absolute flex h-3.5 w-3.5 items-center justify-center rounded-none border transition-opacity"
-                          :class="[isLeafChecked(row.node.keyRaw) || multiSelectActive ? 'opacity-100' : 'opacity-0 group-hover:opacity-100', isLeafChecked(row.node.keyRaw) ? 'border-primary bg-primary text-primary-foreground' : 'border-muted-foreground/60 bg-background']"
-                          :aria-checked="isLeafChecked(row.node.keyRaw)"
+                        <KeyRound class="h-3.5 w-3.5 text-muted-foreground/70 transition-opacity group-hover:opacity-0" :class="{ 'opacity-0': isLeafChecked(row.node.keyRaw) }" />
+                        <input
+                          type="checkbox"
+                          class="absolute h-3.5 w-3.5 accent-primary cursor-pointer opacity-0 group-hover:opacity-100"
+                          :class="{ 'opacity-100': isLeafChecked(row.node.keyRaw) }"
                           :disabled="selectionBusy"
+                          :checked="isLeafChecked(row.node.keyRaw)"
                           :data-redis-leaf="row.node.keyRaw"
                           @click="toggleNodeCheck(row.node, $event)"
-                        >
-                          <Check v-if="isLeafChecked(row.node.keyRaw)" class="h-2.5 w-2.5" />
-                        </button>
+                        />
                       </span>
                       <span class="dbx-editor-font-family truncate">{{ row.node.label }}</span>
                     </template>
