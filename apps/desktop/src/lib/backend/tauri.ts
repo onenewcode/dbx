@@ -308,6 +308,7 @@ export interface QueryPaginationExecutionPlan {
   pageLimit?: number;
   pageOffset?: number;
   countSql?: string;
+  exactQueryRowBound?: number;
   useAgentResultSession: boolean;
 }
 
@@ -3527,6 +3528,15 @@ export async function mongoCreateUser(connectionId: string, database: string, us
   });
 }
 
+export async function mongoRunCommand(connectionId: string, database: string, commandJson: string, executionId?: string): Promise<MongoDocumentResult> {
+  return invoke("mongo_run_command", {
+    connectionId,
+    database,
+    commandJson,
+    executionId,
+  });
+}
+
 export async function mongoDropIndexes(connectionId: string, database: string, collection: string, indexesJson?: string, single = false): Promise<MongoDropIndexesResult> {
   return invoke("mongo_drop_indexes", {
     connectionId,
@@ -3602,6 +3612,16 @@ export async function documentDeleteDocument(connectionId: string, database: str
     id,
     routing,
     documentType,
+  });
+}
+
+export async function documentSaveMeilisearchBatch(connectionId: string, collection: string, updates: Array<{ id: string; docJson: string }>, deleteIds: string[], inserts: string[]): Promise<number> {
+  return invoke("document_save_meilisearch_batch", {
+    connectionId,
+    collection,
+    updates,
+    deleteIds,
+    inserts,
   });
 }
 

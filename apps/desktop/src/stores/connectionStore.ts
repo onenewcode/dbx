@@ -113,6 +113,7 @@ import { appendAgentDriverUpdateHint, hasAgentDriverUpdate, hasInstalledAgentVer
 import { appendConnectionErrorHints } from "@/lib/connection/connectionErrorHints";
 import { appendVisibleDatabaseSelection } from "@/lib/connection/connectionVisibleDatabases";
 import { buildXuguTypeMemberNodes, isXuguTypeMemberContainer } from "@/lib/sidebar/xuguTypeMembers";
+import { isXuguPublicSynonymScope, xuguSchemaDisplayName, XUGU_PUBLIC_SYNONYM_SCOPE } from "@/lib/sidebar/xuguPublicSynonyms";
 import { filterNacosNamespacesForSidebar, normalizeNacosNamespacesForDisplay } from "@/lib/nacos/nacosNamespaceVisibility";
 import { buildPackageMemberNodes, markPackageNodesExpandable } from "@/lib/sidebar/packageMembers";
 import { configuredDatabaseProductName, connectionConfigFingerprint, normalizeDatabaseConnectionInfo } from "@/lib/connection/connectionDatabaseInfo";
@@ -301,6 +302,8 @@ type MetadataListPageResult = TableInfo[] | ObjectInfo[];
 type BeforeConnectHandler = (config: ConnectionConfig) => Promise<void>;
 
 export const CONNECTION_ATTEMPT_CANCELLED_MESSAGE = "Connection attempt was cancelled";
+/** Thrown when a no-save-password connection is connected without a typed password. */
+export const CONNECTION_PASSWORD_REQUIRED_MESSAGE = "Password is required for this connection";
 
 function metadataDriverProfile(config?: ConnectionConfig): string | undefined {
   return config?.driver_profile || config?.db_type;
@@ -1001,6 +1004,7 @@ export const useConnectionStore = defineStore("connection", () => {
       "mongodb-legacy": MONGO_LEGACY_DRIVER_LABEL,
       elasticsearch: "Elasticsearch",
       easysearch: "Easysearch",
+      meilisearch: "Meilisearch",
       qdrant: "Qdrant",
       milvus: "Milvus",
       weaviate: "Weaviate",
@@ -2338,6 +2342,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function addConnection(config: ConnectionConfig, targetGroupId?: string | null) {
     const normalized = normalizeConnection(config);
+    if (normalized.save_password === false) normalized.password = "";
     await persistTimeoutInheritance(normalized.id, normalized.connect_timeout_inherit === true, normalized.query_timeout_inherit === true);
     const existing = connections.value.findIndex((c) => c.id === normalized.id);
     const nextConnections = [...connections.value];
@@ -2501,6 +2506,7 @@ export const useConnectionStore = defineStore("connection", () => {
 
   async function updateConnection(config: ConnectionConfig) {
     config = normalizeConnection(config);
+    if (config.save_password === false) config.password = "";
     const idx = connections.value.findIndex((c) => c.id === config.id);
     if (idx < 0) return;
     const runtimeConfigChanged = connectionConfigFingerprint(connections.value[idx]) !== connectionConfigFingerprint(config);
@@ -2623,7 +2629,7 @@ export const useConnectionStore = defineStore("connection", () => {
   async function setDefaultSchema(connectionId: string, schema: string) {
     const config = getConfig(connectionId);
     const defaultSchema = schema.trim();
-    if (!config || !defaultSchema || config.default_schema === defaultSchema) return;
+    if (!config || !defaultSchema || config.default_schema === defaultSchema || (config.db_type === "xugu" && isXuguPublicSynonymScope(defaultSchema))) return;
     await updateConnection({
       ...config,
       default_schema: defaultSchema,
@@ -2808,7 +2814,7 @@ export const useConnectionStore = defineStore("connection", () => {
       await loadConsulRoot(connectionId);
     } else if (config.db_type === "mongodb") {
       await loadMongoDatabases(connectionId);
-    } else if (config.db_type === "elasticsearch" || config.db_type === "easysearch") {
+    } else if (config.db_type === "elasticsearch" || config.db_type === "easysearch" || config.db_type === "meilisearch") {
       // Reload: list indices.
       await loadElasticsearchIndices(connectionId);
     } else if (config.db_type === "milvus") {
@@ -2826,11 +2832,32 @@ export const useConnectionStore = defineStore("connection", () => {
     }
   }
 
+  /**
+   * For a connection configured with `save_password === false` (password not
+   * persisted), prompt the user for the password and return a copy of the
+   * config carrying the typed value. The returned config is used only for the
+   * immediate `connectDb` call — it is never written back to the store, so the
+   * typed password is not persisted and the next connect prompts again.
+   */
+  async function ensureConnectionPassword(config: ConnectionConfig): Promise<ConnectionConfig> {
+    if (config.save_password !== false || config.password) return config;
+    const { useConnectionPasswordPromptStore } = await import("@/stores/connectionPasswordPromptStore");
+    const password = await useConnectionPasswordPromptStore().requestPassword({
+      connectionId: config.id,
+      connectionName: config.name,
+    });
+    if (!password) throw new Error(CONNECTION_PASSWORD_REQUIRED_MESSAGE);
+    return { ...config, password };
+  }
+
   async function connect(config: ConnectionConfig) {
     config = normalizeConnection(config);
     if (getBlockingDisconnectInFlight(config.id)) await waitForBlockingDisconnectInFlight(config.id);
     const localAttempt = beginLocalConnectionAttempt(config.id);
     try {
+      if (config.save_password === false && !config.password) {
+        config = await ensureConnectionPassword(config);
+      }
       await beforeConnectHandler?.(config);
       if (config.db_type === "sqlserver") {
         await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
@@ -3010,6 +3037,12 @@ export const useConnectionStore = defineStore("connection", () => {
     }
     const localAttempt = beginLocalConnectionAttempt(connectionId);
     const connectPromise = (async () => {
+      // Fast-path the common case (password saved or no password needed) so the
+      // in-flight dedup above keeps its exact microtask cadence; only await the
+      // interactive prompt when the connection actually needs a typed password.
+      if (config.save_password === false && !config.password) {
+        config = await ensureConnectionPassword(config);
+      }
       await beforeConnectHandler?.(config);
       if (config.db_type === "sqlserver") {
         await ensureSqlServerLegacyCompatibilityComponentInstalled(config);
@@ -3353,7 +3386,7 @@ export const useConnectionStore = defineStore("connection", () => {
   async function loadConnectedConnectionRootForSidebarSearch(connectionId: string) {
     if (!connectedIds.value.has(connectionId)) return;
     const config = getConfig(connectionId);
-    if (!config || ["redis", "etcd", "zookeeper", "consul", "mongodb", "elasticsearch", "easysearch", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;
+    if (!config || ["redis", "etcd", "zookeeper", "consul", "mongodb", "elasticsearch", "easysearch", "meilisearch", "milvus", "qdrant", "weaviate", "chromadb", "mq", "nacos"].includes(config.db_type)) return;
     const node = findConnectionNode(connectionId);
     if (!node || node.type !== "connection" || node.isLoading || hasConnectionMetadataChildren(node.children)) return;
     const scope = { kind: "connection-databases" as const, connectionId, driverProfile: metadataDriverProfile(config) };
@@ -3947,7 +3980,7 @@ export const useConnectionStore = defineStore("connection", () => {
           if (useCachedChildren(node, options, load)) return;
           const config = getConfig(connectionId);
           const showSystemSchemas = config?.show_system_schemas === true;
-          const cacheVersion = ownerAwareMetadataCacheVersion(config, "schemas-v3");
+          const cacheVersion = ownerAwareMetadataCacheVersion(config, config?.db_type === "xugu" ? "schemas-v4" : "schemas-v3");
           const cacheKey = schemaCacheKey(connectionId, database, cacheVersion, showSystemSchemas ? "show-system" : "hide-system");
           if (!options?.force) {
             const cached = await loadPersistedTreeChildren(node, cacheKey, load);
@@ -3966,13 +3999,19 @@ export const useConnectionStore = defineStore("connection", () => {
               { showSystemSchemas },
             ),
           );
+          // The public-synonym scope is a protocol namespace, not a user
+          // schema. Keep it discoverable even when a visible-schema filter is
+          // configured, while preserving the raw key for object routing.
+          if (config?.db_type === "xugu" && schemas.some((schema) => isXuguPublicSynonymScope(schema.name))) {
+            visibleSchemaNames.add(XUGU_PUBLIC_SYNONYM_SCOPE);
+          }
           const children: TreeNode[] = schemas
             .filter((schema) => visibleSchemaNames.has(schema.name))
             .map((schema) => {
               const s = schema.name;
               return {
                 id: `${connectionId}:${database}:${s}`,
-                label: s,
+                label: config?.db_type === "xugu" ? xuguSchemaDisplayName(s) : s,
                 type: "schema" as const,
                 connectionId,
                 database,
@@ -5382,7 +5421,7 @@ export const useConnectionStore = defineStore("connection", () => {
         await loadConsulRoot(node.connectionId);
       } else if (config?.db_type === "mongodb") {
         await loadMongoDatabases(node.connectionId);
-      } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch") {
+      } else if (config?.db_type === "elasticsearch" || config?.db_type === "easysearch" || config?.db_type === "meilisearch") {
         await loadElasticsearchIndices(node.connectionId);
       } else if (config?.db_type === "milvus") {
         await loadMilvusDatabases(node.connectionId);

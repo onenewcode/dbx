@@ -108,6 +108,16 @@ interface OpenSavedSqlOptions {
   targetMode?: SavedSqlOpenTargetMode;
 }
 
+interface OpenObjectSourceTabOptions {
+  connectionId: string;
+  database: string;
+  title: string;
+  schema?: string;
+  catalog?: string;
+  sql: string;
+  objectSource: NonNullable<QueryTab["objectSource"]>;
+}
+
 interface UpdateExecutionTargetOptions {
   persistSavedSqlTarget?: boolean;
 }
@@ -1622,6 +1632,33 @@ export const useQueryStore = defineStore("query", () => {
     if (mode === "query") tab.originalSql = initialSql ?? "";
     tabs.value.push(tab);
     if (options.activate !== false) activeTabId.value = id;
+    return id;
+  }
+
+  function openObjectSourceTab(options: OpenObjectSourceTabOptions) {
+    const existing = tabs.value.find(
+      (tab) =>
+        tab.mode === "query" &&
+        tab.connectionId === options.connectionId &&
+        tab.database === options.database &&
+        (tab.schema || "") === (options.schema || "") &&
+        (tab.catalog || "") === (options.catalog || "") &&
+        tab.objectSource?.name === options.objectSource.name &&
+        tab.objectSource.objectType === options.objectSource.objectType &&
+        (tab.objectSource.schema || "") === (options.objectSource.schema || "") &&
+        (tab.objectSource.signature || "") === (options.objectSource.signature || ""),
+    );
+    if (existing) {
+      switchTab(existing.id);
+      if (!isTabDirty(existing)) {
+        updateSql(existing.id, options.sql);
+        markTabClean(existing);
+      }
+      return existing.id;
+    }
+
+    const id = createTab(options.connectionId, options.database, options.title, "query", options.schema, options.sql, options.catalog, { forceNew: true });
+    setObjectSource(id, options.objectSource);
     return id;
   }
 
@@ -3878,6 +3915,7 @@ export const useQueryStore = defineStore("query", () => {
     let pageLimit: number | undefined;
     let pageOffset: number | undefined;
     let countSql: string | undefined;
+    let exactQueryRowBound: number | undefined;
     let useAgentResultSession = false;
     let executionDispatched = false;
     let producedResult = false;
@@ -4204,6 +4242,26 @@ export const useQueryStore = defineStore("query", () => {
                 });
                 break;
               }
+              case "runCommand": {
+                if (options?.mongoSafety) {
+                  const safety = evaluateMongoWriteSafety(mongoCommand, options.mongoSafety);
+                  if (!safety.allowed) throw new Error(safety.reason);
+                }
+                queryExecutionLog("info", "mongo-run-command:start", {
+                  traceId,
+                  database: currentDatabase,
+                });
+                const result = await api.mongoRunCommand(executionConnectionId, currentDatabase, mongoCommand.commandJson, executionId);
+                allResults.push(markQueryResultRowsRaw(annotateMongoResult(mongoDocumentsToQueryResult(result.documents, performance.now() - commandStartedAt, result.total, result.extended_documents, result.total_is_exact !== false))));
+                mongoEditTarget = undefined;
+                queryExecutionLog("info", "mongo-run-command:done", {
+                  traceId,
+                  database: currentDatabase,
+                  rowCount: result.documents.length,
+                  elapsed: elapsed(),
+                });
+                break;
+              }
               case "insert":
               case "update":
               case "delete":
@@ -4436,6 +4494,7 @@ export const useQueryStore = defineStore("query", () => {
         pageLimit = plan.pageLimit;
         pageOffset = plan.pageOffset;
         countSql = plan.countSql;
+        exactQueryRowBound = plan.exactQueryRowBound;
         useAgentResultSession = plan.useAgentResultSession;
         const hasBoundedPagination = typeof pageLimit === "number" && typeof pageOffset === "number";
         if (options?.appendResult && !hasBoundedPagination && !useAgentResultSession) {
@@ -4632,7 +4691,16 @@ export const useQueryStore = defineStore("query", () => {
           current.result.truncated = true;
           current.resultTotalRowCount = queryResultMaxRows;
         }
-        const totalKnownFromIncompletePage = !!current.result && typeof exactTotalFromIncompletePage(current.result, pageLimit, pageOffset, useAgentResultSession) === "number";
+        const paginationPageResult = shouldAppendResult ? results[0] : current.result;
+        const exactIncompletePageTotal = paginationPageResult ? exactTotalFromIncompletePage(paginationPageResult, pageLimit, pageOffset, useAgentResultSession) : undefined;
+        const totalKnownFromIncompletePage = typeof exactIncompletePageTotal === "number";
+        let totalRowCountResolved = false;
+        if (current.mode === "query" && current.result && !isQueryExecutionErrorResult(current.result) && typeof exactQueryRowBound === "number") {
+          const boundedTotal = capQueryResultTotal(exactQueryRowBound, queryResultMaxRows);
+          current.resultTotalRowCount = Math.min(boundedTotal, exactIncompletePageTotal ?? boundedTotal);
+          current.resultTotalRowCountLoading = false;
+          totalRowCountResolved = true;
+        }
         const dataCountTarget =
           current.mode === "data"
             ? (() => {
@@ -4650,14 +4718,20 @@ export const useQueryStore = defineStore("query", () => {
               })()
             : undefined;
         const canAutoCalculateTotalRows =
-          !options?.appendResult && !!current.result && resultRowCount > 0 && !resultLimitReached && !totalKnownFromIncompletePage && settingsStore.editorSettings.autoCalculateTotalRows && ((current.mode === "query" && !!countSql) || (current.mode === "data" && !!dataCountTarget));
+          !options?.appendResult &&
+          !!current.result &&
+          resultRowCount > 0 &&
+          !resultLimitReached &&
+          !totalKnownFromIncompletePage &&
+          !totalRowCountResolved &&
+          settingsStore.editorSettings.autoCalculateTotalRows &&
+          ((current.mode === "query" && !!countSql) || (current.mode === "data" && !!dataCountTarget));
         current.resultTotalRowCountLoading = canAutoCalculateTotalRows;
         // Server-side pagination without a countSql: the backend (currently
         // the Elasticsearch driver) already reports the true match total via
         // affected_rows. Use it directly so the result-grid can compute the
         // page count without issuing a separate COUNT query.
-        let totalRowCountResolved = false;
-        if (current.result && current.result.total_is_exact !== false && current.mode === "query" && typeof pageLimit === "number" && !countSql && typeof current.result.affected_rows === "number" && current.result.affected_rows > current.result.rows.length) {
+        if (!totalRowCountResolved && current.result && current.result.total_is_exact !== false && current.mode === "query" && typeof pageLimit === "number" && !countSql && typeof current.result.affected_rows === "number" && current.result.affected_rows > current.result.rows.length) {
           current.resultTotalRowCount = current.result.affected_rows;
           current.resultTotalRowCountLoading = false;
           totalRowCountResolved = true;
@@ -5799,6 +5873,7 @@ export const useQueryStore = defineStore("query", () => {
     hasDirtyTabs,
     isConfirmingAppClose,
     createTab,
+    openObjectSourceTab,
     showExecutedQueryResults,
     switchTab,
     closeTab,

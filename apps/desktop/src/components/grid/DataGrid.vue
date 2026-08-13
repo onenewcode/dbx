@@ -30,6 +30,7 @@ import {
   SquareDashed,
   Check,
   CopyPlus,
+  Hash,
   KeyRound,
   Link2,
   ListTree,
@@ -82,7 +83,8 @@ import { buildTableSelectSql, quoteTableDataIdentifier } from "@/lib/table/table
 import { tableOpenPageLimit } from "@/lib/table/tableOpenPageLimit";
 import { uuid } from "@/lib/common/utils";
 import { generateCellValues, type CellValueGenerationKind } from "@/lib/dataGrid/cellValueGeneration";
-import { compactHeaderColumnType, isNumericColumnType, resolveHeaderColumnType, resolveResultColumnType } from "@/lib/dataGrid/dataGridColumnType";
+import { compactHeaderColumnType, isNumericColumnType, resolveDataGridTypeVisualKind, resolveHeaderColumnType, resolveResultColumnType } from "@/lib/dataGrid/dataGridColumnType";
+import { dataGridCellTextClass, dataGridTypeVisualClass } from "@/lib/dataGrid/dataGridCellTextVisual";
 import {
   canDeleteExistingTdengineRows,
   canEditExistingTableRows,
@@ -245,7 +247,7 @@ import { getTableStructureCapabilities } from "@/lib/table/tableStructureCapabil
 import { filterObjectBrowserTableColumns } from "@/lib/table/objectBrowserTableInfo";
 import { gaussdbMTypeDisplayName } from "@/lib/table/postgresDataTypeHelp";
 import { reserveDataGridHeaderLine } from "@/lib/dataGrid/dataGridHeaderLayout";
-import { buildColumnIndexMap, columnIndexMetadataRequestCurrent, columnIndexNameKey, columnIndexTableIdentity } from "@/lib/dataGrid/dataGridColumnIndexIcon";
+import { buildColumnIndexMap, columnIndexColorClass, columnIndexMetadataRequestCurrent, columnIndexNameKey, columnIndexTableIdentity, type ColumnIndexKind } from "@/lib/dataGrid/dataGridColumnIndexIcon";
 import { supportsTableStructureEditing } from "@/lib/database/databaseCapabilities";
 import { rememberDataGridConditionHistory } from "@/lib/dataGrid/dataGridConditionHistory";
 import { restoreDataGridLocalColumnFilters, serializeDataGridLocalColumnFilters } from "@/lib/dataGrid/dataGridLocalColumnFilterState";
@@ -291,6 +293,7 @@ const multiRowTranspose = computed(() => settingsStore.editorSettings.dataGridMu
 const hideNullColumns = computed(() => settingsStore.editorSettings.dataGridHideNullColumns);
 const booleanCellsUseCheckbox = computed(() => settingsStore.editorSettings.dataGridBooleanDisplayMode === "checkbox");
 const booleanDisplayMode = computed(() => settingsStore.editorSettings.dataGridBooleanDisplayMode);
+const colorizeDataGridCellTypes = computed(() => settingsStore.editorSettings.colorizeDataGridCellTypes);
 const { isDark, themePalette } = useTheme();
 const { toast } = useToast();
 // 外键单元格跳转复用导航入口；对话框引用传 stub（同 AiAssistant 模式）
@@ -656,23 +659,7 @@ function selectedSortMenuValue(column: string, columnIndex: number): SortMenuVal
 }
 
 function typeColorClass(t: string): string {
-  // Strip precision/scale suffix like (20,6)
-  const base = t.replace(/\(.*\)$/, "").toLowerCase();
-  if (["int", "int2", "int4", "int8", "smallint", "bigint", "integer", "serial", "bigserial", "tinyint", "mediumint"].includes(base)) return "text-blue-500";
-  // number: Oracle/Dameng NUMBER；binary_float/binary_double: Oracle IEEE 浮点
-  if (["float4", "float8", "double", "decimal", "numeric", "real", "float", "money", "number", "binary_float", "binary_double", "dec"].includes(base)) return "text-cyan-500";
-  // varchar2/nvarchar2/long: Oracle/Dameng 字符类型（LONG 在 Oracle 中是变长字符）
-  if (["varchar", "varchar2", "nvarchar2", "text", "char", "character varying", "character", "string", "nvarchar", "nchar", "ntext", "longtext", "mediumtext", "tinytext", "clob", "long"].includes(base)) return "text-green-500";
-  if (["bool", "boolean", "bit"].includes(base)) return "text-orange-500";
-  if (["timestamp", "timestamptz", "datetime", "date", "time", "timetz", "datetime2", "smalldatetime"].includes(base)) return "text-purple-500";
-  // xmltype: Oracle XMLType
-  if (["json", "jsonb", "xml", "xmltype", "array"].includes(base)) return "text-pink-500";
-  if (["uuid", "uniqueidentifier"].includes(base)) return "text-amber-500";
-  // raw/long raw/bfile: Oracle 二进制
-  if (["bytea", "blob", "binary", "varbinary", "image", "raw", "long raw", "bfile"].includes(base)) return "text-red-400";
-  // sdo_geometry: Oracle Spatial
-  if (["geometry", "geography", "sdo_geometry"].includes(base)) return "text-emerald-500";
-  return "text-muted-foreground";
+  return dataGridTypeVisualClass(resolveDataGridTypeVisualKind(t, resolvedDatabaseType.value));
 }
 const contextCell = ref<{
   rowId: number;
@@ -1975,6 +1962,8 @@ const allColumnTypes = computed(() =>
   ),
 );
 const visibleColumnTypes = computed(() => visibleColumnIndexes.value.map((index) => allColumnTypes.value[index]));
+const allColumnTypeVisualKinds = computed(() => allColumnTypes.value.map((type) => resolveDataGridTypeVisualKind(type, resolvedDatabaseType.value)));
+const visibleColumnTypeVisualKinds = computed(() => visibleColumnIndexes.value.map((index) => allColumnTypeVisualKinds.value[index] ?? "unknown"));
 const visibleColumnComments = computed(() => visibleColumnIndexes.value.map((index) => dataGridColumnCommentFor(columnCommentMap.value, props.result.columns[index] ?? "", props.sourceColumns?.[index])));
 const visibleColumnCount = computed(() => visibleColumnIndexes.value.length);
 
@@ -1983,6 +1972,45 @@ const columnAligns = computed<("left" | "right")[]>(() => {
   if (!numericColumnRightAlign.value) return [];
   return visibleColumnTypes.value.map((type) => (isNumericColumnType(type) ? "right" : "left"));
 });
+
+function gridCellTextColorClass(item: RowItem, actualColIdx: number, visibleColIdx: number): string {
+  if (!colorizeDataGridCellTypes.value) return "text-foreground";
+  const value = item.data[actualColIdx];
+  const checkbox = booleanCellsUseCheckbox.value && isBooleanGridCell(item, actualColIdx) && value !== null;
+  return dataGridCellTextClass({
+    colorizeTypes: colorizeDataGridCellTypes.value,
+    typeKind: allColumnTypeVisualKinds.value[actualColIdx] ?? "unknown",
+    isNull: value === null,
+    isDraft: item.isDraft && value === null,
+    isEditing: editingCell.value?.rowId === item.id && editingCell.value.col === actualColIdx,
+    isControl: checkbox,
+    isSelected: rowCellsUseSelectionVisual(item.id) || cellIsSelected(item.displayIndex, visibleColIdx),
+    isCurrentSearchMatch: cellIsCurrentMatch(item.displayIndex, actualColIdx),
+    isSearchMatch: cellIsSearchMatch(item.displayIndex, actualColIdx),
+    isDirty: item.isDirtyCol[actualColIdx],
+    isDeleted: item.isDeleted,
+  });
+}
+
+function transposeCellTextColorClass(recordIndex: number, actualColIdx: number): string {
+  if (!colorizeDataGridCellTypes.value) return "text-foreground";
+  const item = displayItems.value[recordIndex];
+  if (!item) return "text-foreground";
+  const value = item.data[actualColIdx];
+  return dataGridCellTextClass({
+    colorizeTypes: colorizeDataGridCellTypes.value,
+    typeKind: allColumnTypeVisualKinds.value[actualColIdx] ?? "unknown",
+    isNull: value === null,
+    isDraft: item.isDraft && value === null,
+    isEditing: editingCell.value?.rowId === item.id && editingCell.value.col === actualColIdx,
+    isControl: booleanCellsUseCheckbox.value && isBooleanGridCell(item, actualColIdx) && value !== null,
+    isSelected: transposeRecordUsesSelectionVisual(recordIndex) || transposeCellIsSelected(recordIndex, actualColIdx),
+    isCurrentSearchMatch: cellIsCurrentMatch(recordIndex, actualColIdx),
+    isSearchMatch: cellIsSearchMatch(recordIndex, actualColIdx),
+    isDirty: item.isDirtyCol[actualColIdx],
+    isDeleted: item.isDeleted,
+  });
+}
 
 /** Preview actions from the result preview registry for the current result. */
 const previewActions = computed(() => {
@@ -5348,10 +5376,6 @@ function queryColumnRef(name: string): string {
   return props.databaseType === "neo4j" ? `n.${quoted}` : quoted;
 }
 
-function isNull(value: unknown): boolean {
-  return value === null;
-}
-
 function rowNumberStatusClass(item: RowItem): string {
   if (item.status === "draft") {
     return "border-muted-foreground/20 bg-muted/20 font-semibold text-muted-foreground";
@@ -6076,6 +6100,8 @@ function drawCanvasGrid() {
     pageOffset: rowNumberPageOffset(),
     frozenColumnCount: frozenColumnCount.value,
     columnAligns: columnAligns.value,
+    columnTypeVisualKinds: visibleColumnTypeVisualKinds.value,
+    colorizeDataTypes: colorizeDataGridCellTypes.value,
     rightAlignedActionCell: canvasRightAlignedActionCell.value,
     columnIsBoolean: isBooleanGridColumn,
     booleanDisplayMode: booleanDisplayMode.value,
@@ -6096,6 +6122,7 @@ watch(showDataGridTopbar, () => nextTick(observeDataGridTopbarWidth), {
 });
 watch(columnAligns, () => scheduleCanvasDraw());
 watch(booleanDisplayMode, () => scheduleCanvasDraw());
+watch(colorizeDataGridCellTypes, () => scheduleCanvasDraw());
 watch(
   [
     displayRowRefs,
@@ -7911,6 +7938,9 @@ const transposeRows = computed(() => {
     displayValue: (value, _column, index) => formatCellCached(value, visibleColumnIndexes.value[index]),
   });
 });
+const transposeReserveTypeLine = computed(() => showColumnTypesInHeader.value && transposeRows.value.some((row) => row.type));
+const transposeReserveCommentLine = computed(() => showColumnCommentsInHeader.value && transposeRows.value.some((row) => row.comment));
+const transposeRowHeight = computed(() => 30 + (transposeReserveTypeLine.value ? 14 : 0) + (transposeReserveCommentLine.value ? 14 : 0));
 const isTransposeMode = computed(() => showTranspose.value && transposeRows.value.length > 0);
 const transposeTotalWidth = computed(() => {
   const recordIndexes = multiRowTranspose.value ? Array.from({ length: displayRowCount.value }, (_, i) => i) : activeTransposeRecordIndexes.value;
@@ -7928,6 +7958,19 @@ function transposeFieldTitle(item: { column: string; type: string; comment?: str
   if (showColumnTypesInHeader.value && item.type) details.push(`${t("grid.columnType")}: ${item.type}`);
   if (showColumnCommentsInHeader.value && item.comment) details.push(`${t("grid.columnComment")}: ${item.comment}`);
   return details.join("\n");
+}
+
+function transposeColumnIndexKind(column: string): ColumnIndexKind | undefined {
+  if (!showIndexIndicatorsInHeader.value) return undefined;
+  const kind = columnIndexMap.value.get(columnIndexNameKey(column));
+  return kind && kind !== "none" ? kind : undefined;
+}
+
+function transposeColumnIndexText(kind: ColumnIndexKind): string {
+  if (kind === "primary") return t("grid.columnPrimaryIndex");
+  if (kind === "unique") return t("grid.columnUniqueIndex");
+  if (kind === "index") return t("grid.columnRegularIndex");
+  return "";
 }
 
 function updateTransposeViewport() {
@@ -10055,7 +10098,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   '--transpose-field-w': `${transposePinnedWidth}px`,
                 }"
                 :items="transposeRows"
-                :item-size="30"
+                :item-size="transposeRowHeight"
                 :buffer="400"
                 key-field="id"
                 @scroll="onTransposeScroll"
@@ -10093,21 +10136,35 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                   <div
                     class="data-grid-transpose-row flex border-b border-border/60"
                     :style="{
-                      height: '30px',
+                      height: `${transposeRowHeight}px`,
                       width: `${transposeTotalWidth}px`,
                     }"
                   >
                     <LightTooltip :text="transposeFieldTitle(item)" side="right" :side-offset="6" :delay="250" :open-on-focus="false" surface="popover">
                       <div
                         data-native-clipboard
-                        class="sticky left-0 z-10 flex shrink-0 items-center gap-1.5 overflow-hidden border-r border-border bg-background px-3 py-0"
+                        class="sticky left-0 z-10 flex shrink-0 flex-col items-start justify-center overflow-hidden border-r border-border bg-background px-3 py-0"
                         :class="{
                           'bg-yellow-200/60 dark:bg-yellow-500/20': transposeHeaderIsSearchMatch(visibleColumnIndexes[index]),
                           'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': transposeHeaderIsCurrentMatch(visibleColumnIndexes[index]),
                         }"
                         :style="{ width: `${transposePinnedWidth}px` }"
                       >
-                        <span class="min-w-0 flex-1 truncate font-medium">{{ item.column }}</span>
+                        <span class="flex min-w-0 items-center gap-1 overflow-hidden">
+                          <KeyRound v-if="transposeColumnIndexKind(item.column) === 'primary'" data-grid-transpose-index-indicator class="h-3 w-3 shrink-0" :class="columnIndexColorClass('primary')" :title="transposeColumnIndexText('primary')" />
+                          <Hash v-else-if="transposeColumnIndexKind(item.column)" data-grid-transpose-index-indicator class="h-3 w-3 shrink-0" :class="columnIndexColorClass(transposeColumnIndexKind(item.column)!)" :title="transposeColumnIndexText(transposeColumnIndexKind(item.column)!)" />
+                          <span class="min-w-0 flex-1 truncate font-medium leading-4">{{ item.column }}</span>
+                        </span>
+                        <template v-if="showColumnTypesInHeader && item.type">
+                          <span data-grid-transpose-type-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3 select-none" :class="typeColorClass(item.type)" :title="item.type">
+                            {{ item.type }}
+                          </span>
+                        </template>
+                        <template v-if="showColumnCommentsInHeader && item.comment">
+                          <span data-grid-transpose-comment-line class="h-3 min-w-0 truncate text-[10px] font-normal leading-3 text-muted-foreground select-none" :title="item.comment">
+                            {{ item.comment }}
+                          </span>
+                        </template>
                       </div>
                       <template #content>
                         <div
@@ -10132,22 +10189,24 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                       v-for="cell in item.values"
                       :key="`${item.id}:${cell.recordIndex}`"
                       class="relative flex shrink-0 items-center border-r border-border/70 px-2 py-0 truncate"
-                      :class="{
-                        'text-muted-foreground italic': cell.isNull,
-                        'cell-selected': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                        'cell-selected-dirty': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                        'cell-selected--sparse': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                        'cell-selected-dirty--sparse': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                        'row-cell-selected': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                        'row-cell-selected-dirty': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                        'bg-primary/15': transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex] && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
-                        'bg-yellow-500/10 cell-dirty': displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
-                        'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(cell.recordIndex, cell.valueIndex),
-                        'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': cellIsCurrentMatch(cell.recordIndex, cell.valueIndex),
-                        'cursor-text': !isScrolling && canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex),
-                        'hover:bg-gray-200 dark:hover:bg-gray-800':
-                          !isScrolling && canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
-                      }"
+                      :class="[
+                        transposeCellTextColorClass(cell.recordIndex, cell.valueIndex),
+                        {
+                          'cell-selected': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                          'cell-selected-dirty': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                          'cell-selected--sparse': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                          'cell-selected-dirty--sparse': transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                          'row-cell-selected': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                          'row-cell-selected-dirty': transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex) && displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                          'bg-primary/15': transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex] && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
+                          'bg-yellow-500/10 cell-dirty': displayItems[cell.recordIndex]?.isDirtyCol[cell.valueIndex],
+                          'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(cell.recordIndex, cell.valueIndex),
+                          'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': cellIsCurrentMatch(cell.recordIndex, cell.valueIndex),
+                          'cursor-text': !isScrolling && canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex),
+                          'hover:bg-gray-200 hover:text-foreground dark:hover:bg-gray-800':
+                            !isScrolling && canEditCellItem(displayItems[cell.recordIndex], cell.valueIndex) && !transposeRecordUsesSelectionVisual(cell.recordIndex) && !transposeRecordUsesActiveHighlight(cell.recordIndex) && !transposeCellIsSelected(cell.recordIndex, cell.valueIndex),
+                        },
+                      ]"
                       :style="{
                         width: `${getTransposeRecordWidth(cell.recordIndex)}px`,
                       }"
@@ -10884,12 +10943,12 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                         class="data-grid-cell group/cell shrink-0 px-3 py-1 border-r border-border whitespace-nowrap overflow-hidden text-ellipsis relative select-none inline-block items-center tabular-nums"
                         :style="renderedColumnStyle(col.visibleColIdx)"
                         :class="[
+                          gridCellTextColorClass(item, col.actualColIdx, col.visibleColIdx),
                           selectionFrameEdgeClass(item.displayIndex, col.visibleColIdx),
                           {
                             'data-grid-cell--frozen': col.visibleColIdx < frozenColumnCount,
                             'data-grid-cell--frozen-separator': frozenColumnCount > 0 && col.visibleColIdx === frozenColumnCount - 1,
                             'text-right': columnAligns[col.visibleColIdx] === 'right',
-                            'text-muted-foreground italic': isNull(item.data[col.actualColIdx]),
                             'bg-yellow-500/10 cell-dirty': item.isDirtyCol[col.actualColIdx],
                             'cell-selected': cellIsSelected(item.displayIndex, col.visibleColIdx) && !item.isDirtyCol[col.actualColIdx],
                             'cell-selected-dirty': cellIsSelected(item.displayIndex, col.visibleColIdx) && item.isDirtyCol[col.actualColIdx],
@@ -10903,7 +10962,7 @@ const gridContextMenuItems = computed<ContextMenuItem[]>(() => {
                             'bg-yellow-200/60 dark:bg-yellow-500/20': cellIsSearchMatch(item.displayIndex, col.actualColIdx),
                             'ring-2 ring-inset ring-yellow-500 bg-yellow-300/60 dark:bg-yellow-500/40': cellIsCurrentMatch(item.displayIndex, col.actualColIdx),
                             'tabular-nums': typeof item.data[col.actualColIdx] === 'number',
-                            'cursor-text hover:bg-gray-200 dark:hover:bg-gray-800': !isScrolling && canEditCellItem(item, col.actualColIdx) && !(booleanCellsUseCheckbox && isBooleanGridCell(item, col.actualColIdx) && item.data[col.actualColIdx] !== null),
+                            'cursor-text hover:bg-gray-200 hover:text-foreground dark:hover:bg-gray-800': !isScrolling && canEditCellItem(item, col.actualColIdx) && !(booleanCellsUseCheckbox && isBooleanGridCell(item, col.actualColIdx) && item.data[col.actualColIdx] !== null),
                             'cursor-pointer hover:bg-gray-200 dark:hover:bg-gray-800': !isScrolling && booleanCellsUseCheckbox && isBooleanGridCell(item, col.actualColIdx) && item.data[col.actualColIdx] !== null && canEditCellItem(item, col.actualColIdx),
                             'line-through': item.isDeleted,
                             'overflow-visible z-20 border-r-transparent': editingCell?.rowId === item.id && editingCell?.col === col.actualColIdx,

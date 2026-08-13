@@ -16,6 +16,7 @@ export type DatabaseType =
   | "oracle"
   | "elasticsearch"
   | "easysearch"
+  | "meilisearch"
   | "hbase"
   | "qdrant"
   | "milvus"
@@ -76,6 +77,10 @@ export type DatabaseType =
 
 export function isElasticsearchCompatibleDatabaseType(dbType?: DatabaseType): boolean {
   return dbType === "elasticsearch" || dbType === "easysearch";
+}
+
+export function isMeilisearchDatabaseType(dbType?: DatabaseType): boolean {
+  return dbType === "meilisearch";
 }
 
 export interface SqlSnippet {
@@ -185,6 +190,12 @@ export interface ConnectionConfig {
   informix_server?: string;
   external_config?: unknown;
   one_time?: boolean;
+  /**
+   * Whether the database password may be persisted locally. When false, the
+   * password is never written to local storage and the user is prompted on
+   * every connect. Absent/true keeps current behavior (password saved).
+   */
+  save_password?: boolean;
   read_only?: boolean;
   /** Explicit production marker for every database reachable through this connection. */
   is_production?: boolean;
@@ -248,9 +259,7 @@ export interface SshTunnelConfig {
    * `"key+password"` tries private key auth first and falls back to
    * password auth if the key is rejected.
    *
-   * `"agent"` is a legacy value: it's no longer offered as a dropdown
-   * choice for new connections, but is preserved and displayed read-only
-   * for connections that already have `use_ssh_agent` configured.
+   * `"agent"` uses identities from the configured SSH agent socket.
    */
   auth_method?: "password" | "key" | "key+password" | "agent" | "none";
   /** Allow `nc` through an SSH exec channel when direct-tcpip is prohibited. */
