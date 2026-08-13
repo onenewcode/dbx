@@ -1530,7 +1530,11 @@ impl NacosAdmin for NacosOpenApiAdmin {
         // r-nacos: console owns detail (content + type). OpenAPI is body-only fallback.
         if self.is_rnacos_compatible() {
             if !self.cfg.rnacos_console_addr.is_empty() {
-                return self.get_rnacos_console_config(&key.data_id, &key.group, &namespace).await;
+                match self.get_rnacos_console_config(&key.data_id, &key.group, &namespace).await {
+                    Ok(config) => return Ok(config),
+                    Err(error) if error.contains("[rnacosConsoleCaptchaRequired]") => return Err(error),
+                    Err(_) => {}
+                }
             }
             return self.get_openapi_raw_config(&key.data_id, &key.group, &namespace).await;
         }
@@ -4370,6 +4374,41 @@ mod tests {
         });
         let mut config = test_admin_config(format!("http://{address}"));
         config.implementation = Some(NacosImplementation::RNacos);
+        let admin = NacosOpenApiAdmin::new(config).unwrap();
+
+        let detail = admin
+            .get_config(NacosConfigKey {
+                namespace: Some("public".to_string()),
+                data_id: "hello.json".to_string(),
+                group: "DEFAULT_GROUP".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(detail.content.as_deref(), Some(body));
+        assert_eq!(detail.config_type, None);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rnacos_get_config_falls_back_to_openapi_when_console_is_unavailable() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let body = "{\n  \"Name\": \"Hello\"\n}";
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut socket).await;
+            assert!(request.split_whitespace().nth(1).unwrap().starts_with("/rnacos/api/console/v2/config/info?"));
+            write_json_response(&mut socket, r#"{"success":false,"message":"console unavailable"}"#).await;
+
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let target = read_request_target(&mut socket).await;
+            assert!(target.starts_with("/v1/cs/configs?"));
+            assert!(!target.contains("show=all"));
+            write_json_response(&mut socket, body).await;
+        });
+        let mut config = test_admin_config(format!("http://{address}"));
+        config.implementation = Some(NacosImplementation::RNacos);
+        config.rnacos_console_addr = format!("http://{address}");
         let admin = NacosOpenApiAdmin::new(config).unwrap();
 
         let detail = admin
