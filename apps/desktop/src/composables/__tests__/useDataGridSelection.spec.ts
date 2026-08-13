@@ -40,6 +40,19 @@ function rowEvent(options: { meta?: boolean; shift?: boolean } = {}): MouseEvent
 }
 
 describe("useDataGridSelection", () => {
+  it("keeps selected columns and the range anchor attached to their columns after reordering", () => {
+    const selection = createSelection();
+
+    selection.selectColumn(0);
+    selection.selectColumn(2, rowEvent({ meta: true }));
+    selection.remapColumnSelection([0, 1, 2], [1, 2, 0]);
+
+    expect(selection.selectedColumnIndexes.value).toEqual(new Set([1, 2]));
+
+    selection.selectColumn(0, rowEvent({ shift: true }));
+    expect(selection.selectedColumnIndexes.value).toEqual(new Set([0, 1, 2]));
+  });
+
   it("invalidates synthetic context state for ordinary, Ctrl, and Cmd cell selection", () => {
     const originalDocument = globalThis.document;
     const fakeDocument = {
@@ -268,6 +281,34 @@ describe("useDataGridSelection", () => {
       selection.finishCellSelection();
       globalThis.requestAnimationFrame = originalRequestAnimationFrame;
       globalThis.cancelAnimationFrame = originalCancelAnimationFrame;
+      Object.defineProperty(globalThis, "document", { configurable: true, value: originalDocument });
+    }
+  });
+
+  it("keeps a restored range stable until a new pointer gesture begins", () => {
+    const originalDocument = globalThis.document;
+    const fakeDocument = {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+    } as unknown as Document;
+    Object.defineProperty(globalThis, "document", { configurable: true, value: fakeDocument });
+    const selection = createSelection();
+
+    try {
+      selection.restoreCellSelectionState({
+        anchor: { rowIndex: 0, colIndex: 0 },
+        focus: { rowIndex: 1, colIndex: 1 },
+      });
+
+      selection.extendCellSelection(3, 2);
+      expect(selection.isSelectingCells.value).toBe(false);
+      expect(selection.selectedRange.value).toEqual({ startRow: 0, endRow: 1, startCol: 0, endCol: 1 });
+
+      selection.beginCellSelection(1, 1, { button: 0, clientX: 0, clientY: 0, preventDefault() {} } as MouseEvent);
+      selection.extendCellSelection(3, 2);
+      expect(selection.selectedRange.value).toEqual({ startRow: 1, endRow: 3, startCol: 1, endCol: 2 });
+    } finally {
+      selection.finishCellSelection();
       Object.defineProperty(globalThis, "document", { configurable: true, value: originalDocument });
     }
   });

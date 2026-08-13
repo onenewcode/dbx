@@ -40,6 +40,8 @@ const XLSX_CANCELLABLE_READ_CHUNK_BYTES: usize = 64 * 1024;
 const XLSX_CANCEL_POLL_INTERVAL: Duration = Duration::from_millis(25);
 // INSERT ALL has a practical statement-size limit on Oracle, even when the requested batch is larger.
 const MAX_ORACLE_IMPORT_BATCH_ROWS: usize = 500;
+const SQLITE_APPEND_COMMIT_ROWS: usize = 10_000;
+const SQLITE_APPEND_COMMIT_SQL_BYTES: usize = 8 * 1024 * 1024;
 const POSTGRES_COPY_TARGET_BYTES: usize = 8 * 1024 * 1024;
 const POSTGRES_COPY_MAX_ROWS: usize = 50_000;
 // Bound the additional memory used while converting one source row into owned
@@ -387,6 +389,24 @@ pub fn normalize_header(value: &str, index: usize) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+fn unique_import_headers(headers: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut next_suffix = HashMap::<String, usize>::new();
+    headers
+        .into_iter()
+        .map(|header| {
+            let suffix = next_suffix.entry(header.to_lowercase()).or_default();
+            loop {
+                let candidate = if *suffix == 0 { header.clone() } else { format!("{header}_{suffix}") };
+                *suffix += 1;
+                if seen.insert(candidate.to_lowercase()) {
+                    break candidate;
+                }
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -895,11 +915,12 @@ fn parse_csv_reader_inner<R: IoRead>(
         index += 1;
         let row_number = index;
         if config.row_range.title_row == Some(row_number) {
-            columns = record
-                .iter()
-                .enumerate()
-                .map(|(index, header)| normalize_header(header.trim_start_matches('\u{feff}'), index))
-                .collect();
+            columns = unique_import_headers(
+                record
+                    .iter()
+                    .enumerate()
+                    .map(|(index, header)| normalize_header(header.trim_start_matches('\u{feff}'), index)),
+            );
             continue;
         }
         if row_number < config.row_range.data_start_row {
@@ -1134,13 +1155,33 @@ fn xlsx_datetime_label(value: &ExcelDateTime, temporal_kind: Option<XlsxTemporal
     }
 }
 
-fn xlsx_cell_value_with_temporal_kind(cell: &Data, temporal_kind: Option<XlsxTemporalKind>) -> serde_json::Value {
+fn xlsx_string_value(value: &str, empty_string_as_null: bool) -> serde_json::Value {
+    if empty_string_as_null && value.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(value.to_string())
+    }
+}
+
+fn xlsx_number_value(value: f64) -> serde_json::Value {
+    if value.is_finite() && value.fract() == 0.0 && value >= i64::MIN as f64 && value < -(i64::MIN as f64) {
+        let integer = value as i64;
+        if integer as f64 == value {
+            return serde_json::Value::Number(integer.into());
+        }
+    }
+    serde_json::Number::from_f64(value).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
+}
+
+fn xlsx_cell_value_with_temporal_kind(
+    cell: &Data,
+    temporal_kind: Option<XlsxTemporalKind>,
+    empty_string_as_null: bool,
+) -> serde_json::Value {
     match cell {
         Data::Empty => serde_json::Value::Null,
-        Data::String(s) => csv_value(s),
-        Data::Float(n) => {
-            serde_json::Number::from_f64(*n).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
-        }
+        Data::String(s) => xlsx_string_value(s, empty_string_as_null),
+        Data::Float(n) => xlsx_number_value(*n),
         Data::Int(n) => serde_json::Value::Number((*n).into()),
         Data::Bool(v) => serde_json::Value::Bool(*v),
         Data::DateTime(v) => serde_json::Value::String(xlsx_datetime_label(v, temporal_kind)),
@@ -1182,7 +1223,7 @@ fn xlsx_cell_text_value(cell: &Data, style: Option<&XlsxCellStyle>) -> Option<St
 }
 
 pub fn xlsx_cell_value(cell: &Data) -> serde_json::Value {
-    xlsx_cell_value_with_temporal_kind(cell, None)
+    xlsx_cell_value_with_temporal_kind(cell, None, true)
 }
 
 fn xlsx_cell_label_with_temporal_kind(cell: &Data, temporal_kind: Option<XlsxTemporalKind>) -> String {
@@ -1206,14 +1247,13 @@ pub fn xlsx_cell_label(cell: &Data) -> String {
 fn xlsx_cell_ref_value_with_temporal_kind(
     cell: &DataRef<'_>,
     temporal_kind: Option<XlsxTemporalKind>,
+    empty_string_as_null: bool,
 ) -> serde_json::Value {
     match cell {
         DataRef::Empty => serde_json::Value::Null,
-        DataRef::String(s) => csv_value(s),
-        DataRef::SharedString(s) => csv_value(s),
-        DataRef::Float(n) => {
-            serde_json::Number::from_f64(*n).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
-        }
+        DataRef::String(s) => xlsx_string_value(s, empty_string_as_null),
+        DataRef::SharedString(s) => xlsx_string_value(s, empty_string_as_null),
+        DataRef::Float(n) => xlsx_number_value(*n),
         DataRef::Int(n) => serde_json::Value::Number((*n).into()),
         DataRef::Bool(v) => serde_json::Value::Bool(*v),
         DataRef::DateTime(v) => serde_json::Value::String(xlsx_datetime_label(v, temporal_kind)),
@@ -1239,6 +1279,10 @@ fn xlsx_cell_ref_label_with_temporal_kind(cell: &DataRef<'_>, temporal_kind: Opt
 }
 
 pub fn xlsx_sheet_names(path: &str) -> Result<Vec<String>, String> {
+    if is_legacy_xls_path(path) {
+        let workbook = open_workbook_auto(path).map_err(|error| error.to_string())?;
+        return Ok(workbook.sheet_names().to_vec());
+    }
     let file = File::open(path).map_err(|error| error.to_string())?;
     let mut zip = zip::ZipArchive::new(file).map_err(|error| error.to_string())?;
     let workbook_xml = read_xlsx_zip_text(&mut zip, "xl/workbook.xml")?;
@@ -1543,6 +1587,8 @@ struct XlsxPreviewRawCell {
     style_id: Option<usize>,
     value: String,
     inline_value: String,
+    has_value: bool,
+    has_inline_value: bool,
 }
 
 fn xlsx_dimension_bounds(reference: &str) -> Option<((usize, usize), (usize, usize))> {
@@ -1809,6 +1855,7 @@ fn xlsx_preview_cell_value(
     shared_strings: &HashMap<usize, String>,
     styles: &[XlsxCellStyle],
     date_1904: bool,
+    empty_string_as_null: bool,
 ) -> serde_json::Value {
     let cell_type = cell.cell_type.as_deref().unwrap_or_default();
     match cell_type {
@@ -1817,9 +1864,12 @@ fn xlsx_preview_cell_value(
             .parse::<usize>()
             .ok()
             .and_then(|index| shared_strings.get(&index))
-            .map_or(serde_json::Value::Null, |value| csv_value(value)),
-        "inlineStr" => csv_value(&cell.inline_value),
-        "str" | "d" | "e" => csv_value(&cell.value),
+            .map_or(serde_json::Value::Null, |value| xlsx_string_value(value, empty_string_as_null)),
+        "inlineStr" if cell.has_inline_value => xlsx_string_value(&cell.inline_value, empty_string_as_null),
+        "inlineStr" => serde_json::Value::Null,
+        "str" if cell.has_value => xlsx_string_value(&cell.value, empty_string_as_null),
+        "str" => serde_json::Value::Null,
+        "d" | "e" => csv_value(&cell.value),
         "b" => serde_json::Value::Bool(matches!(cell.value.trim(), "1" | "true" | "TRUE")),
         _ => {
             let Some(number) = cell.value.trim().parse::<f64>().ok() else {
@@ -1835,7 +1885,7 @@ fn xlsx_preview_cell_value(
                 let value = ExcelDateTime::new(number, date_type, date_1904);
                 return serde_json::Value::String(xlsx_datetime_label(&value, Some(kind)));
             }
-            serde_json::Number::from_f64(number).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null)
+            xlsx_number_value(number)
         }
     }
 }
@@ -1878,6 +1928,7 @@ fn parse_xlsx_preview_file_with_options(
     let styles_xml = read_xlsx_zip_text(&mut zip, "xl/styles.xml").unwrap_or_default();
     let styles = parse_xlsx_styles(&styles_xml);
     let date_1904 = xlsx_workbook_uses_1904_date_system(&workbook_xml);
+    let empty_string_as_null = options.empty_string_as_null.unwrap_or(true);
     let row_range = effective_import_row_range(options)?;
     let preview_limit = preview_limit.max(1);
     let preview_last_row = row_range.data_start_row.saturating_add(preview_limit.saturating_sub(1));
@@ -1951,10 +2002,18 @@ fn parse_xlsx_preview_file_with_options(
                     };
                 }
                 Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"v") => {
+                    current_cell.has_value = true;
                     in_value = true;
                 }
+                Ok(Event::Empty(element)) if xml_local_name_eq(element.name().as_ref(), b"v") => {
+                    current_cell.has_value = true;
+                }
                 Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"t") => {
+                    current_cell.has_inline_value = true;
                     in_inline_text = inline_phonetic_depth == 0;
+                }
+                Ok(Event::Empty(element)) if xml_local_name_eq(element.name().as_ref(), b"t") => {
+                    current_cell.has_inline_value = true;
                 }
                 Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"rPh") => {
                     inline_phonetic_depth = inline_phonetic_depth.saturating_add(1);
@@ -2034,16 +2093,14 @@ fn parse_xlsx_preview_file_with_options(
     let column_count = end_column.saturating_sub(start_column).saturating_add(1);
     let mut columns = if let Some(title_row) = row_range.title_row {
         let absolute_title_row = start_row.saturating_add(title_row.saturating_sub(1));
-        (0..column_count)
-            .map(|index| {
-                let column = start_column + index;
-                let value = raw_cells
-                    .get(&(absolute_title_row, column))
-                    .map(|cell| xlsx_preview_cell_value(cell, &shared_strings, &styles, date_1904))
-                    .unwrap_or(serde_json::Value::Null);
-                normalize_header(&xlsx_preview_cell_label(&value), index)
-            })
-            .collect::<Vec<_>>()
+        unique_import_headers((0..column_count).map(|index| {
+            let column = start_column + index;
+            let value = raw_cells
+                .get(&(absolute_title_row, column))
+                .map(|cell| xlsx_preview_cell_value(cell, &shared_strings, &styles, date_1904, empty_string_as_null))
+                .unwrap_or(serde_json::Value::Null);
+            normalize_header(&xlsx_preview_cell_label(&value), index)
+        }))
     } else {
         Vec::new()
     };
@@ -2066,7 +2123,9 @@ fn parse_xlsx_preview_file_with_options(
                 .map(|index| {
                     raw_cells
                         .get(&(absolute_row, start_column + index))
-                        .map(|cell| xlsx_preview_cell_value(cell, &shared_strings, &styles, date_1904))
+                        .map(|cell| {
+                            xlsx_preview_cell_value(cell, &shared_strings, &styles, date_1904, empty_string_as_null)
+                        })
                         .unwrap_or(serde_json::Value::Null)
                 })
                 .collect::<Vec<_>>()
@@ -2115,11 +2174,9 @@ where
     for (index, source_row) in range.rows().enumerate() {
         let row_number = index + 1;
         if row_range.title_row == Some(row_number) {
-            return source_row
-                .iter()
-                .enumerate()
-                .map(|(index, cell)| normalize_header(&cell_label(cell, None), index))
-                .collect();
+            return unique_import_headers(
+                source_row.iter().enumerate().map(|(index, cell)| normalize_header(&cell_label(cell, None), index)),
+            );
         }
         let row_is_within_range = match row_range.last_data_row {
             Some(last) => row_number <= last,
@@ -2232,6 +2289,7 @@ fn xlsx_stream_cell_value(
     styles: &[XlsxCellStyle],
     date_1904: bool,
     format_as_text: bool,
+    empty_string_as_null: bool,
 ) -> Result<serde_json::Value, String> {
     if format_as_text && cell.cell_type.as_deref().unwrap_or_default().is_empty() {
         if let Ok(number) = cell.value.trim().parse::<f64>() {
@@ -2242,12 +2300,14 @@ fn xlsx_stream_cell_value(
         }
     }
     if cell.cell_type.as_deref() != Some("s") {
-        return Ok(xlsx_preview_cell_value(cell, &HashMap::new(), styles, date_1904));
+        return Ok(xlsx_preview_cell_value(cell, &HashMap::new(), styles, date_1904, empty_string_as_null));
     }
     let Some(index) = cell.value.parse::<usize>().ok() else {
         return Ok(serde_json::Value::Null);
     };
-    Ok(shared_strings.get(index)?.map_or(serde_json::Value::Null, |value| csv_value(&value)))
+    Ok(shared_strings
+        .get(index)?
+        .map_or(serde_json::Value::Null, |value| xlsx_string_value(&value, empty_string_as_null)))
 }
 
 fn xlsx_cell_ref_text_value(cell: &DataRef<'_>, style: Option<&XlsxCellStyle>) -> Option<String> {
@@ -2397,11 +2457,12 @@ impl XlsxStreamRowsState {
             if self.columns.is_empty() {
                 let column_count = self.declared_column_count.unwrap_or(values.len()).max(values.len());
                 values.resize(column_count, serde_json::Value::Null);
-                self.columns = values
-                    .iter()
-                    .enumerate()
-                    .map(|(index, value)| normalize_header(&xlsx_preview_cell_label(value), index))
-                    .collect();
+                self.columns = unique_import_headers(
+                    values
+                        .iter()
+                        .enumerate()
+                        .map(|(index, value)| normalize_header(&xlsx_preview_cell_label(value), index)),
+                );
             }
             return Ok(());
         }
@@ -2498,6 +2559,7 @@ fn stream_xlsx_rows_to_channel_with_control(
     // This producer runs on a blocking thread and communicates in bounded batches. The small
     // channel capacity applies backpressure when database writes are slower than XML parsing.
     let total_bytes = std::fs::metadata(path).map(|metadata| metadata.len()).unwrap_or_default();
+    let empty_string_as_null = options.empty_string_as_null.unwrap_or(true);
     let mut zip = zip::ZipArchive::new(File::open(path).map_err(|error| error.to_string())?)
         .map_err(|error| error.to_string())?;
     let workbook_xml = read_xlsx_zip_text(&mut zip, "xl/workbook.xml")?;
@@ -2615,9 +2677,19 @@ fn stream_xlsx_rows_to_channel_with_control(
                     ..XlsxPreviewRawCell::default()
                 };
             }
-            Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"v") => in_value = true,
+            Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"v") => {
+                current_cell.has_value = true;
+                in_value = true;
+            }
+            Ok(Event::Empty(element)) if xml_local_name_eq(element.name().as_ref(), b"v") => {
+                current_cell.has_value = true;
+            }
             Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"t") => {
+                current_cell.has_inline_value = true;
                 in_inline_text = inline_phonetic_depth == 0;
+            }
+            Ok(Event::Empty(element)) if xml_local_name_eq(element.name().as_ref(), b"t") => {
+                current_cell.has_inline_value = true;
             }
             Ok(Event::Start(element)) if xml_local_name_eq(element.name().as_ref(), b"rPh") => {
                 inline_phonetic_depth = inline_phonetic_depth.saturating_add(1);
@@ -2636,8 +2708,14 @@ fn stream_xlsx_rows_to_channel_with_control(
             Ok(Event::End(element)) if xml_local_name_eq(element.name().as_ref(), b"c") => {
                 if let Some((row, column)) = current_position.take() {
                     let format_as_text = rows.is_text_source_column(row, column, &text_source_columns);
-                    let value =
-                        xlsx_stream_cell_value(&current_cell, &mut shared_strings, &styles, date_1904, format_as_text)?;
+                    let value = xlsx_stream_cell_value(
+                        &current_cell,
+                        &mut shared_strings,
+                        &styles,
+                        date_1904,
+                        format_as_text,
+                        empty_string_as_null,
+                    )?;
                     rows.push_cell(row, column, value, progress)?;
                     current_cell = XlsxPreviewRawCell::default();
                 }
@@ -2755,31 +2833,28 @@ fn parse_xlsx_range<T, Label, Value, TextValue, IsNumeric>(
 where
     T: CellType,
     Label: Fn(&T, Option<XlsxTemporalKind>) -> String,
-    Value: Fn(&T, Option<XlsxTemporalKind>) -> serde_json::Value,
+    Value: Fn(&T, Option<XlsxTemporalKind>, bool) -> serde_json::Value,
     TextValue: Fn(&T, Option<&XlsxCellStyle>) -> Option<String>,
     IsNumeric: Fn(&T) -> bool,
 {
     let (range_start_row, range_start_column) =
         range.start().map(|(row, column)| (row as usize, column as usize)).unwrap_or_default();
     let row_range = effective_import_row_range(options)?;
+    let empty_string_as_null = options.empty_string_as_null.unwrap_or(true);
     let mut columns = Vec::new();
     let mut rows = Vec::new();
     let mut total_rows = 0;
     for (index, source_row) in range.rows().enumerate() {
         let row_number = index + 1;
         if row_range.title_row == Some(row_number) {
-            columns = source_row
-                .iter()
-                .enumerate()
-                .map(|(index, cell)| {
-                    // Calamine rows are relative to the used range, while XLSX style coordinates are worksheet-absolute.
-                    let cell_position = (range_start_row + row_number, range_start_column + index + 1);
-                    normalize_header(
-                        &cell_label(cell, cell_styles.get(&cell_position).and_then(|style| style.temporal_kind)),
-                        index,
-                    )
-                })
-                .collect();
+            columns = unique_import_headers(source_row.iter().enumerate().map(|(index, cell)| {
+                // Calamine rows are relative to the used range, while XLSX style coordinates are worksheet-absolute.
+                let cell_position = (range_start_row + row_number, range_start_column + index + 1);
+                normalize_header(
+                    &cell_label(cell, cell_styles.get(&cell_position).and_then(|style| style.temporal_kind)),
+                    index,
+                )
+            }));
             continue;
         }
         if row_number < row_range.data_start_row {
@@ -2812,7 +2887,7 @@ where
                             return Ok(serde_json::Value::String(text));
                         }
                     }
-                    Ok(cell_value(cell, style.and_then(|style| style.temporal_kind)))
+                    Ok(cell_value(cell, style.and_then(|style| style.temporal_kind), empty_string_as_null))
                 })
                 .transpose()?
                 .unwrap_or(serde_json::Value::Null);
@@ -3193,6 +3268,7 @@ fn effective_import_batch_size(db_type: &DatabaseType, requested: usize) -> usiz
         DatabaseType::OceanbaseOracle | DatabaseType::Iris => 1,
         DatabaseType::CloudflareD1 => 100,
         DatabaseType::SqlServer => 1000,
+        DatabaseType::Sqlite => SQLITE_APPEND_COMMIT_ROWS,
         _ => usize::MAX,
     };
     requested.max(1).min(max_rows)
@@ -4073,6 +4149,61 @@ struct ImportBatchExecutionPolicy {
     allow_postgres_copy: bool,
 }
 
+#[derive(Debug)]
+struct SqliteAppendTransaction {
+    statements: Vec<String>,
+    rows: usize,
+    sql_bytes: usize,
+    max_rows: usize,
+    max_sql_bytes: usize,
+}
+
+impl SqliteAppendTransaction {
+    fn new() -> Self {
+        Self::with_limits(SQLITE_APPEND_COMMIT_ROWS, SQLITE_APPEND_COMMIT_SQL_BYTES)
+    }
+
+    fn with_limits(max_rows: usize, max_sql_bytes: usize) -> Self {
+        Self {
+            statements: Vec::new(),
+            rows: 0,
+            sql_bytes: 0,
+            max_rows: max_rows.max(1),
+            max_sql_bytes: max_sql_bytes.max(1),
+        }
+    }
+
+    fn should_flush_before(&self, batch: &ImportSqlBatch) -> bool {
+        !self.statements.is_empty()
+            && (self.rows.saturating_add(batch.row_count) > self.max_rows
+                || self.sql_bytes.saturating_add(batch.sql.len()) > self.max_sql_bytes)
+    }
+
+    fn push(&mut self, batch: ImportSqlBatch) {
+        self.rows = self.rows.saturating_add(batch.row_count);
+        self.sql_bytes = self.sql_bytes.saturating_add(batch.sql.len());
+        self.statements.push(batch.sql);
+    }
+
+    fn is_ready(&self) -> bool {
+        self.rows >= self.max_rows || self.sql_bytes >= self.max_sql_bytes
+    }
+
+    fn take(&mut self) -> (Vec<String>, usize) {
+        let statements = std::mem::take(&mut self.statements);
+        let rows = std::mem::take(&mut self.rows);
+        self.sql_bytes = 0;
+        (statements, rows)
+    }
+}
+
+fn sqlite_append_transaction_for_import(
+    mode: &TableImportMode,
+    db_type: &DatabaseType,
+) -> Option<SqliteAppendTransaction> {
+    (matches!(mode, TableImportMode::Append) && *db_type == DatabaseType::Sqlite).then(SqliteAppendTransaction::new)
+}
+
 fn supports_transactional_import_truncate(db_type: &DatabaseType) -> bool {
     matches!(
         db_type,
@@ -4132,6 +4263,93 @@ async fn execute_import_transaction(
 }
 
 #[allow(clippy::too_many_arguments)]
+async fn flush_sqlite_append_transaction(
+    state: &AppState,
+    pool_key: &str,
+    import_id: &str,
+    is_cancelled: &impl Fn(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>>,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    transaction: &mut SqliteAppendTransaction,
+    rows_imported: usize,
+    db_write_ms: &mut u128,
+    statement_count: &mut usize,
+) -> Result<usize, ImportRowsBatchError> {
+    if transaction.statements.is_empty() {
+        return Ok(rows_imported);
+    }
+    ensure_import_write_allowed(import_id, is_cancelled, rows_imported).await?;
+    let (statements, rows) = transaction.take();
+    execute_import_transaction(
+        state,
+        pool_key,
+        connection_id,
+        database,
+        schema,
+        &statements,
+        db_write_ms,
+        statement_count,
+    )
+    .await
+    .map_err(|message| ImportRowsBatchError::with_rows_imported(rows_imported, message))?;
+    Ok(rows_imported.saturating_add(rows))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_sqlite_append_transaction<F>(
+    state: &AppState,
+    pool_key: &str,
+    request: &TableImportRequest,
+    is_cancelled: &impl Fn(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send + '_>>,
+    transaction: &mut Option<SqliteAppendTransaction>,
+    rows_imported: usize,
+    total_rows: usize,
+    started_at: Instant,
+    db_write_ms: &mut u128,
+    statement_count: &mut usize,
+    progress_callback: &mut F,
+) -> Result<usize, String>
+where
+    F: FnMut(TableImportProgress),
+{
+    let Some(transaction) = transaction.as_mut() else {
+        return Ok(rows_imported);
+    };
+    match flush_sqlite_append_transaction(
+        state,
+        pool_key,
+        &request.import_id,
+        is_cancelled,
+        &request.connection_id,
+        &request.database,
+        &request.schema,
+        transaction,
+        rows_imported,
+        db_write_ms,
+        statement_count,
+    )
+    .await
+    {
+        Ok(rows) => Ok(rows),
+        Err(error) if error.cancelled => {
+            progress_callback(import_progress(
+                &request.import_id,
+                TableImportStatus::Cancelled,
+                rows_imported,
+                total_rows,
+                started_at,
+                None,
+            ));
+            Err(error.message)
+        }
+        Err(error) => {
+            Err(emit_import_error(progress_callback, request, rows_imported, total_rows, started_at, error.message))
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn execute_import_rows_batch(
     state: &AppState,
     pool_key: &str,
@@ -4151,6 +4369,7 @@ async fn execute_import_rows_batch(
     mode: &TableImportMode,
     pending_truncate: bool,
     postgres_copy_accumulator: &mut Option<PostgresCopyAccumulator>,
+    sqlite_append_transaction: &mut Option<SqliteAppendTransaction>,
     kingbase_oracle_mode: bool,
     date_time_format: Option<&str>,
     hard_sql_bytes: Option<usize>,
@@ -4223,6 +4442,45 @@ async fn execute_import_rows_batch(
         hard_sql_bytes,
     )
     .map_err(|message| ImportRowsBatchError::with_rows_imported(rows_imported, message))?;
+    if let Some(transaction) = sqlite_append_transaction.as_mut() {
+        for batch in batches {
+            ensure_import_write_allowed(import_id, is_cancelled, rows_imported).await?;
+            if transaction.should_flush_before(&batch) {
+                rows_imported = flush_sqlite_append_transaction(
+                    state,
+                    pool_key,
+                    import_id,
+                    is_cancelled,
+                    connection_id,
+                    database,
+                    schema,
+                    transaction,
+                    rows_imported,
+                    db_write_ms,
+                    statement_count,
+                )
+                .await?;
+            }
+            transaction.push(batch);
+            if transaction.is_ready() {
+                rows_imported = flush_sqlite_append_transaction(
+                    state,
+                    pool_key,
+                    import_id,
+                    is_cancelled,
+                    connection_id,
+                    database,
+                    schema,
+                    transaction,
+                    rows_imported,
+                    db_write_ms,
+                    statement_count,
+                )
+                .await?;
+            }
+        }
+        return Ok(rows_imported);
+    }
     if execution_policy.transactional {
         ensure_import_write_allowed(import_id, is_cancelled, rows_imported).await?;
         let mut statements = Vec::with_capacity(batches.len() + usize::from(execution_policy.include_truncate));
@@ -4323,11 +4581,12 @@ fn delimited_columns_and_first_record<R: std::io::Read>(
         let record = record.map_err(|e| e.to_string())?;
         let row_number = index + 1;
         if config.row_range.title_row == Some(row_number) {
-            columns = record
-                .iter()
-                .enumerate()
-                .map(|(index, header)| normalize_header(header.trim_start_matches('\u{feff}'), index))
-                .collect();
+            columns = unique_import_headers(
+                record
+                    .iter()
+                    .enumerate()
+                    .map(|(index, header)| normalize_header(header.trim_start_matches('\u{feff}'), index)),
+            );
             continue;
         }
         if row_number < config.row_range.data_start_row {
@@ -5293,6 +5552,7 @@ where
             &request.table,
             &request.schema,
         );
+        let mut sqlite_append_transaction = sqlite_append_transaction_for_import(&request.mode, db_type);
         let mut pending_truncate =
             matches!(request.mode, TableImportMode::Truncate) && supports_transactional_import_truncate(db_type);
         if matches!(request.mode, TableImportMode::Truncate) && !pending_truncate {
@@ -5353,6 +5613,7 @@ where
                         &request.mode,
                         pending_truncate,
                         &mut postgres_copy_accumulator,
+                        &mut sqlite_append_transaction,
                         kingbase_oracle_mode,
                         request.date_time_format.as_deref(),
                         import_sql_hard_limit,
@@ -5450,6 +5711,20 @@ where
                 ));
             }
         }
+        rows_imported = finish_sqlite_append_transaction(
+            state,
+            pool_key,
+            request,
+            &is_cancelled,
+            &mut sqlite_append_transaction,
+            rows_imported,
+            total_rows,
+            started_at,
+            &mut db_write_ms,
+            &mut statement_count,
+            &mut progress_callback,
+        )
+        .await?;
         let flushed_rows = match flush_pending_postgres_copy(
             state,
             pool_key,
@@ -5756,6 +6031,7 @@ where
             &request.table,
             &request.schema,
         );
+        let mut sqlite_append_transaction = sqlite_append_transaction_for_import(&request.mode, db_type);
         let mut pending_truncate =
             matches!(request.mode, TableImportMode::Truncate) && supports_transactional_import_truncate(db_type);
         if matches!(request.mode, TableImportMode::Truncate) && !pending_truncate {
@@ -5839,6 +6115,7 @@ where
                         &request.mode,
                         pending_truncate,
                         &mut postgres_copy_accumulator,
+                        &mut sqlite_append_transaction,
                         kingbase_oracle_mode,
                         request.date_time_format.as_deref(),
                         import_sql_hard_limit,
@@ -5941,6 +6218,20 @@ where
                 ));
             }
         }
+        rows_imported = finish_sqlite_append_transaction(
+            state,
+            pool_key,
+            request,
+            &is_cancelled,
+            &mut sqlite_append_transaction,
+            rows_imported,
+            0,
+            started_at,
+            &mut db_write_ms,
+            &mut statement_count,
+            &mut progress_callback,
+        )
+        .await?;
         let flushed_rows = match flush_pending_postgres_copy(
             state,
             pool_key,
@@ -6088,6 +6379,7 @@ where
         &request.table,
         &request.schema,
     );
+    let mut sqlite_append_transaction = sqlite_append_transaction_for_import(&request.mode, db_type);
 
     let mut pending_truncate =
         matches!(request.mode, TableImportMode::Truncate) && supports_transactional_import_truncate(db_type);
@@ -6133,6 +6425,7 @@ where
             &request.mode,
             pending_truncate,
             &mut postgres_copy_accumulator,
+            &mut sqlite_append_transaction,
             kingbase_oracle_mode,
             request.date_time_format.as_deref(),
             import_sql_hard_limit,
@@ -6179,6 +6472,22 @@ where
             last_progress_emit = Instant::now();
         }
     }
+
+    rows_imported = finish_sqlite_append_transaction(
+        state,
+        pool_key,
+        request,
+        &is_cancelled,
+        &mut sqlite_append_transaction,
+        rows_imported,
+        total_rows,
+        started_at,
+        &mut db_write_ms,
+        &mut statement_count,
+        &mut progress_callback,
+    )
+    .await?
+    .min(total_rows);
 
     let flushed_rows = flush_pending_postgres_copy(
         state,
@@ -6290,6 +6599,21 @@ mod tests {
         assert_eq!(plan.mapped_source_indexes, vec![1, 0]);
         assert_eq!(plan.target_columns, vec!["user_id", "display_name"]);
         assert_eq!(plan.column_types, vec![Some("BIGINT".to_string()), Some("VARCHAR(255)".to_string())]);
+    }
+
+    #[test]
+    fn duplicate_import_headers_receive_stable_case_insensitive_suffixes() {
+        assert_eq!(
+            unique_import_headers(["Name", "name", "name", "name_1"].into_iter().map(str::to_string)),
+            vec!["Name", "name_1", "name_2", "name_1_1"]
+        );
+        assert_eq!(
+            unique_import_headers(["id", "display_name"].into_iter().map(str::to_string)),
+            vec!["id", "display_name"]
+        );
+        let many = unique_import_headers(std::iter::repeat_n("value".to_string(), 10_000));
+        assert_eq!(many.len(), 10_000);
+        assert_eq!(many.last().map(String::as_str), Some("value_9999"));
     }
 
     #[test]
@@ -6514,6 +6838,158 @@ mod tests {
         zip.finish().unwrap().into_inner()
     }
 
+    fn assert_xlsx_empty_string_option(options: TableImportParseOptions, expected_row: Vec<serde_json::Value>) {
+        let path =
+            std::env::temp_dir().join(format!("dbx-table-import-empty-string-option-{}.xlsx", uuid::Uuid::new_v4()));
+        let sheet_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:E2"/>
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="inlineStr"><is><t>inline</t></is></c>
+      <c r="B1" t="inlineStr"><is><t>shared</t></is></c>
+      <c r="C1" t="inlineStr"><is><t>formula</t></is></c>
+      <c r="D1" t="inlineStr"><is><t>absent</t></is></c>
+      <c r="E1" t="inlineStr"><is><t>empty_cell</t></is></c>
+    </row>
+    <row r="2">
+      <c r="A2" t="inlineStr"><is><t></t></is></c>
+      <c r="B2" t="s"><v>0</v></c>
+      <c r="C2" t="str"><f>""</f><v></v></c>
+      <c r="E2"/>
+    </row>
+  </sheetData>
+</worksheet>"#;
+        let shared_strings_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1" uniqueCount="1">
+  <si><t></t></si>
+</sst>"#;
+        std::fs::write(&path, build_preview_test_xlsx(sheet_xml, Some(shared_strings_xml))).unwrap();
+
+        let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+        let (preview, _) = parse_xlsx_preview_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+        stream_xlsx_rows_to_channel(&path.to_string_lossy(), &options, 500, None, HashSet::new(), false, sender)
+            .unwrap();
+
+        let mut streamed_columns = Vec::new();
+        let mut streamed_rows = Vec::new();
+        while let Some(message) = receiver.blocking_recv() {
+            match message.unwrap() {
+                XlsxStreamMessage::Header(columns) => streamed_columns = columns,
+                XlsxStreamMessage::Rows(rows) => streamed_rows.extend(rows),
+                _ => {}
+            }
+        }
+
+        assert_eq!(parsed.columns, vec!["inline", "shared", "formula", "absent", "empty_cell"]);
+        assert_eq!(preview.columns, parsed.columns);
+        assert_eq!(streamed_columns, parsed.columns);
+        assert_eq!(parsed.rows, vec![expected_row.clone()]);
+        assert_eq!(preview.rows, parsed.rows);
+        assert_eq!(streamed_rows, parsed.rows);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn xlsx_duplicate_headers_are_unique_in_preview_parse_and_streaming() {
+        let path =
+            std::env::temp_dir().join(format!("dbx-table-import-duplicate-headers-{}.xlsx", uuid::Uuid::new_v4()));
+        let sheet_xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <dimension ref="A1:B2"/>
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="inlineStr"><is><t>name</t></is></c>
+      <c r="B1" t="inlineStr"><is><t>name</t></is></c>
+    </row>
+    <row r="2">
+      <c r="A2" t="inlineStr"><is><t>Ada</t></is></c>
+      <c r="B2" t="inlineStr"><is><t>Lovelace</t></is></c>
+    </row>
+  </sheetData>
+</worksheet>"#;
+        std::fs::write(&path, build_preview_test_xlsx(sheet_xml, None)).unwrap();
+        let options = TableImportParseOptions::default();
+
+        let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+        let (preview, _) = parse_xlsx_preview_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+        stream_xlsx_rows_to_channel(&path.to_string_lossy(), &options, 500, None, HashSet::new(), false, sender)
+            .unwrap();
+
+        let mut streamed_columns = Vec::new();
+        while let Some(message) = receiver.blocking_recv() {
+            if let XlsxStreamMessage::Header(columns) = message.unwrap() {
+                streamed_columns = columns;
+            }
+        }
+
+        assert_eq!(parsed.columns, vec!["name", "name_1"]);
+        assert_eq!(preview.columns, parsed.columns);
+        assert_eq!(streamed_columns, parsed.columns);
+        assert_eq!(parsed.rows, vec![vec![serde_json::json!("Ada"), serde_json::json!("Lovelace")]]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn xlsx_preserves_explicit_empty_strings_when_configured() {
+        let options =
+            TableImportParseOptions { empty_string_as_null: Some(false), ..TableImportParseOptions::default() };
+
+        assert_xlsx_empty_string_option(
+            options,
+            vec![
+                serde_json::json!(""),
+                serde_json::json!(""),
+                serde_json::json!(""),
+                serde_json::Value::Null,
+                serde_json::Value::Null,
+            ],
+        );
+    }
+
+    #[test]
+    fn xlsx_defaults_explicit_empty_strings_to_null() {
+        assert_xlsx_empty_string_option(TableImportParseOptions::default(), vec![serde_json::Value::Null; 5]);
+    }
+
+    #[test]
+    fn dbx_exported_xlsx_round_trip_preserves_empty_strings_when_configured() {
+        let path =
+            std::env::temp_dir().join(format!("dbx-table-import-empty-round-trip-{}.xlsx", uuid::Uuid::new_v4()));
+        let workbook = build_xlsx_workbook_multi(&[XlsxWorksheetData {
+            sheet_name: Some("Data".to_string()),
+            columns: vec!["empty_text".to_string(), "missing_value".to_string()],
+            column_types: vec!["VARCHAR(255)".to_string(), "VARCHAR(255)".to_string()],
+            column_comments: vec![],
+            rows: vec![vec![serde_json::json!(""), serde_json::Value::Null]],
+            numeric_column_right_align: false,
+        }])
+        .unwrap();
+        std::fs::write(&path, workbook).unwrap();
+        let options =
+            TableImportParseOptions { empty_string_as_null: Some(false), ..TableImportParseOptions::default() };
+
+        let parsed = parse_xlsx_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+        let (preview, _) = parse_xlsx_preview_file_with_options(&path.to_string_lossy(), &options, 10).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+        stream_xlsx_rows_to_channel(&path.to_string_lossy(), &options, 500, None, HashSet::new(), false, sender)
+            .unwrap();
+        let mut streamed_rows = Vec::new();
+        while let Some(message) = receiver.blocking_recv() {
+            if let XlsxStreamMessage::Rows(rows) = message.unwrap() {
+                streamed_rows.extend(rows);
+            }
+        }
+
+        let expected = vec![vec![serde_json::json!(""), serde_json::Value::Null]];
+        assert_eq!(parsed.rows, expected);
+        assert_eq!(preview.rows, parsed.rows);
+        assert_eq!(streamed_rows, parsed.rows);
+        let _ = std::fs::remove_file(path);
+    }
+
     #[test]
     fn retains_only_temporal_and_text_target_xlsx_styles() {
         let styles = vec![
@@ -6560,6 +7036,28 @@ mod tests {
             assert!(error.contains(&source_column), "{error}");
             assert!(error.contains("Save the workbook as .xlsx"), "{error}");
         }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[tokio::test]
+    async fn legacy_xls_preview_reads_sheet_names_without_zip_parser() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-preview-{}.xls", uuid::Uuid::new_v4()));
+        std::fs::write(&path, include_bytes!("../tests/fixtures/issue3683-formatted-numbers.xls")).unwrap();
+        let options = TableImportParseOptions { has_header: Some(false), ..TableImportParseOptions::default() };
+
+        let (parsed, non_streaming, sheets) = parse_import_preview_file_with_options(
+            &path.to_string_lossy(),
+            TableImportSourceFormat::Excel,
+            &options,
+            10,
+        )
+        .await
+        .unwrap();
+
+        assert!(non_streaming);
+        assert_eq!(sheets, vec!["Sheet1"]);
+        assert_eq!(parsed.columns, vec!["column_1", "column_2", "column_3", "column_4", "column_5"]);
+        assert_eq!(parsed.rows.len(), 1);
         let _ = std::fs::remove_file(path);
     }
 
@@ -6674,6 +7172,41 @@ mod tests {
                 serde_json::Value::Null,
                 serde_json::Value::String("false".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn duplicate_csv_headers_map_to_distinct_source_indexes() {
+        let parsed = parse_csv_bytes(b"name,name\nAda,Lovelace\n", 10).unwrap();
+        let mappings = vec![
+            TableImportColumnMapping {
+                source_column: "name".to_string(),
+                target_column: "first_name".to_string(),
+                target_data_type: None,
+            },
+            TableImportColumnMapping {
+                source_column: "name_1".to_string(),
+                target_column: "last_name".to_string(),
+                target_data_type: None,
+            },
+        ];
+
+        assert_eq!(parsed.columns, vec!["name", "name_1"]);
+        let batch = build_import_insert_batch_from_rows(
+            &parsed.rows,
+            &parsed.columns,
+            &mappings,
+            &[],
+            "people",
+            "public",
+            &DatabaseType::Postgres,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(
+            batch.sql,
+            "INSERT INTO \"public\".\"people\" (\"first_name\", \"last_name\") VALUES\n('Ada', 'Lovelace')"
         );
     }
 
@@ -6944,6 +7477,28 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(bytes_read.windows(2).all(|window| window[0] <= window[1]));
         assert!(bytes_read.last().copied().unwrap_or_default() <= bytes.len() as u64);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn streaming_csv_uses_the_same_unique_duplicate_headers_as_preview() {
+        let path = std::env::temp_dir().join(format!("dbx-table-import-duplicate-stream-{}.csv", uuid::Uuid::new_v4()));
+        std::fs::write(&path, b"name,name\nAda,Lovelace\n").unwrap();
+        let options = TableImportParseOptions::default();
+        let preview = parse_csv_bytes(b"name,name\nAda,Lovelace\n", 10).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(16);
+
+        stream_delimited_rows_to_channel(&path.to_string_lossy(), TableImportSourceFormat::Csv, &options, 500, sender)
+            .unwrap();
+
+        let messages =
+            std::iter::from_fn(|| receiver.blocking_recv()).map(|message| message.unwrap()).collect::<Vec<_>>();
+        assert!(
+            matches!(messages.first(), Some(DelimitedStreamMessage::Header(columns)) if columns == &preview.columns)
+        );
+        assert!(messages.iter().any(|message| {
+            matches!(message, DelimitedStreamMessage::Rows { rows, .. } if rows == &vec![vec![serde_json::json!("Ada"), serde_json::json!("Lovelace")]])
+        }));
         let _ = std::fs::remove_file(path);
     }
 
@@ -7371,8 +7926,8 @@ mod tests {
             .flatten()
             .collect::<Vec<_>>();
         assert_eq!(streamed_rows.len(), 2);
-        assert_eq!(streamed_rows[0], vec![serde_json::json!(1.0), serde_json::json!("Ada")]);
-        assert_eq!(streamed_rows[1], vec![serde_json::json!(2.0), serde_json::json!("Grace")]);
+        assert_eq!(streamed_rows[0], vec![serde_json::json!(1), serde_json::json!("Ada")]);
+        assert_eq!(streamed_rows[1], vec![serde_json::json!(2), serde_json::json!("Grace")]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -7725,8 +8280,8 @@ mod tests {
         assert_eq!(
             streamed_rows,
             vec![
-                vec![serde_json::json!(1.0), serde_json::json!("Ada")],
-                vec![serde_json::json!(2.0), serde_json::json!("Grace")],
+                vec![serde_json::json!(1), serde_json::json!("Ada")],
+                vec![serde_json::json!(2), serde_json::json!("Grace")],
             ]
         );
         let _ = std::fs::remove_file(path);
@@ -7792,10 +8347,7 @@ mod tests {
                 streamed_rows.extend(rows);
             }
         }
-        assert_eq!(
-            streamed_rows,
-            vec![vec![serde_json::json!(7.0), serde_json::Value::Null, serde_json::json!("Ada")]]
-        );
+        assert_eq!(streamed_rows, vec![vec![serde_json::json!(7), serde_json::Value::Null, serde_json::json!("Ada")]]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -7821,7 +8373,7 @@ mod tests {
 
         assert_eq!(preview.columns, parsed.columns);
         assert_eq!(preview.rows, parsed.rows);
-        assert_eq!(preview.rows, vec![vec![serde_json::json!(7.0), serde_json::json!("Ada")]]);
+        assert_eq!(preview.rows, vec![vec![serde_json::json!(7), serde_json::json!("Ada")]]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -7848,7 +8400,7 @@ mod tests {
         assert_eq!(preview.columns, parsed.columns);
         assert_eq!(preview.rows, parsed.rows);
         assert_eq!(preview.columns, vec!["id", "column_2", "name"]);
-        assert_eq!(preview.rows, vec![vec![serde_json::json!(7.0), serde_json::Value::Null, serde_json::json!("Ada")]]);
+        assert_eq!(preview.rows, vec![vec![serde_json::json!(7), serde_json::Value::Null, serde_json::json!("Ada")]]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -7905,7 +8457,7 @@ mod tests {
         assert_eq!(preview.columns, parsed.columns);
         assert_eq!(preview.rows, parsed.rows);
         assert_eq!(preview.columns, vec!["id", "name"]);
-        assert_eq!(preview.rows, vec![vec![serde_json::json!(8.0), serde_json::json!("Grace")]]);
+        assert_eq!(preview.rows, vec![vec![serde_json::json!(8), serde_json::json!("Grace")]]);
         let _ = std::fs::remove_file(path);
     }
 
@@ -7979,7 +8531,7 @@ mod tests {
                 serde_json::json!("12.5%"),
                 serde_json::json!("€1.234,50"),
                 serde_json::json!("1,234.50"),
-                serde_json::json!(10.0),
+                serde_json::json!(10),
             ]
         );
         let _ = std::fs::remove_file(path);
@@ -8036,15 +8588,54 @@ mod tests {
     fn borrowed_excel_cells_preserve_owned_cell_conversion_semantics() {
         let shared_string = DataRef::SharedString("Ada");
         let number = DataRef::Float(42.5);
+        let integer = DataRef::Float(42.0);
         let date = DataRef::DateTime(ExcelDateTime::new(45996.0, calamine::ExcelDateTimeType::DateTime, false));
 
         assert_eq!(xlsx_cell_ref_label_with_temporal_kind(&shared_string, None), "Ada");
-        assert_eq!(xlsx_cell_ref_value_with_temporal_kind(&shared_string, None), serde_json::json!("Ada"));
-        assert_eq!(xlsx_cell_ref_value_with_temporal_kind(&number, None), serde_json::json!(42.5));
+        assert_eq!(xlsx_cell_ref_value_with_temporal_kind(&shared_string, None, true), serde_json::json!("Ada"));
+        assert_eq!(xlsx_cell_ref_value_with_temporal_kind(&number, None, true), serde_json::json!(42.5));
+        assert_eq!(xlsx_cell_ref_value_with_temporal_kind(&integer, None, true), serde_json::json!(42));
         assert_eq!(
-            xlsx_cell_ref_value_with_temporal_kind(&date, Some(XlsxTemporalKind::Date)),
+            xlsx_cell_ref_value_with_temporal_kind(&date, Some(XlsxTemporalKind::Date), true),
             serde_json::json!("2025-12-05")
         );
+    }
+
+    #[test]
+    fn excel_zero_fraction_numbers_infer_integer_columns() {
+        let path =
+            std::env::temp_dir().join(format!("dbx-table-import-integer-inference-{}.xlsx", uuid::Uuid::new_v4()));
+        let workbook = build_xlsx_workbook_multi(&[XlsxWorksheetData {
+            sheet_name: Some("Numbers".to_string()),
+            columns: vec!["id".to_string(), "amount".to_string()],
+            column_types: vec![],
+            column_comments: vec![],
+            rows: vec![
+                vec![serde_json::json!(1), serde_json::json!(1.5)],
+                vec![serde_json::json!(2), serde_json::json!(2.25)],
+            ],
+            numeric_column_right_align: false,
+        }])
+        .unwrap();
+        std::fs::write(&path, workbook).unwrap();
+
+        let parsed =
+            parse_xlsx_file_with_options(&path.to_string_lossy(), &TableImportParseOptions::default(), 10).unwrap();
+        let mappings = parsed
+            .columns
+            .iter()
+            .map(|column| TableImportColumnMapping {
+                source_column: column.clone(),
+                target_column: column.clone(),
+                target_data_type: None,
+            })
+            .collect::<Vec<_>>();
+        let plan = build_import_create_table_plan(&parsed, &mappings, "numbers", "app", &DatabaseType::Mysql).unwrap();
+
+        assert_eq!(parsed.rows[0], vec![serde_json::json!(1), serde_json::json!(1.5)]);
+        assert_eq!(plan.columns[0].data_type, "BIGINT");
+        assert_eq!(plan.columns[1].data_type, "DOUBLE");
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -8137,8 +8728,8 @@ mod tests {
 
         assert_eq!(parsed.columns, vec!["id", "name"]);
         assert_eq!(parsed.total_rows, 2);
-        assert_eq!(parsed.rows[0], vec![serde_json::json!(1.0), serde_json::json!("Ada")]);
-        assert_eq!(parsed.rows[1], vec![serde_json::json!(2.0), serde_json::json!("Grace")]);
+        assert_eq!(parsed.rows[0], vec![serde_json::json!(1), serde_json::json!("Ada")]);
+        assert_eq!(parsed.rows[1], vec![serde_json::json!(2), serde_json::json!("Grace")]);
         assert_eq!(preview.rows, parsed.rows);
         let _ = std::fs::remove_file(path);
     }
@@ -8895,6 +9486,7 @@ mod tests {
         let cancellation_checks = Arc::new(AtomicUsize::new(0));
         let checks_for_import = cancellation_checks.clone();
         let mut postgres_copy_accumulator = None;
+        let mut sqlite_append_transaction = None;
         let mut db_write_ms = 0;
         let mut statement_count = 0;
 
@@ -8920,6 +9512,7 @@ mod tests {
             &TableImportMode::Append,
             false,
             &mut postgres_copy_accumulator,
+            &mut sqlite_append_transaction,
             false,
             None,
             None,
@@ -9065,6 +9658,220 @@ mod tests {
         assert!(!policy.transactional);
         assert!(!policy.include_truncate);
         assert!(!policy.allow_postgres_copy);
+    }
+
+    fn sqlite_append_test_plan() -> CompiledImportPlan {
+        CompiledImportPlan {
+            mapped_source_indexes: vec![0],
+            target_columns: vec!["id".to_string()],
+            column_types: vec![Some("integer".to_string())],
+        }
+    }
+
+    struct SqliteAppendTestContext {
+        _dir: tempfile::TempDir,
+        state: AppState,
+        sqlite: crate::db::sqlite::SqliteHandle,
+        pool_key: String,
+        plan: CompiledImportPlan,
+        postgres_copy_accumulator: Option<PostgresCopyAccumulator>,
+        transaction: Option<SqliteAppendTransaction>,
+        db_write_ms: u128,
+        statement_count: usize,
+    }
+
+    impl SqliteAppendTestContext {
+        async fn new(test_name: &str, max_rows: usize) -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+            let state = AppState::new(storage);
+            let pool_key = format!("{test_name}:session:import");
+            let database_path = dir.path().join("target.db");
+            let sqlite =
+                crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
+            crate::db::sqlite::execute_query(&sqlite, "CREATE TABLE items (id INTEGER PRIMARY KEY)").await.unwrap();
+            state.connections.write().await.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+            Self {
+                _dir: dir,
+                state,
+                sqlite,
+                pool_key,
+                plan: sqlite_append_test_plan(),
+                postgres_copy_accumulator: None,
+                transaction: Some(SqliteAppendTransaction::with_limits(max_rows, usize::MAX)),
+                db_write_ms: 0,
+                statement_count: 0,
+            }
+        }
+
+        async fn append(&mut self, ids: &[i64]) -> Result<usize, ImportRowsBatchError> {
+            let rows = ids.iter().map(|id| vec![serde_json::json!(id)]).collect::<Vec<_>>();
+            execute_import_rows_batch(
+                &self.state,
+                &self.pool_key,
+                &self.pool_key,
+                &|_| Box::pin(async { false }),
+                &self.pool_key,
+                "",
+                &rows,
+                Some(&self.plan),
+                None,
+                &[],
+                &[],
+                &[],
+                "items",
+                "",
+                &DatabaseType::Sqlite,
+                &TableImportMode::Append,
+                false,
+                &mut self.postgres_copy_accumulator,
+                &mut self.transaction,
+                false,
+                None,
+                None,
+                &mut self.db_write_ms,
+                &mut self.statement_count,
+            )
+            .await
+        }
+
+        async fn ids(&self) -> Vec<Vec<serde_json::Value>> {
+            crate::db::sqlite::execute_query(&self.sqlite, "SELECT id FROM items ORDER BY id").await.unwrap().rows
+        }
+    }
+
+    #[tokio::test]
+    async fn sqlite_append_commits_only_bounded_row_windows() {
+        let mut context = SqliteAppendTestContext::new("sqlite-append-window", 3).await;
+        let first = context.append(&[1, 2]).await.unwrap();
+        assert_eq!(first, 0);
+        assert!(context.ids().await.is_empty());
+
+        let second = context.append(&[3]).await.unwrap();
+        assert_eq!(second, 3);
+        assert_eq!(context.ids().await.len(), 3);
+        assert_eq!(context.statement_count, 2);
+    }
+
+    #[tokio::test]
+    async fn sqlite_append_failure_keeps_prior_window_and_rolls_back_current_window() {
+        let mut context = SqliteAppendTestContext::new("sqlite-append-failure", 2).await;
+        let committed = context.append(&[1, 2]).await.unwrap();
+        assert_eq!(committed, 2);
+        context.transaction.as_mut().unwrap().max_rows = 4;
+
+        let pending = context.append(&[3, 4]).await.unwrap();
+        assert_eq!(pending, 0);
+        let error = context.append(&[5, 1]).await.unwrap_err();
+        assert_eq!(error.rows_imported, 0);
+        assert_eq!(context.ids().await, vec![vec![serde_json::json!(1)], vec![serde_json::json!(2)]]);
+    }
+
+    #[tokio::test]
+    async fn sqlite_append_cancellation_drops_the_uncommitted_window() {
+        let mut context = SqliteAppendTestContext::new("sqlite-append-cancel", 10).await;
+        context.append(&[1, 2]).await.unwrap();
+
+        let error = flush_sqlite_append_transaction(
+            &context.state,
+            &context.pool_key,
+            "sqlite-append-cancel",
+            &|_| Box::pin(async { true }),
+            "sqlite-append-cancel",
+            "",
+            "",
+            context.transaction.as_mut().unwrap(),
+            0,
+            &mut context.db_write_ms,
+            &mut context.statement_count,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.cancelled);
+        assert_eq!(error.rows_imported, 0);
+        assert!(context.ids().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delimited_sqlite_append_import_flushes_the_final_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&dir.path().join("storage.db")).await.unwrap();
+        let state = AppState::new(storage);
+        let connection_id = "sqlite-delimited-append";
+        let pool_key = format!("{connection_id}:session:import");
+        let database_path = dir.path().join("target.db");
+        let sqlite = crate::db::sqlite::connect_path_create_if_missing(database_path.to_str().unwrap()).await.unwrap();
+        crate::db::sqlite::execute_query(&sqlite, "CREATE TABLE items (id INTEGER, name TEXT)").await.unwrap();
+        state.connections.write().await.insert(pool_key.clone(), PoolKind::Sqlite(sqlite.clone()));
+        let config: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": connection_id,
+            "name": "SQLite delimited append test",
+            "db_type": "sqlite",
+            "host": "",
+            "port": 0,
+            "username": "",
+            "password": "",
+            "database": database_path.to_string_lossy()
+        }))
+        .unwrap();
+        state.configs.write().await.insert(connection_id.to_string(), config);
+        let data_path = dir.path().join("rows.txt");
+        std::fs::write(&data_path, b"id%name\n1%Ada\n2%Grace\n3%Linus\n").unwrap();
+        let request = TableImportRequest {
+            import_id: "sqlite-delimited-append".to_string(),
+            connection_id: connection_id.to_string(),
+            database: String::new(),
+            schema: String::new(),
+            table: "items".to_string(),
+            file_path: data_path.to_string_lossy().to_string(),
+            source_ref: None,
+            source_format: Some(TableImportSourceFormat::Delimited),
+            parse_options: TableImportParseOptions {
+                delimiter: Some("%".to_string()),
+                ..TableImportParseOptions::default()
+            },
+            mappings: vec![
+                TableImportColumnMapping {
+                    source_column: "id".to_string(),
+                    target_column: "id".to_string(),
+                    target_data_type: None,
+                },
+                TableImportColumnMapping {
+                    source_column: "name".to_string(),
+                    target_column: "name".to_string(),
+                    target_data_type: None,
+                },
+            ],
+            mode: TableImportMode::Append,
+            create_table: false,
+            batch_size: 2,
+            date_time_format: None,
+            prepared_source: None,
+            retain_source: false,
+        };
+
+        let summary = import_table_file_core(
+            &state,
+            &request,
+            &DatabaseType::Sqlite,
+            &pool_key,
+            |_| Box::pin(async { false }),
+            |_| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(summary.rows_imported, 3);
+        let rows =
+            crate::db::sqlite::execute_query(&sqlite, "SELECT id, name FROM items ORDER BY id").await.unwrap().rows;
+        assert_eq!(
+            rows,
+            vec![
+                vec![serde_json::json!(1), serde_json::json!("Ada")],
+                vec![serde_json::json!(2), serde_json::json!("Grace")],
+                vec![serde_json::json!(3), serde_json::json!("Linus")]
+            ]
+        );
     }
 
     #[tokio::test]
@@ -9223,7 +10030,8 @@ mod tests {
         }];
         let excel_date_time =
             Data::DateTime(ExcelDateTime::new(45959.686111111, calamine::ExcelDateTimeType::DateTime, false));
-        let imported_value = xlsx_cell_value_with_temporal_kind(&excel_date_time, Some(XlsxTemporalKind::DateTime));
+        let imported_value =
+            xlsx_cell_value_with_temporal_kind(&excel_date_time, Some(XlsxTemporalKind::DateTime), true);
         assert_eq!(imported_value, serde_json::json!("2025-10-29 16:28:00"));
         let data = ParsedImportFile {
             columns: vec!["created_at".to_string()],

@@ -87,6 +87,25 @@ describe("resolveNewQueryTarget", () => {
       })?.database,
     ).toBe("analytics.db");
   });
+
+  it("uses the configured default schema when no explicit schema context exists", () => {
+    expect(
+      resolveNewQueryTarget({
+        activeConnectionId: "conn-1",
+        connections: [{ id: "conn-1", host: "localhost", database: "app", default_schema: "archive", db_type: "postgres" }],
+      }),
+    ).toMatchObject({ connectionId: "conn-1", database: "app", schema: "archive" });
+  });
+
+  it("keeps an explicitly selected schema ahead of the configured default", () => {
+    expect(
+      resolveNewQueryTarget({
+        selectedTreeNode: { connectionId: "conn-1", database: "app", schema: "reporting" },
+        connections: [{ id: "conn-1", host: "localhost", database: "app", default_schema: "archive", db_type: "postgres" }],
+        preferredSource: "sidebar",
+      })?.schema,
+    ).toBe("reporting");
+  });
 });
 
 describe("resolveNewQueryTable", () => {
@@ -169,6 +188,10 @@ describe("resolveNewQueryTable", () => {
 });
 
 describe("buildSelectAllSql", () => {
+  it("builds a MetricsQL range query for VictoriaMetrics metrics", () => {
+    expect(buildSelectAllSql("victoriametrics", { tableName: "flag" })).toBe('{__name__="flag"}[1h]');
+  });
+
   it("quotes a MySQL table with backticks", () => {
     expect(buildSelectAllSql("mysql", { tableName: "users" })).toBe("SELECT * FROM `users`");
   });
@@ -192,6 +215,15 @@ describe("buildSelectAllSql", () => {
   });
   it("qualifies a StarRocks external-catalog table with catalog and database", () => {
     expect(buildSelectAllSql("starrocks", { catalog: "paimon_catalog", database: "bi", tableName: "events" })).toBe("SELECT * FROM `paimon_catalog`.`bi`.`events`");
+  });
+  it("uses the driver-reported identifier quote for Kingbase MySQL compat mode", () => {
+    expect(buildSelectAllSql("kingbase", { schema: "audit_schema", tableName: "events" }, "`")).toBe("SELECT * FROM `audit_schema`.`events`");
+  });
+  it("uses the driver-reported identifier quote for Kingbase PostgreSQL mode", () => {
+    expect(buildSelectAllSql("kingbase", { schema: "audit_schema", tableName: "events" }, '"')).toBe('SELECT * FROM "audit_schema"."events"');
+  });
+  it("falls back to double quotes for Kingbase when no identifier quote is reported", () => {
+    expect(buildSelectAllSql("kingbase", { schema: "audit_schema", tableName: "events" })).toBe('SELECT * FROM "audit_schema"."events"');
   });
 });
 

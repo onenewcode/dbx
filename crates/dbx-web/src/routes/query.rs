@@ -21,6 +21,11 @@ pub struct ExecuteQueryRequest {
     pub max_rows: Option<usize>,
     pub fetch_size: Option<usize>,
     pub page_size: Option<usize>,
+    pub max_result_bytes: Option<usize>,
+    #[serde(default)]
+    pub result_key_columns: Vec<String>,
+    #[serde(default)]
+    pub table_data_preview: bool,
     pub result_session_id: Option<String>,
     pub client_session_id: Option<String>,
     pub timeout_secs: Option<u64>,
@@ -63,6 +68,7 @@ pub struct ExecuteBatchRequest {
     pub schema: Option<String>,
     pub catalog: Option<String>,
     pub timeout_secs: Option<u64>,
+    pub destructive_confirmed: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -252,6 +258,8 @@ pub struct BuildSingleColumnAlterSqlRequest {
 #[serde(rename_all = "camelCase")]
 pub struct PrepareDataGridSaveRequest {
     pub options: dbx_core::data_grid_sql::DataGridSaveStatementOptions,
+    #[serde(default)]
+    pub driver_profile: Option<String>,
 }
 
 #[derive(Deserialize, utoipa::ToSchema)]
@@ -344,7 +352,7 @@ pub async fn execute_query(
 
     tracing::debug!(connection_id = %req.connection_id, "execute_query");
 
-    let result = dbx_core::query::execute_sql_statement_with_options(
+    let result = dbx_core::query::execute_sql_statement_with_options_typed(
         &state.app,
         &req.connection_id,
         &req.database,
@@ -355,6 +363,9 @@ pub async fn execute_query(
             max_rows: req.max_rows,
             fetch_size: req.fetch_size,
             page_size: req.page_size,
+            max_result_bytes: req.max_result_bytes,
+            result_key_columns: req.result_key_columns,
+            table_data_preview: req.table_data_preview,
             catalog: req.catalog,
             result_session_id: req.result_session_id,
             client_session_id: req.client_session_id,
@@ -366,7 +377,7 @@ pub async fn execute_query(
         },
     )
     .await
-    .map_err(AppError::from)?;
+    .map_err(|error| AppError::from(error.into_backend_error()))?;
 
     drop(registered);
     Ok(Json(result))
@@ -390,7 +401,7 @@ pub async fn execute_multi(
 
     tracing::debug!(connection_id = %req.connection_id, "execute_multi");
 
-    let result = dbx_core::query::execute_multi_core_with_options_for_client(
+    let result = dbx_core::query::execute_multi_core_with_options_for_client_typed(
         &state.app,
         &req.connection_id,
         &req.database,
@@ -401,6 +412,9 @@ pub async fn execute_multi(
             max_rows: req.max_rows,
             fetch_size: req.fetch_size,
             page_size: req.page_size,
+            max_result_bytes: req.max_result_bytes,
+            result_key_columns: req.result_key_columns,
+            table_data_preview: req.table_data_preview,
             catalog: req.catalog,
             result_session_id: req.result_session_id,
             client_session_id: req.client_session_id,
@@ -412,10 +426,16 @@ pub async fn execute_multi(
         },
     )
     .await
-    .map_err(AppError::from)?;
+    .map_err(|error| AppError::from(error.into_backend_error()))?;
 
     drop(registered);
-    Ok(Json(result))
+    Ok(execute_multi_response(result))
+}
+
+fn execute_multi_response(
+    result: Vec<dbx_core::query::ExecuteMultiResult>,
+) -> Json<Vec<dbx_core::query::ExecuteMultiResult>> {
+    Json(result)
 }
 
 pub async fn execute_batch(
@@ -545,6 +565,7 @@ pub async fn execute_script_with_2pc(
         &req.database,
         &req.statements,
         req.schema.as_deref(),
+        req.destructive_confirmed.unwrap_or(false),
     )
     .await;
     Ok(Json(result))
@@ -796,7 +817,7 @@ pub async fn analyze_editable_query_editability(
 pub async fn prepare_data_grid_save(
     Json(req): Json<PrepareDataGridSaveRequest>,
 ) -> Json<dbx_core::data_grid_sql::DataGridSavePreparation> {
-    Json(dbx_core::data_grid_sql::prepare_data_grid_save(req.options))
+    Json(dbx_core::data_grid_sql::prepare_data_grid_save_for_driver_profile(req.options, req.driver_profile.as_deref()))
 }
 
 #[utoipa::path(
@@ -947,6 +968,7 @@ mod tests {
             schema: None,
             catalog: None,
             timeout_secs: None,
+            destructive_confirmed: None,
         };
 
         let result = execute_script_with_2pc(AxumState(state), Json(req))
@@ -971,6 +993,7 @@ mod tests {
             schema: None,
             catalog: None,
             timeout_secs: None,
+            destructive_confirmed: None,
         };
 
         let result = execute_script_with_2pc(AxumState(state), Json(req)).await.expect("empty deploy should succeed");
@@ -992,6 +1015,7 @@ mod tests {
             schema: None,
             catalog: None,
             timeout_secs: None,
+            destructive_confirmed: None,
         };
 
         let result = execute_script_with_2pc(AxumState(state), Json(req))
@@ -1003,5 +1027,61 @@ mod tests {
         assert!(log.error.as_ref().is_some_and(|e| !e.is_empty()));
         // Missing connection cannot have applied statements.
         assert_eq!(log.executed_count, 0);
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_blocks_unconfirmed_destructive_sql() {
+        let (state, _dir) = test_web_state().await;
+        let req = ExecuteBatchRequest {
+            connection_id: "missing-conn".to_string(),
+            database: "testdb".to_string(),
+            statements: vec!["DROP INDEX idx_old ON users".to_string()],
+            schema: None,
+            catalog: None,
+            timeout_secs: None,
+            destructive_confirmed: None,
+        };
+
+        let result = execute_script_with_2pc(AxumState(state), Json(req))
+            .await
+            .expect("destructive deploy should return a structured block result");
+        let log = result.0;
+        assert_eq!(log.status, "rolled_back");
+        assert_eq!(log.executed_count, 0);
+        assert_eq!(log.metadata["blocked"], "destructive_confirmation_required");
+    }
+
+    #[test]
+    fn execute_multi_response_preserves_nested_original_error_detail() {
+        let result = dbx_core::query::ExecuteMultiResult {
+            result: dbx_core::db::QueryResult {
+                columns: vec!["Error".to_string()],
+                column_types: vec![],
+                column_sortables: vec![],
+                spatial_columns: vec![],
+                spatial_values: vec![],
+                rows: vec![vec![serde_json::json!("relation customer_orders does not exist")]],
+                affected_rows: 0,
+                execution_time_ms: 0,
+                truncated: false,
+                session_id: None,
+                has_more: false,
+                elasticsearch_raw_body: None,
+                messages: Vec::new(),
+            },
+            large_value_cells: Vec::new(),
+            execution_error: true,
+            statement_index: Some(1),
+            error: Some(dbx_core::backend_error::BackendError::from_sql_detail(
+                "relation customer_orders does not exist",
+            )),
+            server_message: false,
+        };
+
+        let payload = serde_json::to_value(execute_multi_response(vec![result]).0).unwrap();
+
+        assert_eq!(payload[0]["statement_index"], 1);
+        assert_eq!(payload[0]["error"]["code"], "DBX-JDBC-4001");
+        assert_eq!(payload[0]["error"]["detail"], "relation customer_orders does not exist");
     }
 }

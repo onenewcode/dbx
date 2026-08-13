@@ -66,6 +66,7 @@ pub struct DocumentFindRequest {
     pub filter: Option<String>,
     pub projection: Option<String>,
     pub sort: Option<String>,
+    pub collation: Option<String>,
     pub execution_id: Option<String>,
 }
 
@@ -86,6 +87,7 @@ pub struct DocumentInsertRequest {
     pub collection: String,
     pub doc_json: String,
     pub routing: Option<String>,
+    pub preserve_bson_types: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -107,6 +109,17 @@ pub struct DocumentDeleteRequest {
     pub collection: String,
     pub id: String,
     pub routing: Option<String>,
+    pub document_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MeilisearchBatchSaveRequest {
+    pub connection_id: String,
+    pub collection: String,
+    pub updates: Vec<dbx_core::db::meilisearch_driver::MeilisearchDocumentUpdate>,
+    pub delete_ids: Vec<String>,
+    pub inserts: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -190,6 +203,7 @@ pub async fn find_documents(
             req.filter.as_deref(),
             req.projection.as_deref(),
             req.sort.as_deref(),
+            req.collation.as_deref(),
         ),
     )
     .await?;
@@ -219,15 +233,27 @@ pub async fn insert_document(
     Json(req): Json<DocumentInsertRequest>,
 ) -> Result<Json<String>, AppError> {
     ensure_writable(&state.app, &req.connection_id, "Insert").await?;
-    let result = dbx_core::document_ops::insert_document_core(
-        &state.app,
-        &req.connection_id,
-        &req.database,
-        &req.collection,
-        &req.doc_json,
-        req.routing.as_deref(),
-    )
-    .await
+    let result = if req.preserve_bson_types.unwrap_or(false) {
+        dbx_core::document_ops::insert_document_preserving_bson_types_core(
+            &state.app,
+            &req.connection_id,
+            &req.database,
+            &req.collection,
+            &req.doc_json,
+            req.routing.as_deref(),
+        )
+        .await
+    } else {
+        dbx_core::document_ops::insert_document_core(
+            &state.app,
+            &req.connection_id,
+            &req.database,
+            &req.collection,
+            &req.doc_json,
+            req.routing.as_deref(),
+        )
+        .await
+    }
     .map_err(AppError::from)?;
     Ok(Json(result))
 }
@@ -256,13 +282,32 @@ pub async fn delete_document(
     Json(req): Json<DocumentDeleteRequest>,
 ) -> Result<Json<u64>, AppError> {
     ensure_writable(&state.app, &req.connection_id, "Delete").await?;
-    let result = dbx_core::document_ops::delete_document_core(
+    let result = dbx_core::document_ops::delete_document_core_with_type(
         &state.app,
         &req.connection_id,
         &req.database,
         &req.collection,
         &req.id,
         req.routing.as_deref(),
+        req.document_type.as_deref(),
+    )
+    .await
+    .map_err(AppError::from)?;
+    Ok(Json(result))
+}
+
+pub async fn save_meilisearch_batch(
+    State(state): State<Arc<WebState>>,
+    Json(req): Json<MeilisearchBatchSaveRequest>,
+) -> Result<Json<u64>, AppError> {
+    ensure_writable(&state.app, &req.connection_id, "Save").await?;
+    let result = dbx_core::document_ops::save_meilisearch_document_batch_core(
+        &state.app,
+        &req.connection_id,
+        &req.collection,
+        &req.updates,
+        &req.delete_ids,
+        &req.inserts,
     )
     .await
     .map_err(AppError::from)?;

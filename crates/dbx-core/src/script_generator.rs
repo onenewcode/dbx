@@ -1363,6 +1363,7 @@ mod tests {
             is_nullable: true,
             column_default: None,
             is_primary_key: false,
+            is_unique: false,
             extra: None,
             comment: None,
             numeric_precision: None,
@@ -1705,6 +1706,7 @@ mod tests {
                 source: Some(make_column_info("id", "INT")),
                 target: None,
                 changes: vec![],
+                add_position: None,
             }]),
             indexes: Some(vec![]),
             foreign_keys: Some(vec![]),
@@ -1736,6 +1738,7 @@ mod tests {
                         source: Some(make_column_info("id", "INT")),
                         target: None,
                         changes: vec![],
+                        add_position: None,
                     }]),
                     indexes: Some(vec![]),
                     foreign_keys: Some(vec![]),
@@ -2234,6 +2237,7 @@ mod tests {
                 is_nullable: true,
                 column_default: None,
                 is_primary_key: false,
+                is_unique: false,
                 extra: None,
                 comment: None,
                 numeric_precision: None,
@@ -2249,6 +2253,7 @@ mod tests {
                 is_nullable: true,
                 column_default: None,
                 is_primary_key: false,
+                is_unique: false,
                 extra: None,
                 comment: None,
                 numeric_precision: None,
@@ -2259,6 +2264,7 @@ mod tests {
                 collation: None,
             }),
             changes: vec!["data_type BIGINT → INT".to_string()],
+            add_position: None,
         };
 
         let table_diff = TableDiff {

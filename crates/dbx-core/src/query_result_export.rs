@@ -19,7 +19,8 @@ use crate::query::{
     operation_budget_for_pool_key, QueryExecutionOptions, StreamProgressClock, QUERY_CANCELED,
 };
 use crate::query_result_sql::{
-    build_query_pagination_execution_plan, QueryPagination, QueryPaginationExecutionPlanOptions,
+    build_query_pagination_execution_plan, has_top_level_top, top_level_top_row_count, QueryPagination,
+    QueryPaginationExecutionPlanOptions,
 };
 use crate::table_export::TableExportProgress;
 use crate::transfer::keyset_pagination_sql;
@@ -35,8 +36,6 @@ use sqlparser::parser::Parser;
 use tokio_util::sync::CancellationToken;
 
 const AGENT_UNBOUNDED_ROW_LIMIT: usize = i32::MAX as usize;
-pub const XLSX_MAX_DATA_ROWS: usize = 1_048_575;
-const XLSX_ROW_LIMIT_ERROR: &str = "XLSX supports at most 1,048,575 data rows. Use CSV export for the full result.";
 const STREAMING_PAGINATION_UNSUPPORTED_ERROR: &str =
     "Streaming export is unsupported for this query. Simplify it or use a supported driver.";
 const AGENT_SESSION_MISSING_ERROR: &str =
@@ -65,6 +64,8 @@ pub struct QueryResultExportRequest {
     pub database: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalog: Option<String>,
     pub sql: String,
     pub query_base_sql: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -241,11 +242,7 @@ fn progress(
     status: ExportStatus,
     error_message: Option<String>,
 ) -> TableExportProgress {
-    let total_rows = request.total_rows.map(|total| {
-        let format = request.format.to_lowercase();
-        let limit = effective_row_limit(&format, request);
-        limit.map_or(total, |limit| total.min(limit as u64))
-    });
+    let total_rows = request.total_rows.map(|total| request.row_limit.map_or(total, |limit| total.min(limit as u64)));
     TableExportProgress {
         export_id: request.export_id.clone(),
         table_name: String::new(),
@@ -265,25 +262,27 @@ fn stream_export_was_cancelled(error: &str, token_cancelled: bool, export_cancel
 ///
 /// `column_types` are the types returned by the executed query (original column
 /// order). The request's overrides are expected to align 1:1 in the same order.
-/// If the request provides fewer overrides than the result has columns the
-/// extra columns are left untyped. Overrides that are `None` or empty are
-/// treated as "infer from the query result".
+/// Missing, `None`, or empty overrides infer only MySQL spatial types, which
+/// preserves the historical literal formatting of other database types.
 fn sql_insert_column_types(request: &QueryResultExportRequest, column_types: &[String]) -> Vec<Option<String>> {
-    match request.export_column_types.as_ref() {
-        Some(overrides) => {
-            let mut result: Vec<Option<String>> = overrides
-                .iter()
-                .map(|t| match t {
-                    Some(s) if !s.is_empty() => Some(s.clone()),
-                    _ => None,
+    column_types
+        .iter()
+        .enumerate()
+        .map(|(index, inferred)| {
+            request
+                .export_column_types
+                .as_ref()
+                .and_then(|overrides| overrides.get(index))
+                .and_then(|override_type| override_type.as_deref())
+                .filter(|override_type| !override_type.is_empty())
+                .map(str::to_string)
+                .or_else(|| {
+                    (request.database_type == DatabaseType::Mysql
+                        && crate::database_export::is_mysql_spatial_export_type(inferred))
+                    .then(|| inferred.clone())
                 })
-                .collect();
-            // Pad with None if fewer overrides than result columns
-            result.resize(column_types.len(), None);
-            result
-        }
-        None => vec![None; column_types.len()],
-    }
+        })
+        .collect()
 }
 
 /// Bounded SQL INSERT writer with staged-file replacement safety.
@@ -387,16 +386,8 @@ impl SqlInsertWriter {
     }
 }
 
-fn effective_row_limit(format: &str, request: &QueryResultExportRequest) -> Option<usize> {
-    if format == "xlsx" {
-        Some(request.row_limit.map_or(XLSX_MAX_DATA_ROWS, |limit| limit.min(XLSX_MAX_DATA_ROWS)))
-    } else {
-        request.row_limit
-    }
-}
-
-fn xlsx_hard_limit_active(format: &str, request: &QueryResultExportRequest) -> bool {
-    format == "xlsx" && request.row_limit.is_none_or(|limit| limit > XLSX_MAX_DATA_ROWS)
+fn effective_row_limit(request: &QueryResultExportRequest) -> Option<usize> {
+    request.row_limit
 }
 
 fn format_text_export_header(format: &str, columns: &[String]) -> String {
@@ -471,6 +462,38 @@ fn supports_streaming_offset_pagination(request: &QueryResultExportRequest, page
         && !first_sql.trim().eq_ignore_ascii_case(second_sql.trim())
 }
 
+/// Enforceable in-memory row bound for a single-execution export, or `None`
+/// when the query cannot be safely streamed in one shot without an Agent
+/// cursor. Kingbase SQL Server compatibility mode TOP queries cannot be
+/// rewritten with LIMIT/OFFSET; a concrete `TOP n` bounds the result and the
+/// user's export row limit caps it further. Percentage TOP / `WITH TIES` have
+/// no concrete row bound, so they are only single-execution-capable when a row
+/// limit is configured.
+fn single_execution_row_bound(request: &QueryResultExportRequest) -> Option<usize> {
+    if !has_top_level_top(&request.sql) {
+        return None;
+    }
+    match (top_level_top_row_count(&request.sql), request.row_limit) {
+        (Some(top), Some(row_limit)) => Some(top.min(row_limit)),
+        (Some(top), None) => Some(top),
+        (None, Some(row_limit)) => Some(row_limit),
+        (None, None) => None,
+    }
+}
+
+fn single_execution_page_limit(request: &QueryResultExportRequest, page_size: usize) -> Option<usize> {
+    single_execution_row_bound(request).filter(|bound| *bound > 0 && *bound <= page_size.max(1))
+}
+
+/// True when a non-agent export can still stream this query by executing it
+/// exactly once without exceeding one normal export page. Larger TOP/row-limit
+/// bounds require an Agent result session; executing them in one response would
+/// defeat streaming and recreate the large-result memory spike.
+#[cfg(test)]
+fn supports_single_execution_export(request: &QueryResultExportRequest, page_size: usize) -> bool {
+    single_execution_page_limit(request, page_size).is_some()
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SafeKeysetCandidate {
     schema: Option<String>,
@@ -521,6 +544,7 @@ fn safe_keyset_candidate(sql: &str) -> Option<SafeKeysetCandidate> {
         return None;
     };
     if select.distinct.is_some()
+        || select.top.is_some()
         || !matches!(&select.group_by, GroupByExpr::Expressions(exprs, _) if exprs.is_empty())
         || select.having.is_some()
         || select.selection.is_some()
@@ -619,18 +643,8 @@ async fn export_query_result_core_inner(
     }
 
     let page_size = request.page_size.max(1);
-    let effective_row_limit = effective_row_limit(&format, request);
-    let xlsx_hard_limit_active = xlsx_hard_limit_active(&format, request);
-    if xlsx_hard_limit_active && request.total_rows.is_some_and(|total| total > XLSX_MAX_DATA_ROWS as u64) {
-        return Err(XLSX_ROW_LIMIT_ERROR.to_string());
-    }
-
-    let agent_max_rows = if xlsx_hard_limit_active {
-        XLSX_MAX_DATA_ROWS + 1
-    } else {
-        effective_row_limit.unwrap_or(AGENT_UNBOUNDED_ROW_LIMIT)
-    }
-    .max(1);
+    let effective_row_limit = effective_row_limit(request);
+    let agent_max_rows = effective_row_limit.unwrap_or(AGENT_UNBOUNDED_ROW_LIMIT).max(1);
 
     on_progress(progress(request, 0, ExportStatus::Running, None));
 
@@ -670,7 +684,16 @@ async fn export_query_result_core_inner(
     let mut offset: usize = 0;
     let mut wrote_text_header = false;
     let mut keyset_plan = build_keyset_plan(state, request).await;
-    if keyset_plan.is_none() && !request.use_agent_cursor && !supports_streaming_offset_pagination(request, page_size) {
+    // A Kingbase SQL Server compat TOP query that cannot be offset-paginated is
+    // exported with a single execution whose page size is the enforceable row
+    // bound (concrete TOP count and/or the configured export row limit), then it
+    // stops after the first response.
+    let single_execution_bound = single_execution_page_limit(request, page_size);
+    if keyset_plan.is_none()
+        && !request.use_agent_cursor
+        && !supports_streaming_offset_pagination(request, page_size)
+        && single_execution_bound.is_none()
+    {
         return Err(STREAMING_PAGINATION_UNSUPPORTED_ERROR.to_string());
     }
 
@@ -694,41 +717,44 @@ async fn export_query_result_core_inner(
         if matches!(remaining, Some(0)) {
             break;
         }
-        let this_page = remaining.map_or(page_size, |rem| rem.min(page_size)).max(1);
-        let fetch_limit = if xlsx_hard_limit_active && remaining.is_some_and(|rem| rem <= page_size) {
-            this_page.saturating_add(1)
+        let this_page = if keyset_plan.is_none() && single_execution_bound.is_some() {
+            // Single execution covers the whole enforceable TOP/row-limit bound in
+            // one shot; never an unbounded i32::MAX page.
+            single_execution_bound.unwrap_or(page_size).max(1)
         } else {
-            this_page
+            remaining.map_or(page_size, |rem| rem.min(page_size)).max(1)
         };
 
-        let (sql_to_execute, plan_limit, use_agent_result_session) = if let Some(plan) = keyset_plan.as_ref() {
-            (
-                keyset_pagination_sql(
-                    &plan.columns,
-                    &plan.table,
-                    &plan.schema,
-                    &request.database_type,
-                    &plan.primary_keys,
-                    &plan.last_pk_values,
-                    fetch_limit,
-                ),
-                fetch_limit,
-                false,
-            )
-        } else {
-            let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
-                sql: request.sql.clone(),
-                query_base_sql: request.query_base_sql.clone(),
-                database_type: Some(request.database_type),
-                pagination: QueryPagination { limit: fetch_limit, offset, session_id: session_id.clone() },
-                use_agent_cursor: request.use_agent_cursor,
-                first_page_uses_actual_sql: true,
-            });
-            let Some(plan_limit) = plan.page_limit else {
-                return Err("Failed to build query pagination plan for export".to_string());
+        let (sql_to_execute, plan_limit, use_agent_result_session, single_execution) =
+            if let Some(plan) = keyset_plan.as_ref() {
+                (
+                    keyset_pagination_sql(
+                        &plan.columns,
+                        &plan.table,
+                        &plan.schema,
+                        &request.database_type,
+                        &plan.primary_keys,
+                        &plan.last_pk_values,
+                        this_page,
+                    ),
+                    this_page,
+                    false,
+                    false,
+                )
+            } else {
+                let plan = build_query_pagination_execution_plan(QueryPaginationExecutionPlanOptions {
+                    sql: request.sql.clone(),
+                    query_base_sql: request.query_base_sql.clone(),
+                    database_type: Some(request.database_type),
+                    pagination: QueryPagination { limit: this_page, offset, session_id: session_id.clone() },
+                    use_agent_cursor: request.use_agent_cursor,
+                    first_page_uses_actual_sql: true,
+                });
+                let Some(plan_limit) = plan.page_limit else {
+                    return Err("Failed to build query pagination plan for export".to_string());
+                };
+                (plan.sql_to_execute, plan_limit, plan.use_agent_result_session, plan.single_execution)
             };
-            (plan.sql_to_execute, plan_limit, plan.use_agent_result_session)
-        };
 
         let options = if use_agent_result_session {
             QueryExecutionOptions {
@@ -739,6 +765,7 @@ async fn export_query_result_core_inner(
                 timeout_secs: request.timeout_secs,
                 client_session_id: request.client_session_id.clone(),
                 execution_id: request.execution_id.clone(),
+                catalog: request.catalog.clone(),
                 ..Default::default()
             }
         } else {
@@ -748,6 +775,7 @@ async fn export_query_result_core_inner(
                 timeout_secs: request.timeout_secs,
                 client_session_id: request.client_session_id.clone(),
                 execution_id: request.execution_id.clone(),
+                catalog: request.catalog.clone(),
                 ..Default::default()
             }
         };
@@ -801,12 +829,6 @@ async fn export_query_result_core_inner(
             }
         }
         let fetched_row_count = result.rows.len();
-        if xlsx_hard_limit_active {
-            let remaining_rows = XLSX_MAX_DATA_ROWS.saturating_sub(rows_exported as usize);
-            if fetched_row_count > remaining_rows {
-                return Err(XLSX_ROW_LIMIT_ERROR.to_string());
-            }
-        }
         if result.rows.len() > this_page {
             result.rows.truncate(this_page);
         }
@@ -870,8 +892,13 @@ async fn export_query_result_core_inner(
                     plan.pk_indices.iter().map(|&index| last_row.get(index).cloned().unwrap_or(Value::Null)).collect();
             }
         }
-        let should_continue =
-            should_fetch_next_page(use_agent_result_session, result.has_more, fetched_row_count, row_count, plan_limit);
+        let should_continue = if single_execution {
+            // A single execution already streamed the full (TOP-bounded) result;
+            // there is no offset to advance to.
+            false
+        } else {
+            should_fetch_next_page(use_agent_result_session, result.has_more, fetched_row_count, row_count, plan_limit)
+        };
         if cancel_token.as_ref().is_some_and(|token| token.is_cancelled())
             || is_export_cancelled(&request.export_id).await
         {
@@ -964,10 +991,8 @@ async fn try_export_postgres_query_result_stream(
     state.touch_pool_activity(&pool_key).await;
     let _activity_touch = state.pool_activity_touch(&pool_key);
 
-    let xlsx_hard_limit_active = xlsx_hard_limit_active(format, request);
-    let row_limit = effective_row_limit(format, request);
-    let stream_row_limit =
-        if xlsx_hard_limit_active { row_limit.map(|limit| limit.saturating_add(1)) } else { row_limit };
+    let row_limit = effective_row_limit(request);
+    let stream_row_limit = row_limit;
     let progress_row_interval = request.page_size.max(1) as u64;
     let mut columns: Vec<String> = Vec::new();
     let mut temporal_column_types: Vec<String> = Vec::new();
@@ -1020,9 +1045,6 @@ async fn try_export_postgres_query_result_stream(
                     }
                 }
                 crate::db::postgres::PostgresQueryStreamItem::Row(row) => {
-                    if xlsx_hard_limit_active && rows_exported as usize >= XLSX_MAX_DATA_ROWS {
-                        return Err(XLSX_ROW_LIMIT_ERROR.to_string());
-                    }
                     let formatted = crate::temporal_format::format_temporal_export_row_with_string_types(
                         &row,
                         &temporal_column_types,
@@ -1161,10 +1183,8 @@ async fn try_export_mysql_query_result_stream(
         crate::query_execution_sql::check_read_only(&request.sql, &name, database_type)?;
     }
 
-    let xlsx_hard_limit_active = xlsx_hard_limit_active(format, request);
-    let row_limit = effective_row_limit(format, request);
-    let stream_row_limit =
-        if xlsx_hard_limit_active { row_limit.map(|limit| limit.saturating_add(1)) } else { row_limit };
+    let row_limit = effective_row_limit(request);
+    let stream_row_limit = row_limit;
     let progress_row_interval = request.page_size.max(1) as u64;
     let mut columns: Vec<String> = Vec::new();
     let mut temporal_column_types: Vec<String> = Vec::new();
@@ -1239,6 +1259,7 @@ async fn try_export_mysql_query_result_stream(
         stream_row_limit,
         mysql_dialect,
         &export_cancelled,
+        format.eq_ignore_ascii_case("sql"),
         |item| {
             if export_cancelled.load(Ordering::SeqCst)
                 || cancel_token.as_ref().is_some_and(|token| token.is_cancelled())
@@ -1266,9 +1287,6 @@ async fn try_export_mysql_query_result_stream(
                     }
                 }
                 crate::db::mysql::MySqlQueryStreamItem::Row(row) => {
-                    if xlsx_hard_limit_active && rows_exported as usize >= XLSX_MAX_DATA_ROWS {
-                        return Err(XLSX_ROW_LIMIT_ERROR.to_string());
-                    }
                     let formatted = crate::temporal_format::format_temporal_export_row_with_string_types(
                         &row,
                         &temporal_column_types,
@@ -1427,10 +1445,8 @@ async fn try_export_clickhouse_query_result_stream(
     state.touch_pool_activity(&pool_key).await;
     let _activity_touch = state.pool_activity_touch(&pool_key);
 
-    let xlsx_hard_limit_active = xlsx_hard_limit_active(format, request);
-    let row_limit = effective_row_limit(format, request);
-    let stream_row_limit =
-        if xlsx_hard_limit_active { row_limit.map(|limit| limit.saturating_add(1)) } else { row_limit };
+    let row_limit = effective_row_limit(request);
+    let stream_row_limit = row_limit;
     let progress_row_interval = request.page_size.max(1) as u64;
     let mut columns: Vec<String> = Vec::new();
     let mut temporal_column_types: Vec<String> = Vec::new();
@@ -1484,9 +1500,6 @@ async fn try_export_clickhouse_query_result_stream(
                     }
                 }
                 crate::db::clickhouse_driver::ClickHouseQueryStreamItem::Row(row) => {
-                    if xlsx_hard_limit_active && rows_exported as usize >= XLSX_MAX_DATA_ROWS {
-                        return Err(XLSX_ROW_LIMIT_ERROR.to_string());
-                    }
                     let formatted = crate::temporal_format::format_temporal_export_row_with_string_types(
                         &row,
                         &temporal_column_types,
@@ -1600,10 +1613,8 @@ async fn try_export_sqlserver_query_result_stream(
         state.running_queries.set_pool_key(execution_id, pool_key);
     }
 
-    let xlsx_hard_limit_active = xlsx_hard_limit_active(format, request);
-    let row_limit = effective_row_limit(format, request);
-    let stream_row_limit =
-        if xlsx_hard_limit_active { row_limit.map(|limit| limit.saturating_add(1)) } else { row_limit };
+    let row_limit = effective_row_limit(request);
+    let stream_row_limit = row_limit;
     let mut columns: Vec<String> = Vec::new();
     let mut temporal_column_types: Vec<String> = Vec::new();
     let mut rows_exported = 0_u64;
@@ -1667,9 +1678,6 @@ async fn try_export_sqlserver_query_result_stream(
                     }
                 }
                 crate::db::sqlserver::SqlServerStreamItem::Row(row) => {
-                    if xlsx_hard_limit_active && rows_exported as usize >= XLSX_MAX_DATA_ROWS {
-                        return Err(XLSX_ROW_LIMIT_ERROR.to_string());
-                    }
                     let formatted = crate::temporal_format::format_temporal_export_row_with_string_types(
                         row,
                         &temporal_column_types,
@@ -1840,6 +1848,7 @@ mod tests {
             connection_id: "conn-1".to_string(),
             database: "db".to_string(),
             schema: None,
+            catalog: None,
             sql: "SELECT * FROM users".to_string(),
             query_base_sql: "SELECT * FROM users".to_string(),
             setup_sql: Vec::new(),
@@ -1865,12 +1874,12 @@ mod tests {
 
     #[test]
     fn csv_unlimited_export_has_no_effective_row_limit() {
-        assert_eq!(effective_row_limit("csv", &request("csv", None, None)), None);
+        assert_eq!(effective_row_limit(&request("csv", None, None)), None);
     }
 
     #[test]
     fn txt_unlimited_export_has_no_effective_row_limit() {
-        assert_eq!(effective_row_limit("txt", &request("txt", None, None)), None);
+        assert_eq!(effective_row_limit(&request("txt", None, None)), None);
     }
 
     #[test]
@@ -1879,47 +1888,38 @@ mod tests {
     }
 
     #[test]
-    fn xlsx_unlimited_export_uses_excel_hard_limit() {
-        assert_eq!(effective_row_limit("xlsx", &request("xlsx", None, None)), Some(XLSX_MAX_DATA_ROWS));
+    fn xlsx_no_row_limit_has_no_query_layer_cap() {
+        // Without the old hard limit, XLSX uses the writer's internal splitting.
+        assert_eq!(effective_row_limit(&request("xlsx", None, None)), None);
     }
 
     #[test]
-    fn xlsx_row_limit_caps_to_excel_hard_limit() {
-        assert_eq!(
-            effective_row_limit("xlsx", &request("xlsx", Some(XLSX_MAX_DATA_ROWS + 10), None)),
-            Some(XLSX_MAX_DATA_ROWS)
-        );
+    fn xlsx_user_row_limit_still_respected() {
+        assert_eq!(effective_row_limit(&request("xlsx", Some(500), None)), Some(500));
     }
 
     #[test]
-    fn xlsx_known_total_above_hard_limit_errors_before_export() {
-        let req = request("xlsx", None, Some(XLSX_MAX_DATA_ROWS as u64 + 1));
-        assert!(xlsx_hard_limit_active("xlsx", &req));
-        assert!(req.total_rows.is_some_and(|total| total > XLSX_MAX_DATA_ROWS as u64));
-    }
-
-    #[test]
-    fn sql_insert_export_has_no_xlsx_row_cap() {
-        // SQL format should not be limited by XLSX_MAX_DATA_ROWS.
-        let req = request("sql", None, None);
-        assert!(!xlsx_hard_limit_active("sql", &req));
-        assert_eq!(effective_row_limit("sql", &req), None);
+    fn xlsx_total_rows_above_sheet_limit_no_longer_errors() {
+        // total_rows > 1M no longer triggers a pre-check error; the writer splits.
+        let req = request("xlsx", None, Some(2_000_000));
+        assert!(effective_row_limit(&req).is_none());
+        // The function that used to check this (xlsx_hard_limit_active) no longer exists.
     }
 
     #[test]
     fn sql_insert_column_types_maps_request_types_to_option_vec() {
         let req = request("sql", None, None);
-        // No export_column_types set → every column becomes None
+        // Non-MySQL exports preserve their historical untyped behavior.
         let result = sql_insert_column_types(&req, &["int4".into(), "text".into()]);
         assert_eq!(result, vec![None, None]);
 
-        // Export_column_types provided → null becomes None, Some becomes Some
+        // Explicit non-empty overrides take precedence; missing values stay untyped.
         let mut req = req;
         req.export_column_types = Some(vec![Some("int4".into()), None, Some("jsonb".into())]);
         let result = sql_insert_column_types(&req, &["int4".into(), "text".into(), "json".into()]);
         assert_eq!(result, vec![Some("int4".into()), None, Some("jsonb".into())]);
 
-        // Empty string in an override is treated as None
+        // Empty string in an override stays untyped for non-MySQL exports.
         req.export_column_types = Some(vec![Some("".into())]);
         let result = sql_insert_column_types(&req, &["int4".into()]);
         assert_eq!(result, vec![None]);
@@ -1928,7 +1928,7 @@ mod tests {
     #[test]
     fn sql_insert_column_types_handles_partial_overrides_gracefully() {
         let req = request("sql", None, None);
-        // Fewer overrides than result columns → extra columns become None
+        // Fewer overrides than result columns → extra columns remain untyped.
         let mut req = req;
         req.export_column_types = Some(vec![Some("int4".into()), None]);
         let result = sql_insert_column_types(&req, &["int4".into(), "text".into(), "json".into(), "bool".into()]);
@@ -1949,7 +1949,7 @@ mod tests {
     #[test]
     fn sql_insert_column_types_handles_all_none_and_all_some() {
         let req = request("sql", None, None);
-        // All None
+        // All None remains untyped for non-MySQL exports.
         let mut req = req;
         req.export_column_types = Some(vec![None, None, None]);
         let result = sql_insert_column_types(&req, &["int4".into(), "text".into(), "json".into()]);
@@ -1959,6 +1959,16 @@ mod tests {
         req.export_column_types = Some(vec![Some("int4".into()), Some("text".into()), Some("json".into())]);
         let result = sql_insert_column_types(&req, &["int4".into(), "text".into(), "json".into()]);
         assert_eq!(result, vec![Some("int4".into()), Some("text".into()), Some("json".into())]);
+    }
+
+    #[test]
+    fn sql_insert_column_types_infers_only_mysql_spatial_result_types() {
+        let mut req = request("sql", None, None);
+        req.database_type = DatabaseType::Mysql;
+        assert_eq!(
+            sql_insert_column_types(&req, &["int".into(), "geometry".into(), "varchar".into()]),
+            vec![None, Some("geometry".into()), None]
+        );
     }
 
     #[test]
@@ -2040,6 +2050,128 @@ mod tests {
         let oracle_req =
             QueryResultExportRequest { database_type: DatabaseType::Oracle, ..request("csv", Some(1000), None) };
         assert!(!supports_streaming_offset_pagination(&oracle_req, 100));
+    }
+
+    #[test]
+    fn kingbase_non_keyset_top_export_falls_back_to_single_execution() {
+        // Regression for t8y2/dbx#5910: a non-keyset Kingbase SQL Server compat
+        // TOP query (e.g. a join) cannot be offset-paginated, so the export must
+        // stream it in a single execution rather than reject it. This mirrors the
+        // guard in export_query_result_core_inner: offset pagination says no, but
+        // single-execution support lets the export proceed.
+        let req = QueryResultExportRequest {
+            sql: "SELECT TOP 100 * FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.id".to_string(),
+            query_base_sql: "SELECT TOP 100 * FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.id"
+                .to_string(),
+            database_type: DatabaseType::Kingbase,
+            use_agent_cursor: false,
+            ..request("csv", Some(1000), None)
+        };
+
+        assert!(!supports_streaming_offset_pagination(&req, 100));
+        assert!(supports_single_execution_export(&req, 100));
+        // The enforceable bound is the concrete TOP count (100), not the row limit.
+        assert_eq!(single_execution_row_bound(&req), Some(100));
+    }
+
+    #[test]
+    fn kingbase_single_table_top_query_never_uses_keyset_and_is_bounded() {
+        // P0 regression: a simple `SELECT TOP 100 * FROM users` must not qualify
+        // for the keyset path (which reconstructs SQL and drops TOP), and its
+        // single-execution bound is exactly 100 — never an unbounded page.
+        let req = QueryResultExportRequest {
+            sql: "SELECT TOP 100 * FROM users".to_string(),
+            query_base_sql: "SELECT TOP 100 * FROM users".to_string(),
+            database_type: DatabaseType::Kingbase,
+            use_agent_cursor: false,
+            ..request("csv", None, None)
+        };
+
+        assert!(safe_keyset_candidate(&req.sql).is_none(), "TOP must not qualify for keyset");
+        assert!(!supports_streaming_offset_pagination(&req, 100));
+        assert_eq!(single_execution_row_bound(&req), Some(100));
+        assert!(supports_single_execution_export(&req, 100));
+    }
+
+    #[test]
+    fn kingbase_percent_and_with_ties_need_a_row_limit_for_single_execution() {
+        // Percentage TOP and WITH TIES have no concrete row-count bound, so
+        // without a configured export row limit the single-execution fallback is
+        // unavailable (the export is rejected honestly instead of unbounded).
+        let percent_no_limit = QueryResultExportRequest {
+            sql: "SELECT TOP 10 PERCENT * FROM orders".to_string(),
+            query_base_sql: "SELECT TOP 10 PERCENT * FROM orders".to_string(),
+            database_type: DatabaseType::Kingbase,
+            use_agent_cursor: false,
+            ..request("csv", None, None)
+        };
+        assert!(!supports_single_execution_export(&percent_no_limit, 100));
+        assert_eq!(single_execution_row_bound(&percent_no_limit), None);
+
+        let ties_no_limit = QueryResultExportRequest {
+            sql: "SELECT TOP (2) WITH TIES * FROM orders".to_string(),
+            query_base_sql: "SELECT TOP (2) WITH TIES * FROM orders".to_string(),
+            database_type: DatabaseType::Kingbase,
+            use_agent_cursor: false,
+            ..request("csv", None, None)
+        };
+        assert!(!supports_single_execution_export(&ties_no_limit, 100));
+        assert_eq!(single_execution_row_bound(&ties_no_limit), None);
+
+        // With a configured row limit the same queries are capped by that limit.
+        let percent_with_limit = QueryResultExportRequest { row_limit: Some(5000), ..percent_no_limit };
+        assert_eq!(single_execution_row_bound(&percent_with_limit), Some(5000));
+        assert!(!supports_single_execution_export(&percent_with_limit, 100));
+    }
+
+    #[test]
+    fn kingbase_top_expression_export_requires_row_limit_or_cursor() {
+        // P1: TOP (100 + 1) returns 101 rows, so its bound must not be treated as
+        // 100 (which would silently truncate the export). Without a row limit the
+        // single-execution fallback is unavailable and the export is rejected.
+        let req = QueryResultExportRequest {
+            sql: "SELECT TOP (100 + 1) * FROM orders".to_string(),
+            query_base_sql: "SELECT TOP (100 + 1) * FROM orders".to_string(),
+            database_type: DatabaseType::Kingbase,
+            use_agent_cursor: false,
+            ..request("csv", None, None)
+        };
+        assert!(!supports_single_execution_export(&req, 100));
+        assert_eq!(single_execution_row_bound(&req), None);
+
+        // A configured row limit gives the export an explicit cap.
+        let with_limit = QueryResultExportRequest { row_limit: Some(200), ..req };
+        assert_eq!(single_execution_row_bound(&with_limit), Some(200));
+        assert!(!supports_single_execution_export(&with_limit, 100));
+    }
+
+    #[test]
+    fn kingbase_without_top_uses_streaming_offset_pagination() {
+        let req = QueryResultExportRequest {
+            sql: "SELECT * FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.id".to_string(),
+            query_base_sql: "SELECT * FROM orders o JOIN customers c ON c.id = o.customer_id ORDER BY o.id".to_string(),
+            database_type: DatabaseType::Kingbase,
+            use_agent_cursor: false,
+            ..request("csv", Some(1000), None)
+        };
+
+        assert!(supports_streaming_offset_pagination(&req, 100));
+        assert!(!supports_single_execution_export(&req, 100));
+    }
+
+    #[test]
+    fn kingbase_single_execution_never_exceeds_one_export_page() {
+        let req = QueryResultExportRequest {
+            sql: "SELECT TOP 1000 * FROM orders".to_string(),
+            query_base_sql: "SELECT TOP 1000 * FROM orders".to_string(),
+            database_type: DatabaseType::Kingbase,
+            use_agent_cursor: false,
+            ..request("csv", None, None)
+        };
+
+        assert_eq!(single_execution_row_bound(&req), Some(1000));
+        assert_eq!(single_execution_page_limit(&req, 100), None);
+        assert!(supports_single_execution_export(&req, 1000));
     }
 
     #[test]

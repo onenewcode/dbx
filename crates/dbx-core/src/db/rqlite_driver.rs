@@ -98,7 +98,7 @@ pub async fn test_connection(client: &RqliteClient, timeout: Duration) -> Result
 }
 
 pub async fn list_databases(_client: &RqliteClient) -> Result<Vec<DatabaseInfo>, String> {
-    Ok(vec![DatabaseInfo { name: "main".to_string() }])
+    Ok(vec![DatabaseInfo { name: "main".to_string(), ..Default::default() }])
 }
 
 pub async fn list_tables(client: &RqliteClient, _schema: &str) -> Result<Vec<TableInfo>, String> {
@@ -238,6 +238,13 @@ pub async fn list_triggers(client: &RqliteClient, _schema: &str, table: &str) ->
                 name: value_as_string(row.first()).unwrap_or_default(),
                 event: event.to_string(),
                 timing: timing.to_string(),
+                level: None,
+                condition: None,
+                language: None,
+                enabled: None,
+                valid: None,
+                comment: None,
+                created_at: None,
                 statement: value_as_string(row.get(1)),
             }
         })
@@ -297,6 +304,8 @@ pub async fn execute_query_with_max_rows(
             columns: vec![],
             column_types: Vec::new(),
             column_sortables: vec![],
+            spatial_columns: vec![],
+            spatial_values: vec![],
             rows: vec![],
             affected_rows,
             execution_time_ms: start.elapsed().as_millis(),
@@ -304,6 +313,7 @@ pub async fn execute_query_with_max_rows(
             session_id: None,
             has_more: false,
             elasticsearch_raw_body: None,
+            messages: Vec::new(),
         })
     }
 }
@@ -347,6 +357,8 @@ fn query_result_from_rqlite_result(
         columns: result.columns,
         column_types: Vec::new(),
         column_sortables: vec![],
+        spatial_columns: vec![],
+        spatial_values: vec![],
         rows: result.values,
         affected_rows: 0,
         execution_time_ms,
@@ -354,6 +366,7 @@ fn query_result_from_rqlite_result(
         session_id: None,
         has_more: false,
         elasticsearch_raw_body: None,
+        messages: Vec::new(),
     }
 }
 

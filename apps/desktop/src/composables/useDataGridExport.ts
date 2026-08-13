@@ -2,9 +2,10 @@ import { computed, type ComputedRef, type Ref, createApp } from "vue";
 import { useI18n } from "vue-i18n";
 import { useDataGridExtractor } from "@/composables/useDataGridExtractor";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
+import { saveTextFile, sanitizeExportBaseName, compactLocalTimestamp } from "@/lib/export/saveTextFile";
 import * as api from "@/lib/backend/api";
 import { type CellSelectionMatrix, type CellSelectionRange, type SelectionData } from "@/lib/dataGrid/gridSelection";
-import type { DataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
+import type { DataGridExtractRequest, DataGridExtractorOptions } from "@/lib/dataGrid/dataGridCopyExtractor";
 import { useToast } from "@/composables/useToast";
 import { useExportTracker } from "@/composables/useExportTracker";
 import { displayCellValue, type CellValue } from "@/lib/dataGrid/cellValue";
@@ -76,6 +77,7 @@ export interface UseDataGridExportOptions {
   copyInsertTargetLabel?: ComputedRef<string | undefined>;
   mongoUpdateTarget?: ComputedRef<MongoCopyUpdateTarget | undefined>;
   databaseType: ComputedRef<DatabaseType | undefined>;
+  identifierQuote?: ComputedRef<string | undefined>;
   connectionId: ComputedRef<string | undefined>;
   database: ComputedRef<string | undefined>;
   context: ComputedRef<"results" | "table-data" | undefined>;
@@ -96,6 +98,7 @@ export interface UseDataGridExportOptions {
   getRowItem: (rowId: number) => RowItem | undefined;
   selectedRowIds: Ref<Set<number>> | ComputedRef<Set<number>>;
   hasRowSelection: ComputedRef<boolean>;
+  resolveSourceValues?: (rowIds: number[], sourceColumnIndexes: number[]) => Promise<Map<number, Map<number, CellValue>>>;
   fullExportResult?: (onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => Promise<QueryResult | undefined>;
   queryResultExportRequest?: (options: { exportId: string; filePath: string; format: "csv" | "xlsx" | "txt" | "sql"; includeSqlSheet?: boolean; exportTableName?: string; exportColumnTypes?: Array<string | null | undefined> }) => Promise<QueryResultExportRequest | undefined>;
   /**
@@ -128,6 +131,8 @@ export interface UseDataGridExportOptions {
     status: string;
     errorMessage: string | null;
     filePath: string | null;
+    startedAt?: number;
+    finishedAt?: number;
   }>;
   exportCancelHandler?: Ref<(() => Promise<void>) | null>;
   exportCanMinimize?: Ref<boolean>;
@@ -145,7 +150,6 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   const { toast } = useToast();
   const tracker = useExportTracker();
   const exportGuard: ActionActivationGuard = {};
-  const { addTask, updateTableExportTask, registerTaskCancelHandler, unregisterTaskCancelHandler, removeTask } = useExportTracker();
 
   const {
     columns,
@@ -179,6 +183,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     getRowItem,
     selectedRowIds,
     hasRowSelection,
+    resolveSourceValues,
     fullExportResult,
     queryResultExportRequest,
     hasCompleteLocalResult,
@@ -218,6 +223,25 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (rowIds === undefined) return displayItems.value.filter((item) => !item.isDraft);
     const rowIdSet = new Set(rowIds);
     return displayItems.value.filter((item) => rowIdSet.has(item.id) && !item.isDraft);
+  }
+
+  async function resolveVisibleRowValues(items: RowItem[], visibleIndexes = visibleColumnIndexes.value): Promise<RowItem[]> {
+    if (!resolveSourceValues || items.length === 0 || visibleIndexes.length === 0) return items;
+    const resolved = await resolveSourceValues(
+      items.map((item) => item.id),
+      visibleIndexes,
+    );
+    if (resolved.size === 0) return items;
+    return items.map((item) => {
+      const values = resolved.get(item.id);
+      if (!values) return item;
+      const data = [...item.data];
+      visibleIndexes.forEach((sourceIndex) => {
+        const visibleIndex = visibleColumnIndexes.value.indexOf(sourceIndex);
+        if (visibleIndex >= 0 && values.has(sourceIndex)) data[visibleIndex] = values.get(sourceIndex) ?? null;
+      });
+      return { ...item, data };
+    });
   }
 
   function applyGlobalDateTimeExportFormat(result: { columns: string[]; columnTypes: string[]; rows: CellValue[][] }, enabled: boolean) {
@@ -312,7 +336,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         {
           columns: columns.value,
           columnTypes: (columnTypes.value ?? []).map((type) => type ?? ""),
-          rows: rowsToExport(rowIds).map((item) => item.data),
+          rows: (await resolveVisibleRowValues(rowsToExport(rowIds))).map((item) => item.data),
         },
         formatDateTime,
       ),
@@ -360,6 +384,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     const item = getRowItem(contextCell.value.rowId);
     return item && !item.isDraft ? [item] : [];
   }
+
+  const copyRowCount = computed(() => targetedRows().length);
+  const canCopyRow = computed(() => copyRowCount.value > 0);
 
   function selectionInsertData(): CopyInsertData | null {
     const matrix = selectedCellMatrix.value;
@@ -430,7 +457,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
 
   async function copyRowsAsJson(items: RowItem[]) {
     if (items.length === 0) return;
-    const value = items.length === 1 ? rowToJsonObject(items[0]) : items.map(rowToJsonObject);
+    const resolvedItems = await resolveVisibleRowValues(items);
+    const value = resolvedItems.length === 1 ? rowToJsonObject(resolvedItems[0]) : resolvedItems.map(rowToJsonObject);
     const hasOriginalMongoDocuments = options.databaseType.value === "mongodb" && items.every((item) => item.sourceIndex !== undefined && options.mongoDocuments?.value?.[item.sourceIndex] !== undefined);
     const copyValue = options.databaseType.value === "mongodb" && !hasOriginalMongoDocuments ? expandNestedJsonStringsForCopy(value) : value;
     await copyText(JSON.stringify(copyValue, null, 2));
@@ -441,7 +469,9 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     if (!contextCell.value || contextCell.value.col < 0) return;
     const item = getRowItem(contextCell.value.rowId);
     if (!item || item.isDraft) return;
-    const val = item?.data[contextCell.value.col] ?? null;
+    const sourceIndex = visibleColumnIndexes.value[contextCell.value.col] ?? contextCell.value.col;
+    const [resolvedItem] = await resolveVisibleRowValues([item], [sourceIndex]);
+    const val = resolvedItem?.data[contextCell.value.col] ?? null;
     await copyText(displayCellValue(val), { rows: [[val]] });
   }
 
@@ -467,6 +497,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return targetedRows().filter((item) => !item.isDraft);
   }
 
+  function updateEligibleRows(): RowItem[] {
+    return targetedRows().filter((item) => !item.isNew && !item.isDraft && !item.isDeleted);
+  }
+
   function insertableCopyColumnCount(excludePrimaryKeys: boolean, copyColumns = effectiveColumns(sourceColumns.value, columns.value), extractorOptions?: DataGridExtractorOptions): number {
     const primaryKeySet = new Set((tableMeta.value?.primaryKeys ?? []).map(normalizeColumnName));
     return copyColumns.filter((column): column is string => !!column && !isCopyInsertOmittedColumn(databaseType.value, column, tableMeta.value, extractorOptions) && (!excludePrimaryKeys || !primaryKeySet.has(normalizeColumnName(column)))).length;
@@ -487,14 +521,28 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return buildCopyInsertStatement(rowLimit === undefined ? data : { ...data, rows: data.rows.slice(0, rowLimit) }, extractorOptions.sql.excludePrimaryKeysFromInsert, extractorOptions.sql.insertMode);
   }
 
-  async function buildMongoExtractorUpdate(_extractorOptions: DataGridExtractorOptions, rowLimit?: number): Promise<string | undefined> {
+  function mongoUpdateColumnIndexes(request: DataGridExtractRequest): number[] {
+    const selectedColumns = new Set(
+      request.selectedColumnIndexes
+        .map((index) => request.columns[index]?.sourceName ?? request.columns[index]?.displayName)
+        .filter((column): column is string => !!column)
+        .map(normalizeColumnName),
+    );
+    return effectiveColumns(sourceColumns.value, columns.value)
+      .map((column, index) => (column && selectedColumns.has(normalizeColumnName(column)) ? index : -1))
+      .filter((index) => index >= 0);
+  }
+
+  async function buildMongoExtractorUpdate(request: DataGridExtractRequest, rowLimit?: number): Promise<string | undefined> {
     const target = options.mongoUpdateTarget?.value;
     const documents = options.mongoDocuments?.value;
     if (!target || !documents) return undefined;
-    const rows = insertEligibleRows();
+    const rows = updateEligibleRows();
     if (rows.length === 0) return undefined;
     const limitedRows = rowLimit === undefined ? rows : rows.slice(0, rowLimit);
-    const copyColumns = effectiveColumns(sourceColumns.value, columns.value).map((column) => column ?? "");
+    const allCopyColumns = effectiveColumns(sourceColumns.value, columns.value).map((column) => column ?? "");
+    const selectedColumnIndexes = mongoUpdateColumnIndexes(request);
+    const copyColumns = selectedColumnIndexes.map((index) => allCopyColumns[index]);
     await yieldToMainThread();
     const statements: string[] = [];
     for (const item of limitedRows) {
@@ -503,7 +551,13 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       if (!originalDocument || typeof originalDocument !== "object" || Array.isArray(originalDocument)) continue;
       const source = originalDocument as Record<string, unknown>;
       if (!Object.prototype.hasOwnProperty.call(source, target.idColumn)) continue;
-      const update = buildMongoCopyUpdateDocument(item.data as MongoInputValue[], copyColumns, item.isDirtyCol, originalDocument, target.idColumn);
+      const update = buildMongoCopyUpdateDocument(
+        selectedColumnIndexes.map((index) => item.data[index]) as MongoInputValue[],
+        copyColumns,
+        selectedColumnIndexes.map((index) => item.isDirtyCol[index] ?? false),
+        originalDocument,
+        target.idColumn,
+      );
       if (!update) continue;
       const statement = `db.getCollection(${JSON.stringify(target.collection)}).updateOne({${JSON.stringify(target.idColumn)}:${formatMongoShellLiteral(source[target.idColumn])}},${formatMongoShellLiteral(update)});`;
       statements.push(formatMongoCopyStatement(statement) ?? statement);
@@ -511,7 +565,24 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return statements.length > 0 ? statements.join("\n") : undefined;
   }
 
-  const { copyWithExtractor, previewWithExtractor, canCopyWithExtractor } = useDataGridExtractor({
+  function canBuildMongoExtractorUpdate(request: DataGridExtractRequest): boolean {
+    const target = options.mongoUpdateTarget?.value;
+    const documents = options.mongoDocuments?.value;
+    const rows = updateEligibleRows();
+    if (!target || !documents || rows.length === 0) return false;
+
+    const normalizedIdColumn = normalizeColumnName(target.idColumn);
+    const copyColumns = mongoUpdateColumnIndexes(request).map((index) => effectiveColumns(sourceColumns.value, columns.value)[index] ?? "");
+    if (!copyColumns.some((column) => column && normalizeColumnName(column) !== normalizedIdColumn)) return false;
+
+    return rows.every((item) => {
+      if (item.sourceIndex === undefined) return false;
+      const document = documents[item.sourceIndex];
+      return !!document && typeof document === "object" && !Array.isArray(document) && Object.prototype.hasOwnProperty.call(document, target.idColumn);
+    });
+  }
+
+  const { copyWithExtractor, copyWithPreference, previewWithExtractor, previewWithPreference, canCopyWithExtractor } = useDataGridExtractor({
     columns,
     displayItems,
     allColumns,
@@ -528,6 +599,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     hasRowSelection,
     hasColumnSelection,
     selectedRowIds,
+    resolveSourceValues,
     copyText,
     canCopySqlInsert: (request) => {
       const selectedColumns = request.selectedColumnIndexes.map((index) => request.columns[index]?.sourceName ?? request.columns[index]?.displayName).filter((column): column is string => !!column);
@@ -535,13 +607,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     },
     buildMongoInsert: buildMongoExtractorInsert,
     buildMongoUpdate: buildMongoExtractorUpdate,
+    canBuildMongoUpdate: canBuildMongoExtractorUpdate,
     contextCell,
     contextSelectionIsSynthetic,
   });
 
   async function copyAll() {
     const header = columns.value.join("\t");
-    const rows = displayItems.value.filter((item) => !item.isDraft).map((item) => item.data);
+    const rows = (await resolveVisibleRowValues(displayItems.value.filter((item) => !item.isDraft))).map((item) => item.data);
     const body = rows.map((row) => row.map((cell) => displayCellValue(cell)).join("\t")).join("\n");
     await copyText(`${header}\n${body}`, { rows, header: columns.value });
   }
@@ -574,6 +647,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             status: "Running",
             errorMessage: null,
             filePath: null,
+            startedAt: Date.now(),
+            finishedAt: undefined,
           };
           exportProgressDialog.value = true;
         }
@@ -623,6 +698,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             status: "Done",
             rowsExported: result.rows.length,
             totalRows: result.rows.length,
+            finishedAt: Date.now(),
           };
         }
         toast(t("grid.exported"));
@@ -811,6 +887,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             status: "Running",
             errorMessage: null,
             filePath: outputPath,
+            startedAt: Date.now(),
+            finishedAt: undefined,
           };
           exportProgressDialog.value = true;
         }
@@ -845,6 +923,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             status: "Done",
             rowsExported: result.rows.length,
             totalRows: result.rows.length,
+            finishedAt: Date.now(),
           };
         }
         toast(t("grid.exported"));
@@ -981,6 +1060,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         status: "Running",
         errorMessage: null,
         filePath: outputPath,
+        startedAt: Date.now(),
+        finishedAt: undefined,
       };
     }
     if (exportProgressDialog) exportProgressDialog.value = true;
@@ -1002,6 +1083,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
           connectionId: connectionId.value,
           database: database.value,
           schema: meta.schema,
+          identifierQuote: options.identifierQuote?.value,
           tableName: meta.tableName,
           filePath: outputPath,
           format,
@@ -1026,6 +1108,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
               totalRows: progress.totalRows,
               status: progress.status,
               errorMessage: progress.errorMessage || null,
+              finishedAt: progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled" ? Date.now() : exportProgressState.value.finishedAt,
             };
           }
           tracker.updateTableExportTask(exportId, progress);
@@ -1042,10 +1125,11 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     return true;
   }
 
-  async function exportQueryResultViaBackend(format: "csv" | "xlsx" | "txt", rowIds?: number[], includeSqlSheet = false, useCommentHeader = false): Promise<boolean> {
+  async function exportQueryResultViaBackend(format: "csv" | "xlsx" | "txt" | "sql", rowIds?: number[], includeSqlSheet = false, useCommentHeader = false): Promise<boolean> {
     if (rowIds !== undefined || context.value !== "results" || !queryResultExportRequest) {
       return false;
     }
+    if (databaseType.value === "mongodb") return false;
     // The full result is already in memory — don't re-execute the query on the
     // backend just to stream the same rows back to a file.
     if (hasCompleteLocalResult?.value) return false;
@@ -1065,7 +1149,14 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     }
 
     const exportId = uuid();
-    const baseRequest = await queryResultExportRequest({ exportId, filePath: outputPath, format, includeSqlSheet });
+    const baseRequest = await queryResultExportRequest({
+      exportId,
+      filePath: outputPath,
+      format,
+      includeSqlSheet,
+      exportTableName: format === "sql" ? tableMeta.value?.tableName : undefined,
+      exportColumnTypes: format === "sql" ? allColumnTypes.value?.map((type) => type ?? null) : undefined,
+    });
     const columnComments = useCommentHeader ? buildColumnComments(columns.value) : undefined;
     const request = baseRequest ? { ...baseRequest, dateTimeFormat: useSettingsStore().editorSettings.globalDateTimeExportFormat || undefined, numericColumnRightAlign: useSettingsStore().editorSettings.numericColumnRightAlign ?? true, columnComments } : undefined;
     if (!request) throw new Error("Unable to build query result export request");
@@ -1080,6 +1171,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
         status: "Running",
         errorMessage: null,
         filePath: outputPath,
+        startedAt: Date.now(),
+        finishedAt: undefined,
       };
     }
     if (exportProgressDialog) exportProgressDialog.value = true;
@@ -1101,6 +1194,7 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
             totalRows: adjustedTotal,
             status: progress.status,
             errorMessage: progress.errorMessage || null,
+            finishedAt: progress.status === "Done" || progress.status === "Error" || progress.status === "Cancelled" ? Date.now() : exportProgressState.value.finishedAt,
           };
         }
         tracker.updateTableExportTask(exportId, progress);
@@ -1108,6 +1202,25 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
       if (terminalProgress.status === "Done") {
         toast(t("grid.exported"));
       }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      if (exportProgressState) {
+        exportProgressState.value = {
+          ...exportProgressState.value,
+          status: "Error",
+          errorMessage,
+          finishedAt: Date.now(),
+        };
+      }
+      tracker.updateTableExportTask(exportId, {
+        exportId,
+        tableName: "Query Result",
+        rowsExported: exportProgressState?.value.rowsExported ?? 0,
+        totalRows: exportProgressState?.value.totalRows ?? null,
+        status: "Error",
+        errorMessage,
+      });
+      throw error;
     } finally {
       if (exportCancelHandler) exportCancelHandler.value = null;
       tracker.unregisterTaskCancelHandler(exportId);
@@ -1117,70 +1230,8 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   }
 
   async function exportQueryResultSqlViaBackend(rowIds?: number[]): Promise<boolean> {
-    // Guard: only for query-result context without complete local result, desktop only
-    if (rowIds !== undefined || context.value !== "results" || !queryResultExportRequest) return false;
-    if (hasCompleteLocalResult?.value) return false;
-    if (!isTauriRuntime()) return false; // Web → local export fallback
-
-    // 1. Save dialog FIRST (immediate user feedback)
-    let outputPath = exportFileName("query-result", "sql");
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const path = await save({
-      defaultPath: outputPath,
-      filters: [{ name: "SQL", extensions: ["sql"] }],
-    });
-    if (!path) return true;
-    outputPath = path as string;
-
-    // 2. Register background task FIRST so its exportId drives the request.
-    //    addTask generates its own ID — capture it so progress callbacks match.
-    const task = addTask(tableMeta.value?.tableName || "Query Result", "sql", outputPath);
-    const taskExportId = task.exportId;
-
-    let request: api.QueryResultExportRequest;
-    try {
-      const built = await queryResultExportRequest({
-        exportId: taskExportId,
-        filePath: outputPath,
-        format: "sql",
-        exportTableName: tableMeta.value?.tableName,
-        exportColumnTypes: allColumnTypes.value?.map((t) => t ?? null) as Array<string | null | undefined> | undefined,
-      });
-      if (!built) {
-        // builder declined — clean up the task we just registered
-        removeTask(taskExportId);
-        return false;
-      }
-      request = built;
-    } catch {
-      removeTask(taskExportId);
-      return false;
-    }
-
-    registerTaskCancelHandler(taskExportId, () => api.cancelQueryResultExport(taskExportId, request.executionId));
-
-    try {
-      await api.startQueryResultExport(request, (progress) => {
-        updateTableExportTask(taskExportId, progress);
-        if (progress.status === "Done") {
-          toast(t("grid.exported"));
-        }
-      });
-    } catch (e) {
-      // 4. Startup rejection → mark task Error (fixes stuck-Running bug)
-      updateTableExportTask(taskExportId, {
-        exportId: taskExportId,
-        tableName: tableMeta.value?.tableName || "Query Result",
-        rowsExported: 0,
-        totalRows: null,
-        status: "Error" as const,
-        errorMessage: (e as Error)?.message || String(e),
-      });
-      throw e;
-    } finally {
-      unregisterTaskCancelHandler(taskExportId);
-    }
-    return true;
+    if (!isTauriRuntime()) return false;
+    return exportQueryResultViaBackend("sql", rowIds);
   }
 
   async function exportSql(rowIds?: number[]) {
@@ -1261,9 +1312,13 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
     copyText,
     copyCell,
     copyRow,
+    copyRowCount,
+    canCopyRow,
     copyAll,
     copyWithExtractor,
+    copyWithPreference,
     previewWithExtractor,
+    previewWithPreference,
     canCopyWithExtractor,
     exportCsv,
     exportCurrentPageCsv,
@@ -1285,50 +1340,10 @@ export function useDataGridExport(options: UseDataGridExportOptions) {
   };
 }
 
-async function saveTextFile(content: string, defaultFileName: string, filterName: string, filterExt: string) {
-  if (isTauriRuntime()) {
-    const { save } = await import("@tauri-apps/plugin-dialog");
-    const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-    const path = await save({
-      defaultPath: defaultFileName,
-      filters: [{ name: filterName, extensions: [filterExt] }],
-    });
-    if (path) await writeTextFile(path, content);
-    return;
-  }
-
-  const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = defaultFileName;
-  a.click();
-  URL.revokeObjectURL(url);
-}
-
 export function defaultDataGridExportFileName(baseName: string | undefined, fallbackBaseName: string, extension: string, options: { page?: boolean; allResults?: boolean } = {}): string {
   const sanitizedBaseName = sanitizeExportBaseName(baseName || "") || sanitizeExportBaseName(fallbackBaseName) || "export";
   const suffix = options.allResults ? "results" : options.page ? "page" : "";
   return [sanitizedBaseName, suffix, compactLocalTimestamp()].filter(Boolean).join("_") + `.${extension}`;
-}
-
-function sanitizeExportBaseName(value: string): string {
-  return replaceControlCharacters(
-    value
-      .trim()
-      .replace(/\.[sS][qQ][lL]$/, "")
-      .replace(/[<>:"/\\|?*]/g, "_"),
-    "_",
-  )
-    .replace(/\s+/g, " ")
-    .replace(/[._\s-]+$/g, "")
-    .slice(0, 120);
-}
-
-function replaceControlCharacters(value: string, replacement: string): string {
-  return Array.from(value)
-    .map((char) => (char.charCodeAt(0) < 32 ? replacement : char))
-    .join("");
 }
 
 function buildMongoCopyInsertStatement(options: { collection: string; columns: string[]; sourceColumns?: Array<string | undefined>; rows: RowItem[]; mongoDocuments?: unknown[]; excludePrimaryKeys?: boolean; insertMode?: DataGridCopyInsertMode }): string | undefined {
@@ -1361,16 +1376,6 @@ function formatMongoCopyStatement(statement: string | undefined): string | undef
 
 function yieldToMainThread(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, 0));
-}
-
-function compactLocalTimestamp(date = new Date()): string {
-  const yy = String(date.getFullYear() % 100).padStart(2, "0");
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  const hour = String(date.getHours()).padStart(2, "0");
-  const minute = String(date.getMinutes()).padStart(2, "0");
-  const second = String(date.getSeconds()).padStart(2, "0");
-  return `${yy}${month}${day}${hour}${minute}${second}`;
 }
 
 function effectiveColumns(sourceColumns: Array<string | undefined> | undefined, columns: string[]): Array<string | undefined> {

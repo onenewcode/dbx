@@ -156,6 +156,12 @@ export interface TopicInfo {
   messageType?: RocketMqTopicMessageType | string;
   /** RabbitMQ: owning virtual host, present when listing across all vhosts. */
   namespace?: string;
+  /** RabbitMQ total queue messages, including ready and unacknowledged messages. */
+  messageCount?: number;
+  /** RabbitMQ messages ready for delivery. */
+  messagesReady?: number;
+  /** RabbitMQ messages delivered but not yet acknowledged. */
+  messagesUnacked?: number;
 }
 
 export interface ListTopicsOpts {
@@ -192,6 +198,8 @@ export interface SubscriptionInfo {
   consumerGroupType?: string;
   /** RocketMQ consumer group message model: CLUSTERING / BROADCASTING. */
   messageModel?: string;
+  /** When true, backlog probe failed — do not render msgBacklog as healthy zero. */
+  backlogUnavailable?: boolean;
 }
 
 export interface RocketMqConsumerGroupConfig {
@@ -224,13 +232,29 @@ export interface ProducerInfo {
   clientVersion: string;
 }
 
-export type ResetPosition = { kind: "earliest" } | { kind: "latest" } | { kind: "timestamp"; timestampMs: number } | { kind: "messageId"; ledgerId: number; entryId: number };
+export type ResetPosition = { kind: "earliest" } | { kind: "latest" } | { kind: "timestamp"; timestampMs: number } | { kind: "partitionOffset"; partition: number; offset: number } | { kind: "messageId"; ledgerId: number; entryId: number };
 
 export type SkipCount = { kind: "all" } | { kind: "count"; count: number };
+
+/** Per-queue consume progress (RocketMQ Dashboard consume-detail / Kafka lag rows). */
+export interface PartitionBacklog {
+  partition: number;
+  /** Consumer committed offset (`consumerOffset`). */
+  currentOffset: number;
+  /** Broker max offset (`brokerOffset`). */
+  endOffset: number;
+  lag: number;
+  brokerName?: string;
+  /** Last consume message store timestamp (ms). `0` means unavailable. */
+  lastTimestamp?: number;
+  consumerClient?: string;
+}
 
 export interface BacklogStats {
   msgBacklog: number;
   backlogSize: number;
+  /** Optional queue-level progress; omitted or empty when adapter only exposes totals. */
+  partitions?: PartitionBacklog[];
 }
 
 export interface ClusterInfo {
@@ -263,7 +287,15 @@ export interface PeekedMessage {
   payloadText?: string;
 }
 
+export interface PeekMessagesResult {
+  messages: PeekedMessage[];
+  /** True when the broker could not finish the requested snapshot before its limit. */
+  incomplete: boolean;
+}
+
 export interface PeekMessagesOptions {
+  /** Kafka only. Omitted starts at earliest unless a legacy caller supplies offset. */
+  startPosition?: "latest" | "earliest" | "offset";
   partition?: number;
   offset?: number;
 }

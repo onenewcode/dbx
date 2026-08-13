@@ -7,6 +7,22 @@ const OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_KEY: &str = "compatibleOjdbcVers
 const OCEANBASE_ORACLE_COMPATIBLE_OJDBC_VERSION_PARAM: &str = "compatibleOjdbcVersion=8";
 const ZOOKEEPER_MIN_CONNECTION_TIMEOUT_MS: u64 = 15_000;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AgentSessionRole {
+    #[default]
+    Workload,
+    Metadata,
+}
+
+impl AgentSessionRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Workload => "workload",
+            Self::Metadata => "metadata",
+        }
+    }
+}
+
 fn agent_jdbc_driver_class(config: &ConnectionConfig) -> &str {
     let driver_class = config.jdbc_driver_class.as_deref().unwrap_or("");
     if config.db_type == DatabaseType::H2
@@ -19,6 +35,16 @@ fn agent_jdbc_driver_class(config: &ConnectionConfig) -> &str {
 }
 
 pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, database: &str) -> serde_json::Value {
+    agent_connect_params_with_role(config, host, port, database, AgentSessionRole::Workload)
+}
+
+pub fn agent_connect_params_with_role(
+    config: &ConnectionConfig,
+    host: &str,
+    port: u16,
+    database: &str,
+    session_role: AgentSessionRole,
+) -> serde_json::Value {
     let agent_database = if config.db_type == DatabaseType::MongoDb {
         mongo_agent_database(config, database)
     } else if matches!(config.db_type, DatabaseType::Oracle | DatabaseType::OceanbaseOracle) {
@@ -83,6 +109,7 @@ pub fn agent_connect_params(config: &ConnectionConfig, host: &str, port: u16, da
         "informix_server": config.informix_server,
         "jdbc_driver_class": agent_jdbc_driver_class(config),
         "jdbc_driver_paths": &config.jdbc_driver_paths,
+        "sessionRole": session_role.as_str(),
     });
     if config.db_type == DatabaseType::ZooKeeper {
         params["connection_timeout_ms"] = serde_json::json!(
@@ -607,6 +634,7 @@ mod tests {
 
     fn config(db_type: DatabaseType, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "conn".to_string(),
             name: "Connection".to_string(),
             note: String::new(),
@@ -620,6 +648,7 @@ mod tests {
             username: "user".to_string(),
             password: "secret".to_string(),
             database: database.map(str::to_string),
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -655,11 +684,30 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
             database_info: None,
         }
+    }
+
+    #[test]
+    fn agent_connect_params_default_to_workload_session_role() {
+        let params = agent_connect_params(&config(DatabaseType::H2, Some("test")), "127.0.0.1", 9092, "test");
+        assert_eq!(params["sessionRole"], "workload");
+    }
+
+    #[test]
+    fn metadata_agent_connect_params_include_metadata_session_role() {
+        let params = agent_connect_params_with_role(
+            &config(DatabaseType::H2, Some("test")),
+            "127.0.0.1",
+            9092,
+            "test",
+            AgentSessionRole::Metadata,
+        );
+        assert_eq!(params["sessionRole"], "metadata");
     }
 
     #[test]

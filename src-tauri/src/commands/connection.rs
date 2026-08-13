@@ -45,20 +45,18 @@ fn mark_mongo_legacy_driver(config: &mut ConnectionConfig) -> bool {
     changed
 }
 
-async fn persist_mongo_legacy_driver_profile(state: &AppState, config: &ConnectionConfig) -> Result<(), String> {
+async fn persist_mongo_legacy_driver_profile(state: &AppState, config: &ConnectionConfig) -> Result<bool, String> {
     if config.one_time {
-        return Ok(());
+        return Ok(true);
     }
-
-    let mut configs: Vec<ConnectionConfig> =
-        state.storage.load_connections().await?.into_iter().map(|config| config.canonicalized()).collect();
-    let Some(saved_config) = configs.iter_mut().find(|saved_config| saved_config.id == config.id) else {
-        return Ok(());
-    };
-    if !mark_mongo_legacy_driver(saved_config) {
-        return Ok(());
-    }
-    save_connection_configs(state, &configs).await
+    state
+        .storage
+        .save_connection_driver_profile(
+            config,
+            Some(MONGO_LEGACY_DRIVER_PROFILE.to_string()),
+            Some(MONGO_LEGACY_DRIVER_LABEL.to_string()),
+        )
+        .await
 }
 
 async fn test_agent_connection(
@@ -162,7 +160,7 @@ async fn connect_agent_pool(
         }
     }
 
-    Ok(PoolKind::Agent(Arc::new(tokio::sync::Mutex::new(client))))
+    Ok(PoolKind::agent(client))
 }
 
 #[cfg(test)]
@@ -171,7 +169,8 @@ mod tests {
     use super::load_connection_configs;
     use super::{
         connect_sqlite_from_config, gaussdb_m_jdbc_command_config, mark_mongo_legacy_driver,
-        mongo_legacy_connect_params, save_connection_configs, MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
+        mongo_legacy_connect_params, persist_mongo_legacy_driver_profile, save_connection_configs,
+        MONGO_LEGACY_DRIVER_LABEL, MONGO_LEGACY_DRIVER_PROFILE,
     };
     use dbx_core::connection::{AppState, PoolKind};
     use dbx_core::models::connection::{AttachedDatabaseConfig, ConnectionConfig, DatabaseType};
@@ -179,6 +178,7 @@ mod tests {
 
     fn mongodb_config() -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "mongo".to_string(),
             name: "MongoDB".to_string(),
             note: String::new(),
@@ -192,6 +192,7 @@ mod tests {
             username: "mongouser".to_string(),
             password: "secret".to_string(),
             database: Some("RestCloud_V45PUB_Gateway".to_string()),
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -229,6 +230,7 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
@@ -408,6 +410,29 @@ mod tests {
         assert!(!mark_mongo_legacy_driver(&mut config));
     }
 
+    #[tokio::test]
+    async fn persist_mongo_legacy_driver_profile_updates_only_the_target_connection() {
+        let dir = std::env::temp_dir().join(format!("dbx-tauri-mongo-profile-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let storage = Storage::open(&dir.join("storage.db")).await.unwrap();
+        let state = AppState::new_with_plugin_dir(storage, dir.join("plugins"));
+        let mongo = mongodb_config();
+        let mut other = mongodb_config();
+        other.id = "other".to_string();
+        other.name = "Other MongoDB".to_string();
+        state.storage.save_connections(&[mongo.clone(), other.clone()]).await.unwrap();
+
+        persist_mongo_legacy_driver_profile(&state, &mongo).await.unwrap();
+
+        let saved = state.storage.load_connections().await.unwrap();
+        let updated = saved.iter().find(|config| config.id == mongo.id).unwrap();
+        assert_eq!(updated.driver_profile.as_deref(), Some(MONGO_LEGACY_DRIVER_PROFILE));
+        assert_eq!(updated.driver_label.as_deref(), Some(MONGO_LEGACY_DRIVER_LABEL));
+        assert_eq!(saved.iter().find(|config| config.id == other.id), Some(&other));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[cfg(feature = "sqlite-sqlcipher")]
     #[tokio::test]
     async fn sqlite_connect_from_config_uses_sqlcipher_key() {
@@ -463,7 +488,7 @@ mod tests {
         let initial = mq_config("mq-conn", "http://127.0.0.1:8080");
         state.configs.write().await.insert(initial.id.clone(), initial.clone());
         state.connections.write().await.insert(initial.id.clone(), PoolKind::MessageQueue);
-        let first = state.mq_registry.get_or_build(&initial).await.unwrap();
+        let first = state.mq_registry.get_or_build(&initial).await.unwrap().adapter;
 
         let updated = mq_config("mq-conn", "http://127.0.0.1:8081");
         save_connection_configs(&state, std::slice::from_ref(&updated)).await.unwrap();
@@ -479,7 +504,7 @@ mod tests {
             .map(str::to_string);
         assert_eq!(cached_admin_url.as_deref(), Some("http://127.0.0.1:8081"));
 
-        let second = state.mq_registry.get_or_build(&updated).await.unwrap();
+        let second = state.mq_registry.get_or_build(&updated).await.unwrap().adapter;
         assert!(!std::sync::Arc::ptr_eq(&first, &second));
         assert!(!state.connections.read().await.contains_key(&initial.id));
 
@@ -531,7 +556,7 @@ mod tests {
             configs.insert(kept.id.clone(), kept.clone());
             configs.insert(removed.id.clone(), removed.clone());
         }
-        let stale = state.mq_registry.get_or_build(&removed).await.unwrap();
+        let stale = state.mq_registry.get_or_build(&removed).await.unwrap().adapter;
 
         save_connection_configs(&state, std::slice::from_ref(&kept)).await.unwrap();
 
@@ -540,7 +565,7 @@ mod tests {
         assert!(!configs.contains_key("removed-mq"));
         drop(configs);
 
-        let rebuilt = state.mq_registry.get_or_build(&removed).await.unwrap();
+        let rebuilt = state.mq_registry.get_or_build(&removed).await.unwrap().adapter;
         assert!(!std::sync::Arc::ptr_eq(&stale, &rebuilt));
 
         let _ = std::fs::remove_dir_all(dir);
@@ -976,6 +1001,18 @@ async fn test_connection_with_info_inner(
                     .await
                     .map(|_| "Connection successful".to_string())
             }
+            DatabaseType::Meilisearch => {
+                let client = db::meilisearch_driver::MeilisearchClient::new(
+                    &url,
+                    Some(&config.password),
+                    config.ssl,
+                    config.url_params.as_deref(),
+                    connect_timeout,
+                )?;
+                db::meilisearch_driver::test_connection(&client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
             DatabaseType::Hbase => {
                 let client = db::hbase_driver::HBaseClient::new(
                     &url,
@@ -1055,33 +1092,65 @@ async fn test_connection_with_info_inner(
                     .await
                     .map(|_| "Connection successful".to_string())
             }
+            DatabaseType::VictoriaMetrics => {
+                let client =
+                    db::victoriametrics_driver::VictoriaMetricsClient::new_for_config(&url, &config, connect_timeout)?;
+                db::victoriametrics_driver::test_connection(&client, connect_timeout)
+                    .await
+                    .map(|_| "Connection successful".to_string())
+            }
             DatabaseType::Nacos => {
                 let admin_config = state.nacos_admin_config_for_connection(connection_id, &config).await?;
                 let adapter = state.nacos_registry.build_transient_config(admin_config).await?;
                 adapter.test_connection().await?;
                 Ok("Connection successful".to_string())
             }
+            DatabaseType::Consul => {
+                let mut consul_config = dbx_core::consul::ConsulConfig::from_connection(&config)?;
+                let validate_agent_target = consul_config.agent_target.is_some();
+                let original_host = consul_config.base_url.host_str().unwrap_or_default();
+                let original_port = consul_config.base_url.port_or_known_default().unwrap_or(config.port);
+                if host != original_host || port != original_port {
+                    consul_config = consul_config.with_connect_override(&host, port);
+                }
+                let client = dbx_core::consul::ConsulClient::new(consul_config).await?;
+                client.probe().await?;
+                let identity = if validate_agent_target {
+                    Some(client.validate_configured_agent_target().await?)
+                } else {
+                    client.agent_self().await.ok()
+                };
+                Ok(identity
+                    .map(|identity| format!("Connection successful (Agent: {} at {})", identity.node, identity.address))
+                    .unwrap_or_else(|| {
+                        "Connection successful (Agent identity unavailable; Agent writes disabled)".to_string()
+                    }))
+            }
             #[cfg(feature = "mq-admin")]
             DatabaseType::MessageQueue => {
+                // Probe with a transient adapter so Test Connection never retains/replaces
+                // a live cached MQ agent for this connection id (same pattern as Nacos).
                 let mqc = state.mq_admin_config_for_connection(connection_id, &config).await?;
                 let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, state);
-                let adapter = match state.mq_registry.get_or_build_config(connection_id, mqc, agent_launch).await {
-                    Ok(adapter) => adapter,
-                    Err(err) => {
-                        state.mq_registry.drop_connection(connection_id).await;
-                        return Err(err);
-                    }
-                };
-                if let Err(err) = adapter.test_connection().await {
-                    state.mq_registry.drop_connection(connection_id).await;
-                    return Err(err);
-                }
+                let adapter = state.mq_registry.build_transient_config(mqc, agent_launch).await?;
+                adapter.test_connection().await?;
                 Ok("Connection successful".to_string())
             }
             #[cfg(not(feature = "mq-admin"))]
             DatabaseType::MessageQueue => {
                 Err("Message queue admin support is not compiled in this build. Rebuild with the 'mq-admin' feature."
                     .to_string())
+            }
+            #[cfg(feature = "mq-admin")]
+            DatabaseType::Mqtt => {
+                let mqtt_config = dbx_core::mqtt::types::MqttConnectionConfig::from_connection(&config)?;
+                let client = dbx_core::mqtt::client::MqttClient::connect(mqtt_config).await?;
+                client.disconnect().await;
+                Ok("Connection successful".to_string())
+            }
+            #[cfg(not(feature = "mq-admin"))]
+            DatabaseType::Mqtt => {
+                Err("MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string())
             }
             db_type if database_capabilities::is_agent_type(&db_type) => {
                 match test_agent_connection(state, &config, &host, port).await {
@@ -1216,7 +1285,7 @@ pub async fn connect_db(
                     .await
                     .map_err(|err| mongo_legacy_error_with_auth_hint(&err))?;
                 state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
-                PoolKind::Agent(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
+                PoolKind::agent(client)
             } else {
                 let native_err = match db::mongo_driver::connect(&url, connect_timeout, idle_timeout).await {
                     Ok(client) => {
@@ -1263,10 +1332,10 @@ pub async fn connect_db(
                         )
                     })?;
                     state.ensure_current_connection_attempt(&id, Some(attempt)).await?;
+                    persist_mongo_legacy_driver_profile(state.inner(), &connected_config).await?;
                     mark_mongo_legacy_driver(&mut connected_config);
                     connected_db_config = metadata_connection_config(&connected_config);
-                    persist_mongo_legacy_driver_profile(state.inner(), &connected_config).await?;
-                    PoolKind::Agent(std::sync::Arc::new(tokio::sync::Mutex::new(client)))
+                    PoolKind::agent(client)
                 } else {
                     return Err(native_err);
                 }
@@ -1313,6 +1382,17 @@ pub async fn connect_db(
             );
             db::easysearch_driver::test_connection(&mut client, connect_timeout).await?;
             PoolKind::Easysearch(client)
+        }
+        DatabaseType::Meilisearch => {
+            let client = db::meilisearch_driver::MeilisearchClient::new(
+                &url,
+                Some(&db_config.password),
+                db_config.ssl,
+                db_config.url_params.as_deref(),
+                connect_timeout,
+            )?;
+            db::meilisearch_driver::test_connection(&client, connect_timeout).await?;
+            PoolKind::Meilisearch(client)
         }
         DatabaseType::Hbase => {
             let client = db::hbase_driver::HBaseClient::new(
@@ -1388,18 +1468,35 @@ pub async fn connect_db(
             db::influxdb_driver::test_connection(&client, connect_timeout).await?;
             PoolKind::InfluxDb(client)
         }
+        DatabaseType::VictoriaMetrics => {
+            let client =
+                db::victoriametrics_driver::VictoriaMetricsClient::new_for_config(&url, &db_config, connect_timeout)?;
+            db::victoriametrics_driver::test_connection(&client, connect_timeout).await?;
+            PoolKind::VictoriaMetrics(client)
+        }
         DatabaseType::Nacos => {
             let admin_config = state.nacos_admin_config_for_connection(&id, &config).await?;
             let adapter = state.nacos_registry.build_transient_config(admin_config).await?;
             adapter.test_connection().await?;
             PoolKind::Nacos
         }
+        DatabaseType::Consul => {
+            let mut consul_config = dbx_core::consul::ConsulConfig::from_connection(&db_config)?;
+            let original_host = consul_config.base_url.host_str().unwrap_or_default();
+            let original_port = consul_config.base_url.port_or_known_default().unwrap_or(db_config.port);
+            if host != original_host || port != original_port {
+                consul_config = consul_config.with_connect_override(&host, port);
+            }
+            let client = dbx_core::consul::ConsulClient::new(consul_config).await?;
+            client.probe().await?;
+            PoolKind::Consul(client)
+        }
         #[cfg(feature = "mq-admin")]
         DatabaseType::MessageQueue => {
             let mqc = state.mq_admin_config_for_connection(&id, &config).await?;
             let agent_launch = dbx_core::mq::service::resolve_mq_agent_launch_spec(&mqc, &state);
-            let adapter = match state.mq_registry.get_or_build_config(&id, mqc, agent_launch).await {
-                Ok(adapter) => adapter,
+            let build = match state.mq_registry.get_or_build_config(&id, mqc, agent_launch).await {
+                Ok(build) => build,
                 Err(err) => {
                     state.mq_registry.drop_connection(&id).await;
                     return Err(err);
@@ -1409,7 +1506,7 @@ pub async fn connect_db(
                 state.mq_registry.drop_connection(&id).await;
                 return Err(err);
             }
-            if let Err(err) = adapter.test_connection().await {
+            if let Err(err) = dbx_core::mq::validate_mq_adapter_after_build(&build).await {
                 state.mq_registry.drop_connection(&id).await;
                 return Err(err);
             }
@@ -1434,6 +1531,16 @@ pub async fn connect_db(
             state.external_driver_pool("jdbc", &jdbc_config).await?
         }
         DatabaseType::Jdbc => state.external_driver_pool("jdbc", &db_config).await?,
+        #[cfg(feature = "mq-admin")]
+        DatabaseType::Mqtt => {
+            let mqtt_config = dbx_core::mqtt::types::MqttConnectionConfig::from_connection(&db_config)?;
+            let client = dbx_core::mqtt::client::MqttClient::connect(mqtt_config).await?;
+            PoolKind::Mqtt(client)
+        }
+        #[cfg(not(feature = "mq-admin"))]
+        DatabaseType::Mqtt => {
+            return Err("MQTT support is not compiled in this build. Rebuild with the 'mq-admin' feature.".to_string());
+        }
         db_type => return Err(format!("Unsupported database type: {db_type:?}")),
     };
 

@@ -2,7 +2,7 @@ import type { ConnectionConfig, DatabaseType } from "@/types/database";
 import { isSchemaAware, usesDatabaseObjectTreeMode, usesTreeSchemaMode } from "@/lib/database/databaseFeatureSupport";
 import type { CodeMirrorSqlDialectName } from "@/lib/editor/codemirrorSqlDialect";
 
-type JdbcDialectConnection = Pick<ConnectionConfig, "db_type"> & Partial<Pick<ConnectionConfig, "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>;
+type JdbcDialectConnection = Partial<Pick<ConnectionConfig, "db_type" | "driver_profile" | "driver_label" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths" | "database_info" | "external_config">>;
 
 export type GaussdbIdentifierQuoteStyle = "auto" | "double" | "backtick";
 export type GaussdbConnectionMode = "native" | "m-jdbc";
@@ -12,14 +12,16 @@ export const GAUSSDB_M_JDBC_DRIVER_PROFILE = "gaussdb-m";
 export const GAUSSDB_M_JDBC_DRIVER_CLASS = "com.huawei.gaussdb.jdbc.Driver";
 
 const DATABASE_AS_EXECUTION_SCHEMA_TYPES = new Set<DatabaseType>(["hive", "spark"]);
+const CONNECTION_ROOT_SCHEMA_TYPES = new Set<DatabaseType>(["oracle", "dameng", "oceanbase-oracle"]);
 
 const JDBC_DIALECT_MATCHERS: Array<{ type: DatabaseType; patterns: RegExp[] }> = [
   { type: "databend", patterns: [/jdbc:databend:/i, /com\.databend\.jdbc\.DatabendDriver/i, /databend-jdbc/i] },
   { type: "starrocks", patterns: [/starrocks/i] },
   { type: "doris", patterns: [/doris/i] },
   { type: "goldendb", patterns: [/jdbc:goldendb:/i, /goldendb/i] },
-  { type: "hive", patterns: [/org\.apache\.hive\.jdbc\.HiveDriver/i, /hive-jdbc/i] },
-  { type: "mysql", patterns: [/jdbc:mysql:/i, /mysql/i, /mariadb/i, /kyuubi/i, /hive2/i] },
+  { type: "mysql", patterns: [/kyuubi/i] },
+  { type: "hive", patterns: [/inceptor/i, /\bapache\s+hive\b/i, /org\.apache\.hive\.jdbc\.HiveDriver/i, /hive-jdbc/i] },
+  { type: "mysql", patterns: [/jdbc:mysql:/i, /mysql/i, /mariadb/i, /hive2/i] },
   { type: "gaussdb", patterns: [/jdbc:gaussdb:/i, /com\.huawei\.gaussdb/i, /gaussdb/i] },
   { type: "dameng", patterns: [/jdbc:dm:/i, /dm\.jdbc\.driver/i, /dameng/i] },
   { type: "opengauss", patterns: [/jdbc:opengauss:/i, /org\.opengauss/i, /opengauss/i] },
@@ -66,8 +68,14 @@ export function effectiveDatabaseTypeForConnection(connection?: JdbcDialectConne
   return inferJdbcDialect(connection) ?? "jdbc";
 }
 
+export function connectionUsesConnectionRootSchemaMode(connection?: JdbcDialectConnection): boolean {
+  const type = effectiveDatabaseTypeForConnection(connection);
+  return !!type && CONNECTION_ROOT_SCHEMA_TYPES.has(type);
+}
+
 export function connectionShouldLoadIdentifierQuote(connection: JdbcDialectConnection | undefined): boolean {
   if (!connection) return false;
+  if (connection.db_type === "gbase" && isGbase8sProfile(connection.driver_profile)) return true;
   if (connection.db_type === "kingbase") return true;
   if (gaussdbIdentifierQuoteStyle(connection) !== "auto") return false;
   if (connection.db_type === "gaussdb") return true;
@@ -133,6 +141,7 @@ export function tableStructureDatabaseTypeForConnection(connection?: JdbcDialect
 export function connectionUsesDatabaseObjectTreeMode(connection?: JdbcDialectConnection): boolean {
   if (!connection) return false;
   if (connection.db_type !== "jdbc") return usesDatabaseObjectTreeMode(effectiveDatabaseTypeForConnection(connection));
+  if (connectionUsesConnectionRootSchemaMode(connection)) return false;
   const dialect = inferJdbcDialect(connection);
   if (!dialect) return true;
   if (dialect === "hive" || dialect === "trino") return false;
@@ -141,10 +150,13 @@ export function connectionUsesDatabaseObjectTreeMode(connection?: JdbcDialectCon
 }
 
 export function connectionShouldDiscoverJdbcSchemas(connection?: JdbcDialectConnection): boolean {
+  // GBase 8s exposes owner schemas only when the current database can use them
+  // in DML; non-ANSI databases fall back to the flat table tree.
+  if (connection?.db_type === "gbase" && isGbase8sProfile(connection.driver_profile)) return true;
   return connection?.db_type === "jdbc" && !inferJdbcDialect(connection);
 }
 
-export function connectionUsesSchemaExecutionContext(connection?: Pick<ConnectionConfig, "db_type" | "connection_string" | "jdbc_driver_class" | "jdbc_driver_paths">): boolean {
+export function connectionUsesSchemaExecutionContext(connection?: JdbcDialectConnection): boolean {
   return connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend";
 }
 
@@ -161,6 +173,7 @@ export function connectionQueryExecutionSchema(connection: JdbcDialectConnection
 export function connectionObjectTreeQuerySchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string {
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return "";
+  if (effectiveDatabaseTypeForConnection(connection) === "informix") return schema || "";
   return schema || database;
 }
 
@@ -173,10 +186,11 @@ export function metadataSchemaForConnection(connection: JdbcDialectConnection | 
 export function connectionObjectTreeNodeSchema(connection: JdbcDialectConnection | undefined, database: string, schema?: string): string | undefined {
   if (connection?.db_type === "jdbc" && inferJdbcDialect(connection) === "databend") return schema || database;
   if (connectionUsesDatabaseObjectTreeMode(connection)) return undefined;
-  if (schema) return schema;
   const type = effectiveDatabaseTypeForConnection(connection);
-  if (type === "sqlite") return database;
-  return isSchemaAware(type) ? database : undefined;
+  if (type === "informix") return schema || undefined;
+  if (type === "sqlite") return schema || database;
+  if (!type) return schema;
+  return isSchemaAware(type) ? schema || database : undefined;
 }
 
 /** Maps a database type to the corresponding CodeMirror SQL dialect name used by QueryEditor and DdlViewDialog. */

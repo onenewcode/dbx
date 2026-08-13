@@ -36,6 +36,17 @@ function mysqlConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function redisConnection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "redis-1",
+    name: "Redis",
+    db_type: "redis",
+    port: 6379,
+    database: "0",
+  } as ConnectionConfig;
+}
+
 function oracleConnection(): ConnectionConfig {
   return {
     ...postgresConnection(),
@@ -72,6 +83,18 @@ function sqlServerConnection(): ConnectionConfig {
   } as ConnectionConfig;
 }
 
+function damengConnection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "dameng-1",
+    name: "Dameng",
+    db_type: "dameng",
+    port: 5236,
+    username: "dbx_test",
+    database: "",
+  } as ConnectionConfig;
+}
+
 function dorisConnection(): ConnectionConfig {
   return {
     ...postgresConnection(),
@@ -81,6 +104,18 @@ function dorisConnection(): ConnectionConfig {
     port: 9030,
     username: "root",
     database: "sales",
+  } as ConnectionConfig;
+}
+
+function tdengineConnection(): ConnectionConfig {
+  return {
+    ...postgresConnection(),
+    id: "tdengine-1",
+    name: "TDengine",
+    db_type: "tdengine",
+    port: 6041,
+    username: "root",
+    database: "issue_5685",
   } as ConnectionConfig;
 }
 
@@ -98,6 +133,199 @@ describe("connectionStore completion assistant", () => {
     vi.unstubAllGlobals();
     installLocalStorage();
     setActivePinia(createPinia());
+  });
+
+  it("does not replace the active connection during a cold metadata search", async () => {
+    const connectDb = vi.fn().mockResolvedValue("pg-1");
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [{ name: "users", kind: "table", schema: "public" }],
+      incomplete: false,
+      fallback_used: false,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      connectDb,
+      connectionDatabaseInfo: vi.fn().mockResolvedValue(null),
+      connectionIdentifierQuote: vi.fn().mockResolvedValue('"'),
+      completionAssistantSearch,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.activeConnectionId = "already-active";
+
+    const tables = await store.listCompletionTables("pg-1", "app", "users", 20, undefined, true, undefined, undefined, { activateConnection: false });
+
+    expect(connectDb).toHaveBeenCalledOnce();
+    expect(store.connectedIds.has("pg-1")).toBe(true);
+    expect(store.activeConnectionId).toBe("already-active");
+    expect(tables).toEqual([{ name: "users", schema: "public", type: "table" }]);
+  });
+
+  it("falls back to the server COMMAND catalog when COMMAND DOCS is unsupported", async () => {
+    const redisExecuteCommand = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("unknown subcommand 'DOCS'"))
+      .mockResolvedValueOnce({
+        command: "COMMAND",
+        safety: "allowed",
+        value: [["get", 2, ["readonly"], 1, 1, 1, ["@read"], [], [], []]],
+      });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      redisExecuteCommand,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [redisConnection()];
+    store.connectedIds.add("redis-1");
+
+    const docs = await store.listRedisCompletionCommandDocs("redis-1", "0");
+    const cached = await store.listRedisCompletionCommandDocs("redis-1", "0");
+
+    expect(redisExecuteCommand).toHaveBeenNthCalledWith(1, "redis-1", 0, "COMMAND DOCS");
+    expect(redisExecuteCommand).toHaveBeenNthCalledWith(2, "redis-1", 0, "COMMAND");
+    expect(redisExecuteCommand).toHaveBeenCalledTimes(2);
+    expect(docs).toEqual([
+      {
+        name: "GET",
+        summary: undefined,
+        since: undefined,
+        group: undefined,
+        arity: 2,
+        keySpecs: [{ beginSearch: { type: "index", index: 1 }, findKeys: { type: "range", lastKey: 0, keyStep: 1, limit: 0 } }],
+      },
+    ]);
+    expect(cached).toEqual(docs);
+  });
+
+  it("merges COMMAND key positions into COMMAND DOCS metadata", async () => {
+    const redisExecuteCommand = vi
+      .fn()
+      .mockResolvedValueOnce({
+        command: "COMMAND DOCS",
+        safety: "allowed",
+        value: { get: { summary: "Returns a value.", arguments: [{ name: "key", type: "key" }] } },
+      })
+      .mockResolvedValueOnce({
+        command: "COMMAND",
+        safety: "allowed",
+        value: [["get", 2, ["readonly"], 1, 1, 1, ["@read"], [], [], []]],
+      });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      redisExecuteCommand,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [redisConnection()];
+    store.connectedIds.add("redis-1");
+
+    const docs = await store.listRedisCompletionCommandDocs("redis-1", "0");
+
+    expect(docs[0]).toMatchObject({
+      name: "GET",
+      arity: 2,
+      keySpecs: [{ beginSearch: { type: "index", index: 1 }, findKeys: { type: "range", lastKey: 0, keyStep: 1, limit: 0 } }],
+    });
+  });
+
+  it("does not let an invalidated Redis metadata request overwrite fresh cache", async () => {
+    const staleDocs = deferred<{ command: string; safety: string; value: unknown }>();
+    const freshDocs = deferred<{ command: string; safety: string; value: unknown }>();
+    let docsRequestCount = 0;
+    const redisExecuteCommand = vi.fn((_connectionId: string, _database: number, command: string) => {
+      if (command === "COMMAND DOCS") {
+        docsRequestCount += 1;
+        return docsRequestCount === 1 ? staleDocs.promise : freshDocs.promise;
+      }
+      return Promise.resolve({
+        command: "COMMAND",
+        safety: "allowed",
+        value: [["get", 2, ["readonly"], 1, 1, 1, ["@read"], [], [], []]],
+      });
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      redisExecuteCommand,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [redisConnection()];
+    store.connectedIds.add("redis-1");
+
+    const staleRequest = store.listRedisCompletionCommandDocs("redis-1", "0");
+    await vi.waitFor(() => expect(redisExecuteCommand).toHaveBeenCalledTimes(1));
+    store.invalidateCompletionCache("redis-1");
+    const freshRequest = store.listRedisCompletionCommandDocs("redis-1", "0");
+    freshDocs.resolve({ command: "COMMAND DOCS", safety: "allowed", value: { get: { summary: "fresh" } } });
+    await expect(freshRequest).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ name: "GET", summary: "fresh" })]));
+
+    staleDocs.resolve({ command: "COMMAND DOCS", safety: "allowed", value: { get: { summary: "stale" } } });
+    await staleRequest;
+
+    await expect(store.listRedisCompletionCommandDocs("redis-1", "0")).resolves.toEqual(expect.arrayContaining([expect.objectContaining({ name: "GET", summary: "fresh" })]));
+  });
+
+  it("does not suggest binary Redis key displays that the command input cannot execute", async () => {
+    const redisScanKeysBatch = vi.fn().mockResolvedValue({
+      cursor: 0,
+      keys: [
+        { key_display: "plain", key_raw: "cGxhaW4=", key_type: "string", ttl: -1 },
+        { key_display: String.raw`literal\\xAC`, key_raw: "bGl0ZXJhbFx4QUM=", key_type: "string", ttl: -1 },
+        { key_display: "\\xac", key_raw: "rA==", key_type: "string", ttl: -1 },
+      ],
+      total_keys: 3,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      redisScanKeysBatch,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [redisConnection()];
+    store.connectedIds.add("redis-1");
+
+    await expect(store.listRedisCompletionKeys("redis-1", "0")).resolves.toEqual(["plain", String.raw`literal\\xAC`]);
+  });
+
+  it("preserves TDengine stable type in completion metadata", async () => {
+    const listTables = vi.fn().mockResolvedValue([
+      { name: "test_tb", table_type: "STABLE", comment: null },
+      { name: "ordinary_table", table_type: "TABLE", comment: null },
+    ]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      listTables,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [tdengineConnection()];
+    store.connectedIds.add("tdengine-1");
+
+    const tables = await store.listCompletionTables("tdengine-1", "issue_5685");
+
+    expect(tables).toEqual([
+      { name: "test_tb", type: "table", tableType: "STABLE" },
+      { name: "ordinary_table", type: "table" },
+    ]);
   });
 
   it("deduplicates in-flight assistant table requests", async () => {
@@ -295,6 +523,32 @@ describe("connectionStore completion assistant", () => {
     expect(store.lookupLocalCompletionColumns("oracle-1", "ORCL", "ORDERS")).toEqual([]);
   });
 
+  it("uses the Dameng login schema for unqualified column completion", async () => {
+    const completionAssistantSearch = vi.fn().mockRejectedValue(new Error("assistant unavailable"));
+    const getColumns = vi.fn().mockResolvedValue([{ name: "ID", data_type: "BIGINT", is_nullable: false, column_default: null, is_primary_key: true, extra: null, comment: null }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [damengConnection()];
+    store.connectedIds.add("dameng-1");
+
+    const first = await store.listCompletionColumns("dameng-1", "", "tb_user");
+    const cached = await store.listCompletionColumns("dameng-1", "", "tb_user");
+
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(1);
+    expect(getColumns).toHaveBeenCalledTimes(1);
+    expect(getColumns).toHaveBeenCalledWith("dameng-1", "", "dbx_test", "tb_user", undefined, undefined);
+    expect(first).toEqual([expect.objectContaining({ name: "ID", table: "tb_user", schema: "dbx_test" })]);
+    expect(cached).toEqual(first);
+  });
+
   it("rejects assistant columns returned for a different MySQL parent table", async () => {
     const completionAssistantSearch = vi.fn().mockResolvedValue({
       candidates: [
@@ -389,6 +643,78 @@ describe("connectionStore completion assistant", () => {
     ]);
     expect(unquoted).toEqual([expect.objectContaining({ name: "BELNR", table: "ACDOCA", schema: "SAPHANADB" })]);
     expect(quoted).toEqual([expect.objectContaining({ name: "MixedColumn", table: "MixedTable", schema: "MixedSchema" })]);
+  });
+
+  it("invalidates only the changed table completion metadata", async () => {
+    const getColumns = vi.fn(async (_connectionId: string, _database: string, _schema: string, table: string) => [
+      {
+        name: `${table}_column_${getColumns.mock.calls.length}`,
+        data_type: "integer",
+        is_nullable: false,
+        column_default: null,
+        is_primary_key: false,
+        extra: null,
+      },
+    ]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch: vi.fn().mockRejectedValue(new Error("assistant unavailable")),
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [sqlServerConnection()];
+    store.connectedIds.add("sqlserver-1");
+
+    await store.listCompletionColumns("sqlserver-1", "app", "users", "dbo");
+    await store.listCompletionColumns("sqlserver-1", "app", "orders", "dbo");
+    await store.listCompletionColumns("sqlserver-1", "app", "users", "dbo");
+    await store.listCompletionColumns("sqlserver-1", "app", "orders", "dbo");
+    expect(getColumns.mock.calls.map((call) => call[3])).toEqual(["users", "orders"]);
+
+    expect(store.invalidateCompletionTableCache("sqlserver-1", "app", "users", "dbo")).toBeGreaterThan(0);
+
+    await store.listCompletionColumns("sqlserver-1", "app", "users", "dbo");
+    await store.listCompletionColumns("sqlserver-1", "app", "orders", "dbo");
+    expect(getColumns.mock.calls.map((call) => call[3])).toEqual(["users", "orders", "users"]);
+  });
+
+  it("keeps the same table cached in other catalogs", async () => {
+    const getColumns = vi.fn(async (_connectionId: string, _database: string, _schema: string, table: string, catalog?: string) => [
+      {
+        name: `${catalog}_${table}`,
+        data_type: "integer",
+        is_nullable: false,
+        column_default: null,
+        is_primary_key: false,
+        extra: null,
+      },
+    ]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch: vi.fn(),
+      getColumns,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [dorisConnection()];
+    store.connectedIds.add("doris-1");
+
+    await store.listCompletionColumns("doris-1", "sales", "users", undefined, undefined, "internal");
+    await store.listCompletionColumns("doris-1", "sales", "users", undefined, undefined, "hive");
+    expect(getColumns.mock.calls.map((call) => call[4])).toEqual(["internal", "hive"]);
+
+    expect(store.invalidateCompletionTableCache("doris-1", "sales", "users", undefined, "internal")).toBeGreaterThan(0);
+
+    await store.listCompletionColumns("doris-1", "sales", "users", undefined, undefined, "internal");
+    await store.listCompletionColumns("doris-1", "sales", "users", undefined, undefined, "hive");
+    expect(getColumns.mock.calls.map((call) => call[4])).toEqual(["internal", "hive", "internal"]);
   });
 
   it("keeps quoted and unquoted Oracle objects separate in the local column index", async () => {
@@ -557,9 +883,89 @@ describe("connectionStore completion assistant", () => {
     ]);
   });
 
-  it("searches default SQL Server schemas without treating the username as a schema", async () => {
+  it("loads PostgreSQL sequences without falling back to routine metadata", async () => {
     const completionAssistantSearch = vi.fn().mockResolvedValue({
-      candidates: [{ name: "st_area", kind: "function", schema: "dbo", data_type: "float" }],
+      candidates: [{ name: "OrderSequence", kind: "sequence", schema: "App" }],
+      incomplete: false,
+      fallback_used: false,
+    });
+    const listCompletionObjects = vi.fn().mockResolvedValue([{ name: "not_a_sequence", object_type: "FUNCTION" }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listCompletionObjects,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    const objects = await store.listCompletionObjects("pg-1", "app", "Order", 20, "App", undefined, false, undefined, ["sequence"], true);
+    await store.listCompletionObjects("pg-1", "app", "Order", 20, undefined, undefined, false, undefined, ["sequence"]);
+    await store.listCompletionObjects("pg-1", "app", "order", 20, "App", undefined, false, undefined, ["sequence"], true);
+
+    expect(completionAssistantSearch).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        object_kinds: ["sequence"],
+        mask: "Order",
+        case_sensitive: true,
+        schema: "App",
+        parent_schema: null,
+      }),
+    );
+    expect(completionAssistantSearch).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        object_kinds: ["sequence"],
+        mask: "Order",
+        case_sensitive: false,
+        schema: null,
+        parent_schema: null,
+      }),
+    );
+    expect(completionAssistantSearch).toHaveBeenNthCalledWith(
+      3,
+      expect.objectContaining({
+        object_kinds: ["sequence"],
+        mask: "order",
+        case_sensitive: true,
+        schema: "App",
+        parent_schema: null,
+      }),
+    );
+    expect(listCompletionObjects).not.toHaveBeenCalled();
+    expect(objects).toEqual([expect.objectContaining({ name: "OrderSequence", schema: "App", type: "sequence" })]);
+  });
+
+  it.each([
+    ["empty", vi.fn().mockResolvedValue({ candidates: [], incomplete: false, fallback_used: false })],
+    ["permission error", vi.fn().mockRejectedValue(new Error("permission denied for sequence"))],
+  ])("returns an empty sequence fallback for %s metadata", async (_caseName, completionAssistantSearch) => {
+    const listCompletionObjects = vi.fn().mockResolvedValue([{ name: "not_a_sequence", object_type: "FUNCTION" }]);
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listCompletionObjects,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [postgresConnection()];
+    store.connectedIds.add("pg-1");
+
+    await expect(store.listCompletionObjects("pg-1", "app", "missing", 20, undefined, undefined, false, undefined, ["sequence"])).resolves.toEqual([]);
+    expect(listCompletionObjects).not.toHaveBeenCalled();
+  });
+
+  it("searches the server-reported SQL Server default schema without treating the username as a schema", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [{ name: "st_area", kind: "function", schema: "app_user", data_type: "float" }],
       incomplete: false,
       fallback_used: false,
     });
@@ -576,11 +982,11 @@ describe("connectionStore completion assistant", () => {
     store.connections = [sqlServerConnection()];
     store.connectedIds.add("sqlserver-1");
 
-    const objects = await store.listCompletionObjects("sqlserver-1", "app", "st_", 20);
+    const objects = await store.listCompletionObjects("sqlserver-1", "app", "st_", 20, undefined, undefined, false, "app_user");
 
     expect(completionAssistantSearch).toHaveBeenCalledWith(
       expect.objectContaining({
-        schema: null,
+        schema: "app_user",
         parent_schema: null,
         mask: "st_",
       }),
@@ -588,13 +994,98 @@ describe("connectionStore completion assistant", () => {
     expect(objects).toEqual([
       expect.objectContaining({
         name: "st_area",
-        schema: "dbo",
+        schema: "app_user",
         type: "function",
         dataType: "float",
-        applyName: "dbo.st_area",
+        applyName: "app_user.st_area",
         boost: 1000,
       }),
     ]);
+  });
+
+  it("prefers an explicit SQL Server routine schema over the current default schema", async () => {
+    const completionAssistantSearch = vi.fn().mockResolvedValue({
+      candidates: [{ name: "calculate_tax", kind: "function", schema: "sales", data_type: "decimal" }],
+      incomplete: false,
+      fallback_used: false,
+    });
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listCompletionObjects: vi.fn().mockResolvedValue([]),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [sqlServerConnection()];
+    store.connectedIds.add("sqlserver-1");
+
+    await store.listCompletionObjects("sqlserver-1", "BarDB", "calculate_", 20, "sales", undefined, false, "app_user");
+
+    expect(completionAssistantSearch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        database: "BarDB",
+        schema: "sales",
+        parent_schema: "sales",
+        mask: "calculate_",
+      }),
+    );
+  });
+
+  it("caches SQL Server completion context independently for each database", async () => {
+    const getSqlServerCompletionContext = vi.fn(async (_connectionId: string, database: string) => ({
+      default_schema: database === "BarDB" ? "bar_user" : "foo_user",
+      supports_session_database_switch: true,
+    }));
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      getSqlServerCompletionContext,
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [sqlServerConnection()];
+    store.connectedIds.add("sqlserver-1");
+
+    const foo = await store.getSqlServerCompletionContext("sqlserver-1", "FooDB");
+    const fooCached = await store.getSqlServerCompletionContext("sqlserver-1", "FooDB");
+    const bar = await store.getSqlServerCompletionContext("sqlserver-1", "BarDB");
+
+    expect(foo).toMatchObject({ default_schema: "foo_user" });
+    expect(fooCached).toEqual(foo);
+    expect(bar).toMatchObject({ default_schema: "bar_user" });
+    expect(getSqlServerCompletionContext).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps SQL Server routine results isolated across databases", async () => {
+    const completionAssistantSearch = vi.fn(async (request: { database: string }) => ({
+      candidates: [{ name: request.database === "BarDB" ? "bar_proc" : "foo_proc", kind: "procedure", schema: "app_user" }],
+      incomplete: false,
+      fallback_used: false,
+    }));
+
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+    vi.doMock("@/lib/backend/api", () => ({
+      checkConnectionHealth: vi.fn().mockResolvedValue(undefined),
+      completionAssistantSearch,
+      listCompletionObjects: vi.fn().mockResolvedValue([]),
+    }));
+
+    const { useConnectionStore } = await import("@/stores/connectionStore");
+    const store = useConnectionStore();
+    store.connections = [sqlServerConnection()];
+    store.connectedIds.add("sqlserver-1");
+
+    const foo = await store.listCompletionObjects("sqlserver-1", "FooDB", "", 20, undefined, undefined, false, "app_user");
+    const bar = await store.listCompletionObjects("sqlserver-1", "BarDB", "", 20, undefined, undefined, false, "app_user");
+
+    expect(foo.map((object) => object.name)).toEqual(["foo_proc"]);
+    expect(bar.map((object) => object.name)).toEqual(["bar_proc"]);
+    expect(completionAssistantSearch).toHaveBeenCalledTimes(2);
   });
 
   it("limits concurrent completion column metadata requests per connection database", async () => {

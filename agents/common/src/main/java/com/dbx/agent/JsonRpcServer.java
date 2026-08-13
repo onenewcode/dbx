@@ -91,6 +91,11 @@ public final class JsonRpcServer {
     Object dispatchForRuntime(String method, JsonObject params) throws Exception {
         return AgentExecutionContext.withJdbcExecutor(jdbcExecutor, () -> {
             AbstractJdbcAgent jdbcAgent = pooledJdbcAgent();
+            if (AgentProtocol.METHOD_VALIDATE_CONNECTION.equals(method)
+                && jdbcAgent != null
+                && jdbcAgent.hasActivePooledLeases()) {
+                return Collections.singletonMap("ok", true);
+            }
             boolean manageConnection = jdbcAgent != null && requiresConnectedConnection(method);
             if (manageConnection) {
                 jdbcAgent.beginPooledRequest();
@@ -119,6 +124,11 @@ public final class JsonRpcServer {
         if (jdbcAgent != null) {
             jdbcAgent.releaseIdlePooledConnection(jdbcExecutor);
         }
+    }
+
+    boolean quarantine() {
+        AbstractJdbcAgent jdbcAgent = pooledJdbcAgent();
+        return jdbcAgent != null && jdbcAgent.quarantinePooledConnection();
     }
 
     void expireIdleResources() {

@@ -30,6 +30,7 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   oracle: { deferred: "Oracle database properties are instance/user/tablespace administration" },
   elasticsearch: { deferred: "index settings are not database properties" },
   easysearch: { deferred: "index settings are not database properties" },
+  meilisearch: { deferred: "index settings are not database properties" },
   hbase: { deferred: "namespace and table properties need a dedicated HBase workflow" },
   qdrant: { deferred: "collection settings are not database properties" },
   milvus: { deferred: "collection/database settings need a dedicated vector workflow" },
@@ -81,9 +82,12 @@ export const DATABASE_PROPERTY_EDITING_MATRIX = {
   zookeeper: { deferred: "key-value namespaces are not databases" },
   iris: { deferred: "schema properties need product-specific handling" },
   influxdb: { deferred: "database retention policies need a dedicated workflow" },
+  victoriametrics: { deferred: "metric and retention settings are managed by VictoriaMetrics deployment configuration" },
   jdbc: { deferred: "generic JDBC does not expose reliable dialect-specific properties" },
   mq: { deferred: "message queue namespaces are handled by MQ admin panels" },
   nacos: { deferred: "Nacos namespace editing already uses the Nacos admin flow" },
+  consul: { deferred: "Consul KV scopes are configured on the connection" },
+  mqtt: { deferred: "MQTT topics are managed via the MQTT console" },
 } satisfies Record<DatabaseType, DatabasePropertyEditingEntry>;
 
 function entryFor(connection: PropertyEditConnection): DatabasePropertyEditingEntry | null {

@@ -3,6 +3,7 @@ use std::time::Instant;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::commands::connection::AppState;
+use dbx_core::backend_error::BackendError;
 use dbx_core::db;
 use dbx_core::models::connection::DatabaseType;
 use dbx_core::query_cancel::RunningTaskMetadata;
@@ -18,7 +19,8 @@ struct ExecuteMultiProgress {
     success: bool,
     execution_time_ms: u128,
     affected_rows: u64,
-    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<BackendError>,
 }
 
 #[tauri::command]
@@ -38,7 +40,7 @@ pub async fn execute_query(
     client_session_id: Option<String>,
     timeout_secs: Option<u64>,
     execution_mode: Option<dbx_core::query::QueryExecutionMode>,
-) -> Result<db::QueryResult, String> {
+) -> Result<db::QueryResult, BackendError> {
     let execution_id = execution_id.filter(|id| !id.trim().is_empty());
     let registered_query = execution_id.as_ref().map(|id| {
         state.running_queries.register_task(
@@ -48,7 +50,7 @@ pub async fn execute_query(
     });
     let cancel_token = registered_query.as_ref().map(|query| query.token());
 
-    dbx_core::query::execute_sql_statement_with_options(
+    dbx_core::query::execute_sql_statement_with_options_typed(
         &state,
         &connection_id,
         &database,
@@ -69,6 +71,7 @@ pub async fn execute_query(
         },
     )
     .await
+    .map_err(dbx_core::query::QueryExecutionError::into_backend_error)
 }
 
 #[tauri::command]
@@ -85,13 +88,16 @@ pub async fn execute_multi(
     max_rows: Option<usize>,
     fetch_size: Option<usize>,
     page_size: Option<usize>,
+    max_result_bytes: Option<usize>,
+    result_key_columns: Option<Vec<String>>,
+    table_data_preview: Option<bool>,
     result_session_id: Option<String>,
     client_session_id: Option<String>,
     timeout_secs: Option<u64>,
     use_transaction: Option<bool>,
     continue_on_error: Option<bool>,
     execution_mode: Option<dbx_core::query::QueryExecutionMode>,
-) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, String> {
+) -> Result<Vec<dbx_core::query::ExecuteMultiResult>, BackendError> {
     let execution_id = execution_id.filter(|id| !id.trim().is_empty());
     let registered_query = execution_id.as_ref().map(|id| {
         state.running_queries.register_task(
@@ -130,7 +136,7 @@ pub async fn execute_multi(
         schema
     );
 
-    let result = dbx_core::query::execute_multi_core_with_options_for_client_and_progress(
+    let result = dbx_core::query::execute_multi_core_with_options_for_client_and_progress_typed(
         &state,
         &connection_id,
         &database,
@@ -141,6 +147,9 @@ pub async fn execute_multi(
             max_rows,
             fetch_size,
             page_size,
+            max_result_bytes,
+            result_key_columns: result_key_columns.unwrap_or_default(),
+            table_data_preview: table_data_preview.unwrap_or(false),
             catalog,
             result_session_id,
             client_session_id,
@@ -169,7 +178,7 @@ pub async fn execute_multi(
             error
         ),
     }
-    result
+    result.map_err(dbx_core::query::QueryExecutionError::into_backend_error)
 }
 
 #[tauri::command]
@@ -288,8 +297,17 @@ pub async fn execute_script_with_2pc_core(
     database: String,
     statements: Vec<String>,
     schema: Option<String>,
+    destructive_confirmed: bool,
 ) -> dbx_core::query::SchemaDiffDeployResult {
-    dbx_core::query::execute_schema_diff_deploy(&app, &connection_id, &database, &statements, schema.as_deref()).await
+    dbx_core::query::execute_schema_diff_deploy(
+        &app,
+        &connection_id,
+        &database,
+        &statements,
+        schema.as_deref(),
+        destructive_confirmed,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -299,9 +317,18 @@ pub async fn execute_script_with_2pc(
     database: String,
     statements: Vec<String>,
     schema: Option<String>,
+    destructive_confirmed: Option<bool>,
 ) -> Result<dbx_core::query::SchemaDiffDeployResult, String> {
     let app: Arc<AppState> = (*state).clone();
-    Ok(execute_script_with_2pc_core(app, connection_id, database, statements, schema).await)
+    Ok(execute_script_with_2pc_core(
+        app,
+        connection_id,
+        database,
+        statements,
+        schema,
+        destructive_confirmed.unwrap_or(false),
+    )
+    .await)
 }
 
 #[tauri::command]
@@ -595,8 +622,9 @@ pub fn analyze_editable_query_editability(sql: String) -> Result<dbx_core::sql_e
 #[tauri::command]
 pub fn prepare_data_grid_save(
     options: dbx_core::data_grid_sql::DataGridSaveStatementOptions,
+    driver_profile: Option<String>,
 ) -> Result<dbx_core::data_grid_sql::DataGridSavePreparation, String> {
-    Ok(dbx_core::data_grid_sql::prepare_data_grid_save(options))
+    Ok(dbx_core::data_grid_sql::prepare_data_grid_save_for_driver_profile(options, driver_profile.as_deref()))
 }
 
 #[tauri::command]
@@ -764,6 +792,7 @@ mod tests {
             "testdb".to_string(),
             vec!["SELECT 1".to_string()],
             None,
+            false,
         )
         .await;
 
@@ -780,7 +809,8 @@ mod tests {
     async fn execute_script_with_2pc_empty_statements_succeeds() {
         let state = test_app_state().await;
         let result =
-            execute_script_with_2pc_core(state, "conn-empty".to_string(), "testdb".to_string(), vec![], None).await;
+            execute_script_with_2pc_core(state, "conn-empty".to_string(), "testdb".to_string(), vec![], None, false)
+                .await;
 
         assert_eq!(result.status, "committed");
         assert_eq!(result.statement_count, 0);
@@ -798,6 +828,7 @@ mod tests {
             "testdb".to_string(),
             vec!["-- WARNING: incomplete\n-- manual only".to_string()],
             None,
+            false,
         )
         .await;
 
@@ -815,6 +846,7 @@ mod tests {
             "testdb".to_string(),
             vec!["CREATE TABLE t1 (id INT)".to_string(), "CREATE TABLE t2 (id INT)".to_string()],
             None,
+            false,
         )
         .await;
 
@@ -822,5 +854,64 @@ mod tests {
         assert_eq!(result.statement_count, 2);
         assert!(result.error.as_ref().is_some_and(|e| !e.is_empty()));
         assert_eq!(result.executed_count, 0);
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_blocks_unconfirmed_destructive_sql() {
+        let state = test_app_state().await;
+        let result = execute_script_with_2pc_core(
+            state,
+            "missing-conn".to_string(),
+            "testdb".to_string(),
+            vec!["DROP INDEX idx_old ON users".to_string()],
+            None,
+            false,
+        )
+        .await;
+
+        assert_eq!(result.status, "rolled_back");
+        assert_eq!(result.executed_count, 0);
+        assert_eq!(result.metadata["blocked"], "destructive_confirmation_required");
+        assert_eq!(result.metadata["destructive_statement_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_allows_confirmed_destructive_sql_to_reach_execution() {
+        let state = test_app_state().await;
+        let result = execute_script_with_2pc_core(
+            state,
+            "missing-conn".to_string(),
+            "testdb".to_string(),
+            vec!["DROP INDEX idx_old ON users".to_string()],
+            None,
+            true,
+        )
+        .await;
+
+        assert_ne!(
+            result.metadata.get("blocked").and_then(|value| value.as_str()),
+            Some("destructive_confirmation_required")
+        );
+        assert!(result.error.as_ref().is_some_and(|error| !error.is_empty()));
+    }
+
+    #[tokio::test]
+    async fn execute_script_with_2pc_does_not_block_drop_text_in_comments() {
+        let state = test_app_state().await;
+        let result = execute_script_with_2pc_core(
+            state,
+            "missing-conn".to_string(),
+            "testdb".to_string(),
+            vec!["-- DROP INDEX idx_fake\nSELECT 1".to_string()],
+            None,
+            false,
+        )
+        .await;
+
+        assert_ne!(
+            result.metadata.get("blocked").and_then(|value| value.as_str()),
+            Some("destructive_confirmation_required")
+        );
+        assert!(result.error.as_ref().is_some_and(|error| !error.is_empty()));
     }
 }

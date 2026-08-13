@@ -2,6 +2,7 @@ use percent_encoding::{percent_decode_str, utf8_percent_encode, NON_ALPHANUMERIC
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::fmt;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -68,7 +69,7 @@ pub fn database_info_from_protocol_value(value: &Value) -> Option<DatabaseConnec
     serde_json::from_value::<DatabaseInfoEnvelope>(value.clone()).ok()?.database_info
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Clone, Serialize, PartialEq)]
 pub struct ConnectionConfig {
     pub id: String,
     pub name: String,
@@ -89,6 +90,8 @@ pub struct ConnectionConfig {
     pub password: String,
     pub database: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_schema: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_databases: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
@@ -102,6 +105,10 @@ pub struct ConnectionConfig {
     pub init_script: Option<String>,
     #[serde(default)]
     pub color: Option<String>,
+    /// Path to this connection's documentation notes file. Set by the
+    /// desktop app; the CLI takes an explicit `--notes` path instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs_notes_path: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub transport_layers: Vec<TransportLayerConfig>,
     #[serde(default = "default_connect_timeout_secs")]
@@ -163,6 +170,14 @@ pub struct ConnectionConfig {
     pub jdbc_driver_paths: Vec<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub one_time: bool,
+    /// Whether the database password may be persisted locally (SQLite
+    /// `connection_secrets`). When false, the `"password"` secret is never
+    /// written (or is deleted) and the user must type it on every connect.
+    /// Defaults to `true` so pre-existing saved connections keep current
+    /// behavior; a bare `#[serde(default)]` would upgrade them to "don't save"
+    /// and delete every stored password on the next save.
+    #[serde(default = "default_true")]
+    pub save_password: bool,
     #[serde(default, skip_serializing_if = "is_false")]
     pub read_only: bool,
     /// Explicitly marks every database reachable through this connection as production.
@@ -174,6 +189,42 @@ pub struct ConnectionConfig {
     /// Metadata captured from the latest successful connection test for this saved config.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database_info: Option<DatabaseConnectionInfo>,
+}
+
+impl fmt::Debug for ConnectionConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut value = serde_json::to_value(self).map_err(|_| fmt::Error)?;
+        redact_connection_debug_value(&mut value);
+        formatter.debug_tuple("ConnectionConfig").field(&value).finish()
+    }
+}
+
+fn redact_connection_debug_value(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, value) in object {
+                let key = key.to_ascii_lowercase().replace(['_', '-'], "");
+                if key.contains("password")
+                    || key.contains("passphrase")
+                    || key.contains("token")
+                    || key.contains("secret")
+                    || key.contains("apikey")
+                    || key == "connectionstring"
+                    || key == "initscript"
+                {
+                    *value = serde_json::Value::String("[REDACTED]".to_string());
+                } else {
+                    redact_connection_debug_value(value);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact_connection_debug_value(value);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -320,6 +371,11 @@ pub struct SshTunnelConfig {
     /// password auth if the key is rejected.
     #[serde(default)]
     pub auth_method: String,
+    /// Allow an SSH session exec channel to run `nc` when the server rejects
+    /// `direct-tcpip`. Disabled by default because this can bypass a server's
+    /// TCP-forwarding policy; enable only for trusted JumpServer/Koko setups.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_exec_channel_proxy: bool,
     /// When non-empty, this layer references a shared tunnel profile
     /// (Settings > Tunnels). The profile's configuration replaces this
     /// layer's own fields at connect time; only `id` and `enabled` are
@@ -461,6 +517,8 @@ pub enum DatabaseType {
     Elasticsearch,
     #[serde(rename = "easysearch")]
     Easysearch,
+    #[serde(rename = "meilisearch")]
+    Meilisearch,
     Hbase,
     #[serde(rename = "qdrant")]
     Qdrant,
@@ -525,6 +583,7 @@ pub enum DatabaseType {
     #[serde(rename = "zookeeper")]
     ZooKeeper,
     Nacos,
+    Consul,
     #[serde(rename = "iris")]
     Iris,
     #[serde(rename = "turso")]
@@ -533,6 +592,8 @@ pub enum DatabaseType {
     CloudflareD1,
     #[serde(rename = "influxdb")]
     InfluxDb,
+    #[serde(rename = "victoriametrics")]
+    VictoriaMetrics,
     #[serde(rename = "questdb")]
     Questdb,
     Jdbc,
@@ -540,6 +601,10 @@ pub enum DatabaseType {
     /// system is determined by `external_config.systemKind`.
     #[serde(rename = "mq")]
     MessageQueue,
+    /// MQTT broker connection. The broker address, client ID, and authentication
+    /// are stored in `external_config`.
+    #[serde(rename = "mqtt")]
+    Mqtt,
 }
 
 #[derive(Deserialize)]
@@ -563,6 +628,8 @@ struct ConnectionConfigData {
     pub password: String,
     pub database: Option<String>,
     #[serde(default)]
+    pub default_schema: Option<String>,
+    #[serde(default)]
     pub visible_databases: Option<Vec<String>>,
     #[serde(default)]
     pub visible_schemas: Option<HashMap<String, Vec<String>>>,
@@ -574,6 +641,8 @@ struct ConnectionConfigData {
     pub init_script: Option<String>,
     #[serde(default)]
     pub color: Option<String>,
+    #[serde(default)]
+    pub docs_notes_path: Option<String>,
     #[serde(default)]
     pub transport_layers: Vec<TransportLayerConfig>,
     #[serde(default = "default_connect_timeout_secs")]
@@ -632,6 +701,8 @@ struct ConnectionConfigData {
     pub jdbc_driver_paths: Vec<String>,
     #[serde(default)]
     pub one_time: bool,
+    #[serde(default = "default_true")]
+    pub save_password: bool,
     #[serde(default)]
     pub read_only: bool,
     #[serde(default)]
@@ -658,12 +729,14 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             username: data.username,
             password: data.password,
             database: data.database,
+            default_schema: data.default_schema,
             visible_databases: data.visible_databases,
             visible_schemas: data.visible_schemas,
             show_system_schemas: data.show_system_schemas,
             attached_databases: data.attached_databases,
             init_script: data.init_script,
             color: data.color,
+            docs_notes_path: data.docs_notes_path,
             transport_layers: data.transport_layers,
             connect_timeout_secs: data.connect_timeout_secs,
             query_timeout_secs: data.query_timeout_secs,
@@ -693,6 +766,7 @@ impl From<ConnectionConfigData> for ConnectionConfig {
             jdbc_driver_class: data.jdbc_driver_class,
             jdbc_driver_paths: data.jdbc_driver_paths,
             one_time: data.one_time,
+            save_password: data.save_password,
             read_only: data.read_only,
             is_production: data.is_production,
             production_databases: data.production_databases,
@@ -881,6 +955,7 @@ impl ConnectionConfig {
             DatabaseType::H2 => Some("test"),
             DatabaseType::Informix => Some("sysmaster"),
             DatabaseType::Neo4j => Some("neo4j"),
+            DatabaseType::VictoriaMetrics => Some("metrics"),
             _ => None,
         }
     }
@@ -983,7 +1058,11 @@ impl ConnectionConfig {
             }
             DatabaseType::Postgres | DatabaseType::Redshift => {
                 let suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
-                format!("postgres://{host}:{port}{db_part}{suffix}")
+                if is_multi_host(raw_host) {
+                    format!("postgres://{raw_host}{db_part}{suffix}")
+                } else {
+                    format!("postgres://{host}:{port}{db_part}{suffix}")
+                }
             }
             DatabaseType::ClickHouse => clickhouse_http_url(self, raw_host, port),
             DatabaseType::Rqlite => rqlite_http_url(self, raw_host, port),
@@ -1015,6 +1094,7 @@ impl ConnectionConfig {
             DatabaseType::Oracle => format!("oracle://{host}:{port}{db_part}"),
             DatabaseType::Elasticsearch
             | DatabaseType::Easysearch
+            | DatabaseType::Meilisearch
             | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
@@ -1029,7 +1109,14 @@ impl ConnectionConfig {
             DatabaseType::Uxdb => format!("uxdb://{host}:{port}{db_part}"),
             DatabaseType::Vastbase => format!("vastbase://{host}:{port}{db_part}"),
             DatabaseType::Goldendb => format!("goldendb://{host}:{port}{db_part}"),
-            DatabaseType::Gaussdb => format!("gaussdb://{host}:{port}{db_part}"),
+            DatabaseType::Gaussdb => {
+                if is_multi_host(raw_host) {
+                    format!("gaussdb://{raw_host}{db_part}")
+                } else {
+                    let (gaussdb_host, gaussdb_port) = gaussdb_single_host_port(raw_host, port);
+                    format!("gaussdb://{gaussdb_host}:{gaussdb_port}{db_part}")
+                }
+            }
             DatabaseType::Kwdb => format!("kwdb://{host}:{port}{db_part}"),
             DatabaseType::Yashandb => format!("yashandb://{host}:{port}{db_part}"),
             DatabaseType::Databricks => format!("databricks://{host}:{port}{db_part}"),
@@ -1080,13 +1167,15 @@ impl ConnectionConfig {
                 format!("zookeeper://{host}:{port}")
             }
             DatabaseType::Iris => format!("iris://{host}:{port}{db_part}"),
-            DatabaseType::InfluxDb => {
+            DatabaseType::InfluxDb | DatabaseType::VictoriaMetrics => {
                 let scheme = if self.ssl { "https" } else { "http" };
                 format!("{scheme}://{host}:{port}")
             }
             DatabaseType::Jdbc => "jdbc:<redacted>".to_string(),
             DatabaseType::MessageQueue => self.message_queue_admin_url(),
+            DatabaseType::Mqtt => self.mqtt_broker_url(),
             DatabaseType::Nacos => self.nacos_admin_url(),
+            DatabaseType::Consul => self.consul_api_url(),
         }
     }
 
@@ -1124,7 +1213,12 @@ impl ConnectionConfig {
             }
             DatabaseType::Postgres | DatabaseType::Redshift => {
                 let suffix = if params.is_empty() { String::new() } else { format!("?{params}") };
-                format!("postgres://{}:{}@{host}:{port}{db_part}{suffix}", username, password)
+                if is_multi_host(raw_host) {
+                    // Multi-host: host1:port1,host2:port2 — each host already has its port embedded
+                    format!("postgres://{}:{}@{raw_host}{db_part}{suffix}", username, password)
+                } else {
+                    format!("postgres://{}:{}@{host}:{port}{db_part}{suffix}", username, password)
+                }
             }
             DatabaseType::ClickHouse => clickhouse_http_url(self, raw_host, port),
             DatabaseType::Rqlite => rqlite_http_url(self, raw_host, port),
@@ -1165,6 +1259,7 @@ impl ConnectionConfig {
             }
             DatabaseType::Elasticsearch
             | DatabaseType::Easysearch
+            | DatabaseType::Meilisearch
             | DatabaseType::Hbase
             | DatabaseType::Qdrant
             | DatabaseType::Milvus
@@ -1192,7 +1287,13 @@ impl ConnectionConfig {
                 format!("goldendb://{}:{}@{host}:{port}{db_part}", username, password)
             }
             DatabaseType::Gaussdb => {
-                format!("gaussdb://{}:{}@{host}:{port}{db_part}", username, password)
+                if is_multi_host(raw_host) {
+                    // Multi-host: host1:port1,host2:port2 — each host already has its port embedded
+                    format!("gaussdb://{}:{}@{raw_host}{db_part}", username, password)
+                } else {
+                    let (gaussdb_host, gaussdb_port) = gaussdb_single_host_port(raw_host, port);
+                    format!("gaussdb://{}:{}@{gaussdb_host}:{gaussdb_port}{db_part}", username, password)
+                }
             }
             DatabaseType::Kwdb => {
                 format!("kwdb://{}:{}@{host}:{port}{db_part}", username, password)
@@ -1308,7 +1409,7 @@ impl ConnectionConfig {
             DatabaseType::Iris => {
                 format!("iris://{}:{}@{host}:{port}{db_part}", username, password)
             }
-            DatabaseType::InfluxDb => {
+            DatabaseType::InfluxDb | DatabaseType::VictoriaMetrics => {
                 let scheme = if self.ssl { "https" } else { "http" };
                 format!("{scheme}://{host}:{port}")
             }
@@ -1316,7 +1417,9 @@ impl ConnectionConfig {
                 self.connection_string.as_deref().filter(|value| !value.is_empty()).unwrap_or("jdbc:").to_string()
             }
             DatabaseType::MessageQueue => self.message_queue_admin_url(),
+            DatabaseType::Mqtt => self.mqtt_broker_url(),
             DatabaseType::Nacos => self.nacos_admin_url(),
+            DatabaseType::Consul => self.consul_api_url(),
         }
     }
 
@@ -1351,6 +1454,32 @@ impl ConnectionConfig {
             .filter(|value| !value.is_empty())
             .unwrap_or("nacos://")
             .to_string()
+    }
+
+    fn consul_api_url(&self) -> String {
+        self.external_config
+            .as_ref()
+            .and_then(|value| value.get("serverAddr").or_else(|| value.get("server_addr")))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                let scheme = if self.ssl { "https" } else { "http" };
+                format!("{scheme}://{}:{}", bracket_ipv6(&self.host), self.port)
+            })
+    }
+
+    fn mqtt_broker_url(&self) -> String {
+        #[cfg(feature = "mq-admin")]
+        {
+            use crate::mqtt::types::MqttConnectionConfig;
+            if let Ok(config) = MqttConnectionConfig::from_connection(self) {
+                return config.broker_url();
+            }
+        }
+        let scheme = if self.ssl { "mqtts" } else { "mqtt" };
+        format!("{}://{}:{}", scheme, self.host, self.port)
     }
 
     fn normalized_url_params(&self) -> String {
@@ -1400,7 +1529,9 @@ impl ConnectionConfig {
     }
 
     pub fn clickhouse_uses_tls(&self) -> bool {
-        self.ssl || url_params_contains_flag(self.url_params.as_deref(), "secure", "true")
+        self.ssl
+            || clickhouse_url_params_contains_flag(self.url_params.as_deref(), "secure", "true")
+            || clickhouse_url_params_contains_flag(self.url_params.as_deref(), "ssl", "true")
     }
 
     pub fn mysql_uses_tls(&self) -> bool {
@@ -1495,10 +1626,18 @@ fn without_sqlserver_legacy_compatibility_param(params: Option<&str>) -> Option<
     Some(output)
 }
 
-fn url_params_contains_flag(params: Option<&str>, key: &str, expected: &str) -> bool {
-    params.unwrap_or("").trim().trim_start_matches('?').split(['&', ';']).filter_map(|part| part.split_once('=')).any(
-        |(part_key, value)| part_key.trim().eq_ignore_ascii_case(key) && value.trim().eq_ignore_ascii_case(expected),
-    )
+fn clickhouse_url_params_contains_flag(params: Option<&str>, key: &str, expected: &str) -> bool {
+    params
+        .unwrap_or("")
+        .trim()
+        .trim_start_matches(['?', '&', ';'])
+        .split(['&', ';'])
+        .filter_map(|part| part.split_once('='))
+        .any(|(part_key, value)| {
+            let part_key = percent_encoding::percent_decode_str(part_key.trim()).decode_utf8_lossy();
+            let value = percent_encoding::percent_decode_str(value.trim()).decode_utf8_lossy();
+            part_key.eq_ignore_ascii_case(key) && value.eq_ignore_ascii_case(expected)
+        })
 }
 
 fn mysql_tls_file_param_is(key: &str, target: &str) -> bool {
@@ -2144,6 +2283,39 @@ fn bracket_ipv6(host: &str) -> String {
     }
 }
 
+/// Returns `true` when `host` contains two or more comma-separated entries
+/// where each entry already embeds its own `:port` suffix.
+///
+/// A single entry such as `db.example.com:5432` is **not** multi-host —
+/// the scalar `port` parameter must be appended separately.
+fn is_multi_host(host: &str) -> bool {
+    let count = host.split(',').count();
+    count >= 2
+}
+
+fn gaussdb_single_host_port(host: &str, default_port: u16) -> (String, u16) {
+    let host = host.trim();
+    if let Some(close) = host.strip_prefix('[').and_then(|value| value.find(']').map(|index| index + 1)) {
+        let bracketed_host = &host[..=close];
+        if let Some(port) = host
+            .get(close + 1..)
+            .and_then(|suffix| suffix.strip_prefix(':'))
+            .and_then(|value| value.parse::<u16>().ok())
+        {
+            return (bracketed_host.to_string(), port);
+        }
+        return (bracketed_host.to_string(), default_port);
+    }
+    if host.matches(':').count() == 1 {
+        if let Some((single_host, raw_port)) = host.rsplit_once(':') {
+            if let Ok(port) = raw_port.parse::<u16>() {
+                return (bracket_ipv6(single_host), port);
+            }
+        }
+    }
+    (bracket_ipv6(host), default_port)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -2157,6 +2329,12 @@ mod tests {
     #[test]
     fn default_query_timeout_is_sixty_seconds() {
         assert_eq!(default_query_timeout_secs(), 60);
+    }
+
+    #[test]
+    fn meilisearch_database_type_serializes_stably() {
+        assert_eq!(serde_json::to_string(&DatabaseType::Meilisearch).unwrap(), "\"meilisearch\"");
+        assert_eq!(serde_json::from_str::<DatabaseType>("\"meilisearch\"").unwrap(), DatabaseType::Meilisearch);
     }
 
     #[test]
@@ -2194,8 +2372,31 @@ mod tests {
         assert_eq!(database_info_from_protocol_value(&serde_json::json!({ "ok": true })), None);
     }
 
+    #[test]
+    fn default_schema_is_optional_and_round_trips() {
+        let base = serde_json::json!({
+            "id": "id",
+            "name": "PostgreSQL",
+            "db_type": "postgres",
+            "host": "localhost",
+            "port": 5432,
+            "username": "postgres",
+            "password": "",
+            "database": "app"
+        });
+        let legacy: ConnectionConfig = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(legacy.default_schema, None);
+
+        let mut configured = base;
+        configured["default_schema"] = serde_json::json!("archive");
+        let parsed: ConnectionConfig = serde_json::from_value(configured).unwrap();
+        assert_eq!(parsed.default_schema.as_deref(), Some("archive"));
+        assert_eq!(serde_json::to_value(parsed).unwrap()["default_schema"], "archive");
+    }
+
     fn mysql_config(username: &str, password: &str, database: Option<&str>) -> ConnectionConfig {
         ConnectionConfig {
+            docs_notes_path: None,
             id: "id".to_string(),
             name: "name".to_string(),
             note: String::new(),
@@ -2209,6 +2410,7 @@ mod tests {
             username: username.to_string(),
             password: password.to_string(),
             database: database.map(str::to_string),
+            default_schema: None,
             visible_databases: None,
             visible_schemas: None,
             show_system_schemas: false,
@@ -2244,11 +2446,30 @@ mod tests {
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
+            save_password: true,
             read_only: false,
             is_production: false,
             production_databases: vec![],
             database_info: None,
         }
+    }
+
+    #[test]
+    fn connection_debug_redacts_passwords_tokens_and_nested_secrets() {
+        let mut config = mysql_config("root", "database-password", Some("app"));
+        config.connection_string = Some("server=db;password=inline-secret".into());
+        config.init_script = Some("CREATE SECRET leaked".into());
+        config.external_config = Some(serde_json::json!({
+            "consulToken": "consul-secret",
+            "nested": { "OIDCClientSecret": "oidc-secret", "visible": "safe" }
+        }));
+
+        let output = format!("{config:?}");
+        for secret in ["database-password", "inline-secret", "CREATE SECRET leaked", "consul-secret", "oidc-secret"] {
+            assert!(!output.contains(secret));
+        }
+        assert!(output.contains("[REDACTED]"));
+        assert!(output.contains("safe"));
     }
 
     #[test]
@@ -2267,6 +2488,40 @@ mod tests {
         .unwrap();
         assert!(serde_json::to_value(&legacy).unwrap().get("mcp_access").is_none());
         assert!(!legacy.read_only);
+    }
+
+    #[test]
+    fn docs_notes_path_defaults_to_none_and_round_trips() {
+        // A connection stored before this field existed must still load.
+        let legacy: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "c1",
+            "name": "local",
+            "db_type": "postgres",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "username": "postgres",
+            "password": "",
+            "database": null
+        }))
+        .expect("legacy config must still parse");
+        assert_eq!(legacy.docs_notes_path, None);
+
+        // And a stored path must actually survive a load — this is the half
+        // that fails if the field is added to ConnectionConfig only, without
+        // ConnectionConfigData and the From impl.
+        let with_path: ConnectionConfig = serde_json::from_value(serde_json::json!({
+            "id": "c1",
+            "name": "local",
+            "db_type": "postgres",
+            "host": "127.0.0.1",
+            "port": 5432,
+            "username": "postgres",
+            "password": "",
+            "database": null,
+            "docs_notes_path": "docs/dbx-docs.json"
+        }))
+        .expect("config with a notes path must parse");
+        assert_eq!(with_path.docs_notes_path.as_deref(), Some("docs/dbx-docs.json"));
     }
 
     #[test]
@@ -2803,6 +3058,15 @@ mod tests {
         config.ssl = false;
         config.url_params = Some("secure=true".to_string());
         assert_eq!(config.connection_url(), "https://10.1.2.3:8443");
+
+        config.url_params = Some("SSL=TrUe&dialect_type=ANSI".to_string());
+        assert_eq!(config.connection_url(), "https://10.1.2.3:8443");
+
+        config.url_params = Some("ssl=false&dialect_type=ANSI".to_string());
+        assert_eq!(config.connection_url(), "http://10.1.2.3:8443");
+
+        config.url_params = Some("?%53SL=Tr%75e;dialect_type=ANSI".to_string());
+        assert_eq!(config.connection_url(), "https://10.1.2.3:8443");
     }
 
     #[test]
@@ -3185,6 +3449,28 @@ mod tests {
         config.db_type = DatabaseType::Gaussdb;
 
         assert_eq!(config.connection_url(), "gaussdb://gaussdb:secret@10.1.2.3:2883/postgres");
+    }
+
+    #[test]
+    fn gaussdb_url_normalizes_legacy_single_host_port() {
+        let mut config = mysql_config("gaussdb", "secret", None);
+        config.db_type = DatabaseType::Gaussdb;
+        config.host = "db.example.com:5433".to_string();
+        config.port = 5432;
+
+        assert_eq!(config.connection_url(), "gaussdb://gaussdb:secret@db.example.com:5433/postgres");
+        assert_eq!(config.redacted_connection_url(), "gaussdb://db.example.com:5433/postgres");
+    }
+
+    #[test]
+    fn gaussdb_url_supports_single_and_multi_host_ipv6() {
+        let mut config = mysql_config("gaussdb", "secret", None);
+        config.db_type = DatabaseType::Gaussdb;
+        config.host = "[2001:db8::1]:5433".to_string();
+        assert_eq!(config.connection_url(), "gaussdb://gaussdb:secret@[2001:db8::1]:5433/postgres");
+
+        config.host = "[2001:db8::1]:5433,[2001:db8::2]:5434".to_string();
+        assert_eq!(config.connection_url(), "gaussdb://gaussdb:secret@[2001:db8::1]:5433,[2001:db8::2]:5434/postgres");
     }
 
     #[test]

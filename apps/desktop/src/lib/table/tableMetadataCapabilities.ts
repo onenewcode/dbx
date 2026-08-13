@@ -17,6 +17,12 @@ const defaultCapabilities: TableMetadataCapabilities = {
 };
 
 const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabilities>>> = {
+  mongodb: {
+    columns: false,
+    foreignKeys: false,
+    triggers: false,
+    ddl: false,
+  },
   clickhouse: {
     foreignKeys: false,
     triggers: false,
@@ -32,6 +38,12 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
     ddl: false,
   },
   easysearch: {
+    indexes: false,
+    foreignKeys: false,
+    triggers: false,
+    ddl: false,
+  },
+  meilisearch: {
     indexes: false,
     foreignKeys: false,
     triggers: false,
@@ -68,6 +80,12 @@ const capabilityByType: Partial<Record<DatabaseType, Partial<TableMetadataCapabi
     ddl: false,
   },
   influxdb: {
+    indexes: false,
+    foreignKeys: false,
+    triggers: false,
+    ddl: false,
+  },
+  victoriametrics: {
     indexes: false,
     foreignKeys: false,
     triggers: false,

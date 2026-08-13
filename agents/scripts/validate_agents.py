@@ -13,10 +13,18 @@ KOTLIN_SCAN_EXCLUDED_PARTS = {".git", ".gradle", "build"}
 DEFAULT_AGENT_JRE_KEY = "21"
 NON_JDBC_AGENT_MODULES = {"mongodb", "etcd", "zookeeper", "kafka", "rocketmq", "rabbitmq"}
 NATIVE_ONLY_AGENT_MODULES = {
+    "cassandra": "drivers/cassandra-go",
     "duckdb": "drivers/duckdb",
+    "hive": "drivers/hive-go",
     "oracle": "drivers/oracle-go",
     "kingbase": "drivers/kingbase-go",
+    "iotdb": "drivers/iotdb",
+    "neo4j": "drivers/neo4j-go",
+    "vastbase": "drivers/vastbase-go",
+    "tdengine": "drivers/tdengine",
     "xugu": "drivers/xugu",
+    "rabbitmq": "drivers/rabbitmq",
+    "rocketmq": "drivers/rocketmq",
 }
 AUTO_VERSIONED_NATIVE_MODULES = {"duckdb"}
 JDBC_ARCHITECTURE_ALLOWLIST = {
@@ -24,7 +32,6 @@ JDBC_ARCHITECTURE_ALLOWLIST = {
     "access": "shared lifecycle with a test-only non-creating Access URL",
     "dameng": "shared lifecycle with protocol-safe driver loading and native explain access",
     "informix": "shared lifecycle with contextual connection error reporting",
-    "tdengine": "shared lifecycle with WebSocket-to-REST transport fallback",
 }
 APPROVED_JDBC_BASES = {
     "AbstractJdbcAgent",

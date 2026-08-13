@@ -21,7 +21,7 @@ import {
   parseExtraToColumnExtra,
   rehydrateColumnDraftsFromMetadata,
   resolveInsertColumnIndex,
-  restoreDamengLengthUnitsAfterSave,
+  restoreCharacterLengthUnitsAfterSave,
   splitDataType,
 } from "@/lib/table/tableStructureEditorState";
 
@@ -189,7 +189,7 @@ describe("tableStructureEditorState", () => {
     expect(combineDataTypeForDatabase("mysql", "integer", "11")).toBe("integer(11)");
   });
 
-  it("offers BYTE and CHAR units only for supported Dameng character types", () => {
+  it("offers BYTE and CHAR units for supported Oracle-family character types", () => {
     expect(getDataTypeLengthUnitOptions("dameng", "varchar2(255 CHAR)")).toEqual(["BYTE", "CHAR"]);
     expect(getDataTypeLengthUnitOptions("dameng", "varchar(255)")).toEqual(["BYTE", "CHAR"]);
     expect(getDataTypeLengthUnitOptions("dameng", "char(10 BYTE)")).toEqual(["BYTE", "CHAR"]);
@@ -197,7 +197,9 @@ describe("tableStructureEditorState", () => {
     expect(getDataTypeLengthUnitOptions("dameng", "nchar(10)")).toEqual([]);
     expect(getDataTypeLengthUnitOptions("dameng", "nvarchar2(10)")).toEqual([]);
     expect(getDataTypeLengthUnitOptions("dameng", "number(10,0)")).toEqual([]);
-    expect(getDataTypeLengthUnitOptions("oracle", "varchar2(255 CHAR)")).toEqual([]);
+    expect(getDataTypeLengthUnitOptions("oracle", "varchar2(255 CHAR)")).toEqual(["BYTE", "CHAR"]);
+    expect(getDataTypeLengthUnitOptions("oracle", "char(10 BYTE)")).toEqual(["BYTE", "CHAR"]);
+    expect(getDataTypeLengthUnitOptions("oracle", "nvarchar2(10)")).toEqual([]);
     expect(getDataTypeLengthUnitOptions("mysql", "varchar(255)")).toEqual([]);
   });
 
@@ -211,6 +213,12 @@ describe("tableStructureEditorState", () => {
     expect(combineDataTypeForDatabaseWithLengthUnit("dameng", "varchar", "64", "byte")).toBe("varchar(64 BYTE)");
     expect(combineDataTypeForDatabaseWithLengthUnit("dameng", "char", "", "CHAR")).toBe("char");
     expect(combineDataTypeForDatabaseWithLengthUnit("dameng", "varchar2", "255", "")).toBe("varchar2(255)");
+  });
+
+  it("separates and reconstructs Oracle character length units", () => {
+    expect(dataTypeLengthInputValue("oracle", "VARCHAR2(255 CHAR)")).toBe("255");
+    expect(dataTypeLengthUnitValue("oracle", "VARCHAR2(255 CHAR)")).toBe("CHAR");
+    expect(combineDataTypeForDatabaseWithLengthUnit("oracle", "VARCHAR2", "64", "BYTE")).toBe("VARCHAR2(64 BYTE)");
   });
 
   it("does not reinterpret unsupported length parameters or dialects", () => {
@@ -235,7 +243,7 @@ describe("tableStructureEditorState", () => {
       "dameng",
     );
 
-    const [restored] = restoreDamengLengthUnitsAfterSave([legacyAgentDraft!], new Map([["display_name", "VARCHAR2(255 CHAR)"]]));
+    const [restored] = restoreCharacterLengthUnitsAfterSave("dameng", [legacyAgentDraft!], new Map([["display_name", "VARCHAR2(255 CHAR)"]]));
 
     expect(restored?.dataType).toBe("VARCHAR2(255 CHAR)");
     expect(restored?.original?.data_type).toBe("VARCHAR2(255 CHAR)");
@@ -256,10 +264,19 @@ describe("tableStructureEditorState", () => {
       "dameng",
     );
 
-    const [restored] = restoreDamengLengthUnitsAfterSave([liveDraft!], new Map([["display_name", "VARCHAR2(255 CHAR)"]]));
+    const [restored] = restoreCharacterLengthUnitsAfterSave("dameng", [liveDraft!], new Map([["display_name", "VARCHAR2(255 CHAR)"]]));
 
     expect(restored?.dataType).toBe("VARCHAR2(255 BYTE)");
     expect(restored?.original?.data_type).toBe("VARCHAR2(255 BYTE)");
+  });
+
+  it("keeps a saved Oracle length unit when refreshed metadata omits it", () => {
+    const [legacyAgentDraft] = createColumnDrafts([{ name: "DISPLAY_NAME", data_type: "VARCHAR2(255)", is_nullable: true, column_default: null, is_primary_key: false, extra: null }], "oracle");
+
+    const [restored] = restoreCharacterLengthUnitsAfterSave("oracle", [legacyAgentDraft!], new Map([["display_name", "VARCHAR2(255 CHAR)"]]));
+
+    expect(restored?.dataType).toBe("VARCHAR2(255 CHAR)");
+    expect(restored?.original?.data_type).toBe("VARCHAR2(255 CHAR)");
   });
 
   it("does not add MySQL display lengths when choosing SQLite-family types", () => {
@@ -288,12 +305,17 @@ describe("tableStructureEditorState", () => {
     expect(getDefaultLengthForType("mysql", "float")).toBe("10,2");
   });
 
-  it("uses TEXT for a new native SQLite column without changing compatible defaults", () => {
+  it("uses TEXT for SQLite-family columns and dialect defaults elsewhere", () => {
     expect(DATA_TYPE_OPTIONS.sqlite).toContain("text");
+    expect(DATA_TYPE_OPTIONS.duckdb).toContain("TEXT");
+    expect(DATA_TYPE_OPTIONS.h2).toContain("VARCHAR");
     expect(defaultNewColumnDataType("sqlite")).toBe("text");
-    expect(defaultNewColumnDataType("rqlite")).toBe("varchar(255)");
-    expect(defaultNewColumnDataType("turso")).toBe("varchar(255)");
+    expect(defaultNewColumnDataType("rqlite")).toBe("text");
+    expect(defaultNewColumnDataType("turso")).toBe("text");
+    expect(defaultNewColumnDataType("duckdb")).toBe("TEXT");
     expect(defaultNewColumnDataType("mysql")).toBe("varchar(255)");
+    expect(defaultNewColumnDataType("h2").toLowerCase()).toContain("varchar");
+    expect(defaultNewColumnDataType("clickhouse")).toBe("String");
   });
 
   it("requires a SQLite rebuild only for a retained existing column type change", () => {
