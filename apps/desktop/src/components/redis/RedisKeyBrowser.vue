@@ -396,7 +396,8 @@ function isLeafChecked(keyRaw: string): boolean {
 
 /** Check/uncheck a leaf or folder; Shift expands an inclusive visible-row range. */
 function toggleNodeCheck(node: RedisKeyTreeNode, event: MouseEvent) {
-  event.preventDefault();
+  // Let the native checkbox handle ordinary clicks; custom range selection owns Shift clicks.
+  if (event.shiftKey) event.preventDefault();
   event.stopPropagation();
   if (selectionBusy.value) return;
   focusKeyPane();
