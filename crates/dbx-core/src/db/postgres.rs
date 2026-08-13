@@ -604,6 +604,8 @@ fn pg_type_is_reg_type(pg_type: &Type) -> bool {
             Type::REGNAMESPACE.oid(),
             Type::REGROLE.oid(),
             Type::REGCOLLATION.oid(),
+            Type::REGCONFIG.oid(),
+            Type::REGDICTIONARY.oid(),
             Type::REGPROC_ARRAY.oid(),
             Type::REGPROCEDURE_ARRAY.oid(),
             Type::REGOPER_ARRAY.oid(),
@@ -613,6 +615,8 @@ fn pg_type_is_reg_type(pg_type: &Type) -> bool {
             Type::REGNAMESPACE_ARRAY.oid(),
             Type::REGROLE_ARRAY.oid(),
             Type::REGCOLLATION_ARRAY.oid(),
+            Type::REGCONFIG_ARRAY.oid(),
+            Type::REGDICTIONARY_ARRAY.oid(),
         ]
         .contains(&oid)
     )
@@ -6368,6 +6372,8 @@ mod tests {
             Type::REGNAMESPACE,
             Type::REGROLE,
             Type::REGCOLLATION,
+            Type::REGCONFIG,
+            Type::REGDICTIONARY,
             Type::REGPROC_ARRAY,
             Type::REGPROCEDURE_ARRAY,
             Type::REGOPER_ARRAY,
@@ -6377,6 +6383,8 @@ mod tests {
             Type::REGNAMESPACE_ARRAY,
             Type::REGROLE_ARRAY,
             Type::REGCOLLATION_ARRAY,
+            Type::REGCONFIG_ARRAY,
+            Type::REGDICTIONARY_ARRAY,
         ] {
             assert!(pg_type_is_reg_type(&pg_type));
             assert!(pg_type_requires_text_protocol(&pg_type, PgColType::Other));
