@@ -4019,3 +4019,4 @@ export async function refreshConnections(): Promise<void> {
 
 export * from "@/lib/backend/mq-http";
 export * from "@/lib/backend/mqtt-http";
+export * from "@/lib/backend/nats-http";
