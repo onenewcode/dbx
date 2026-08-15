@@ -118,6 +118,8 @@ async fn persistent_service(state: &Arc<WebState>) -> Result<NatsService, AppErr
 /// Tear down live Agent subscriptions before a Web connection is removed or
 /// disconnected. This keeps a detached UI/session from retaining broker work.
 pub(crate) async fn close_nats_connection(state: &Arc<WebState>, connection_id: &str) {
+    let operation = state.nats.connection_operation(connection_id).await;
+    let _operation = operation.lock().await;
     let service = state.nats.service.lock().await.as_ref().cloned();
     if let Some(service) = service {
         service.close_connection(connection_id).await;
@@ -272,11 +274,15 @@ pub async fn start_subscription(
     Json(req): Json<NatsSubscriptionStartRouteRequest>,
 ) -> Result<Json<NatsSubscriptionInfo>, AppError> {
     super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
-    let nats = load_nats_config(&state, &req.connection_id).await?;
     let service = persistent_service(&state).await?;
     ensure_event_forwarder(&state, &service);
     let request = req.subscription.validate().map_err(AppError::bad_request)?;
     let subscription_id = request.subscription_id.clone();
+    let operation = state.nats.connection_operation(&req.connection_id).await;
+    let _operation = operation.lock().await;
+    // Reload while holding the lifecycle lock so a concurrent configuration
+    // update cannot close the old runtime and then let this request revive it.
+    let nats = load_nats_config(&state, &req.connection_id).await?;
     let inserted = {
         let mut subscriptions = state.nats.subscriptions.write().await;
         if let Some(existing) = subscriptions.get(&subscription_id) {
@@ -305,6 +311,8 @@ pub async fn stop_subscription(
 ) -> Result<Json<bool>, AppError> {
     super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
     let service = persistent_service(&state).await?;
+    let operation = state.nats.connection_operation(&req.connection_id).await;
+    let _operation = operation.lock().await;
     let stopped = service.stop_subscription(&req.connection_id, &req.subscription_id).await.map_err(AppError::from)?;
     state.nats.subscriptions.write().await.remove(&req.subscription_id);
     Ok(Json(stopped))

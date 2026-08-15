@@ -21,6 +21,7 @@ pub struct NatsService {
 
 struct NatsLiveRegistry {
     runtimes: Mutex<HashMap<String, Arc<NatsLiveRuntime>>>,
+    operations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     events: broadcast::Sender<NatsSubscriptionEvent>,
 }
 
@@ -36,7 +37,14 @@ struct StopSubscriptionResult {
 impl NatsService {
     pub fn new(launch: AgentLaunchSpec) -> Self {
         let (events, _) = broadcast::channel(512);
-        Self { launch, live: Arc::new(NatsLiveRegistry { runtimes: Mutex::new(HashMap::new()), events }) }
+        Self {
+            launch,
+            live: Arc::new(NatsLiveRegistry {
+                runtimes: Mutex::new(HashMap::new()),
+                operations: Mutex::new(HashMap::new()),
+                events,
+            }),
+        }
     }
 
     pub fn from_agent_manager(manager: &crate::agent_manager::AgentManager) -> Result<Self, String> {
@@ -204,6 +212,8 @@ impl NatsService {
             return Err("NATS connection id is required".to_string());
         }
         let request = request.validate()?;
+        let operation = self.connection_operation(connection_id).await;
+        let _operation = operation.lock().await;
         let runtime = self.live_runtime(connection_id).await?;
         runtime
             .client
@@ -220,6 +230,8 @@ impl NatsService {
         if subscription_id.is_empty() {
             return Err("NATS subscriptionId is required".to_string());
         }
+        let operation = self.connection_operation(connection_id).await;
+        let _operation = operation.lock().await;
         let runtime = self.live.runtimes.lock().await.get(connection_id).cloned();
         let Some(runtime) = runtime else {
             return Ok(true);
@@ -262,6 +274,8 @@ impl NatsService {
     /// when a console closes or a connection is deleted, so subscriptions do
     /// not survive without an owning UI/session.
     pub async fn close_connection(&self, connection_id: &str) {
+        let operation = self.connection_operation(connection_id).await;
+        let _operation = operation.lock().await;
         if let Some(runtime) = self.live.runtimes.lock().await.remove(connection_id) {
             runtime.client.kill();
         }
@@ -285,6 +299,11 @@ impl NatsService {
 
     fn rpc_timeout(&self, config: &NatsConnectionConfig) -> Duration {
         Duration::from_secs(config.request_timeout_secs.max(config.connect_timeout_secs).max(1))
+    }
+
+    async fn connection_operation(&self, connection_id: &str) -> Arc<Mutex<()>> {
+        let mut operations = self.live.operations.lock().await;
+        operations.entry(connection_id.to_string()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
     }
 
     async fn live_runtime(&self, connection_id: &str) -> Result<Arc<NatsLiveRuntime>, String> {
@@ -366,7 +385,7 @@ mod tests {
             "nats-primary",
             AgentNotification {
                 method: "subscription_state".to_string(),
-                params: json!({ "subscriptionId": "sub-1", "sequence": 3, "state": "active" }),
+                params: json!({ "subscriptionId": "sub-1", "sequence": 3, "state": "active", "droppedCount": 2 }),
             },
         );
         let Some(NatsSubscriptionEvent::State(state)) = event else {
@@ -375,5 +394,6 @@ mod tests {
         assert_eq!(state.connection_id, "nats-primary");
         assert_eq!(state.subscription_id, "sub-1");
         assert_eq!(state.sequence, 3);
+        assert_eq!(state.dropped_count, 2);
     }
 }

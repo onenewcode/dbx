@@ -486,6 +486,7 @@ pub async fn save_connections(
     }
     state.app.storage.save_connections(&body.configs).await.map_err(AppError::from)?;
     let sync = sync_connection_configs(&state, &body.configs).await;
+    close_nats_connections(&state, &sync.connection_pool_ids_to_drop).await;
     remove_connection_pools_for_connection_ids(&state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(&state, &sync.nacos_adapter_ids_to_drop).await;
     drop_mq_adapters_for_connection_ids(&state, &sync.mq_adapter_ids_to_drop).await;
@@ -544,6 +545,7 @@ pub async fn load_connections(
 ) -> Result<Json<Vec<ConnectionConfig>>, AppError> {
     let configs = state.app.storage.load_connections().await.map_err(AppError::from)?;
     let sync = sync_connection_configs(&state, &configs).await;
+    close_nats_connections(&state, &sync.connection_pool_ids_to_drop).await;
     remove_connection_pools_for_connection_ids(&state, &sync.connection_pool_ids_to_drop).await;
     drop_nacos_adapters_for_connection_ids(&state, &sync.nacos_adapter_ids_to_drop).await;
     drop_mq_adapters_for_connection_ids(&state, &sync.mq_adapter_ids_to_drop).await;
@@ -628,6 +630,12 @@ async fn drop_mq_adapters_for_connection_ids(_state: &WebState, _connection_ids:
 async fn remove_connection_pools_for_connection_ids(state: &WebState, connection_ids: &[String]) {
     for connection_id in connection_ids {
         state.app.remove_connection_pools_detached(connection_id).await;
+    }
+}
+
+async fn close_nats_connections(state: &Arc<WebState>, connection_ids: &[String]) {
+    for connection_id in connection_ids {
+        super::nats::close_nats_connection(state, connection_id).await;
     }
 }
 

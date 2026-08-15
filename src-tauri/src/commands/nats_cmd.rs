@@ -1,8 +1,11 @@
 //! Desktop NATS commands backed by the shared dbx-core Agent facade.
 
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc,
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 use tauri::{AppHandle, Emitter, State};
 
@@ -19,11 +22,16 @@ use dbx_core::nats::{
 pub struct NatsServiceState {
     service: tokio::sync::Mutex<Option<NatsService>>,
     event_forwarder_started: AtomicBool,
+    operations: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl Default for NatsServiceState {
     fn default() -> Self {
-        Self { service: tokio::sync::Mutex::new(None), event_forwarder_started: AtomicBool::new(false) }
+        Self {
+            service: tokio::sync::Mutex::new(None),
+            event_forwarder_started: AtomicBool::new(false),
+            operations: tokio::sync::Mutex::new(HashMap::new()),
+        }
     }
 }
 
@@ -65,10 +73,17 @@ impl NatsServiceState {
     }
 
     pub async fn close_connection(&self, connection_id: &str) {
+        let operation = self.connection_operation(connection_id).await;
+        let _operation = operation.lock().await;
         let service = self.service.lock().await.as_ref().cloned();
         if let Some(service) = service {
             service.close_connection(connection_id).await;
         }
+    }
+
+    async fn connection_operation(&self, connection_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut operations = self.operations.lock().await;
+        operations.entry(connection_id.to_string()).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
     }
 }
 
@@ -210,6 +225,8 @@ pub async fn nats_start_subscription(
     connection_id: String,
     request: NatsSubscriptionRequest,
 ) -> Result<NatsSubscriptionInfo, String> {
+    let operation = nats_state.connection_operation(&connection_id).await;
+    let _operation = operation.lock().await;
     let (_, nats) = service_config(state.inner(), &connection_id).await?;
     let service = nats_state.service(state.inner()).await?;
     nats_state.ensure_event_forwarder(&app, &service);
@@ -223,6 +240,8 @@ pub async fn nats_stop_subscription(
     connection_id: String,
     subscription_id: String,
 ) -> Result<bool, String> {
+    let operation = nats_state.connection_operation(&connection_id).await;
+    let _operation = operation.lock().await;
     let service = nats_state.service(state.inner()).await?;
     service.stop_subscription(&connection_id, &subscription_id).await
 }

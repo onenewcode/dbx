@@ -10,7 +10,7 @@ import * as api from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 import type { NatsMessage, NatsSubscriptionErrorEvent, NatsSubscriptionMessageEvent, NatsSubscriptionStateEvent } from "@/types/nats";
-import { FEED_BUFFER_LIMIT, type NatsFeed } from "./feed";
+import { FEED_BUFFER_LIMIT, FEED_BUFFER_MAX_BYTES, type NatsFeed } from "./feed";
 import NatsSubscriptionRail from "./NatsSubscriptionRail.vue";
 import NatsMessageList from "./NatsMessageList.vue";
 
@@ -37,6 +37,7 @@ interface PendingFeedMessages {
   messages: NatsMessage[];
   start: number;
   receivedCount: number;
+  bytes: number;
 }
 
 // Native events can arrive much faster than Vue can render cards. Keep only the
@@ -45,6 +46,7 @@ const pendingMessages = new Map<string, PendingFeedMessages>();
 let messageFlushScheduled = false;
 let messageFlushFrame: number | undefined;
 let messageFlushGeneration = 0;
+let disposed = false;
 
 const activeFeed = computed(() => feeds.value.find((feed) => feed.id === activeFeedId.value));
 const activeMessages = computed(() => activeFeed.value?.messages ?? []);
@@ -82,7 +84,7 @@ function flushPendingMessages() {
     const feed = feeds.value.find((item) => item.id === feedId);
     if (!feed) continue;
     const messages = pending.start ? pending.messages.slice(pending.start) : pending.messages;
-    if (messages.length) feed.messages = [...feed.messages, ...messages].slice(-FEED_BUFFER_LIMIT);
+    if (messages.length) feed.messages = boundedMessages([...feed.messages, ...messages]);
     feed.receivedCount += pending.receivedCount;
   }
 }
@@ -106,20 +108,40 @@ function scheduleMessageFlush() {
 function queueFeedMessage(feedId: string, message: NatsMessage) {
   let pending = pendingMessages.get(feedId);
   if (!pending) {
-    pending = { messages: [], start: 0, receivedCount: 0 };
+    pending = { messages: [], start: 0, receivedCount: 0, bytes: 0 };
     pendingMessages.set(feedId, pending);
   }
   pending.messages.push(message);
   pending.receivedCount += 1;
+  pending.bytes += messageBufferBytes(message);
 
-  // A suspended window may not receive animation frames. Bound the queue until
-  // rendering resumes without losing the newest-message-wins buffer behaviour.
-  if (pending.messages.length - pending.start > FEED_BUFFER_LIMIT) pending.start = pending.messages.length - FEED_BUFFER_LIMIT;
+  // A suspended window may not receive animation frames. Bound the queue by
+  // both message count and payload bytes until rendering resumes.
+  while (pending.messages.length - pending.start > FEED_BUFFER_LIMIT || pending.bytes > FEED_BUFFER_MAX_BYTES) {
+    pending.bytes -= messageBufferBytes(pending.messages[pending.start]);
+    pending.start += 1;
+  }
   if (pending.start >= FEED_BUFFER_LIMIT / 2) {
     pending.messages = pending.messages.slice(pending.start);
     pending.start = 0;
   }
   scheduleMessageFlush();
+}
+
+function messageBufferBytes(message: NatsMessage): number {
+  return message.sizeBytes + message.headers.reduce((total, header) => total + header.key.length + header.value.length, 0);
+}
+
+function boundedMessages(messages: NatsMessage[]): NatsMessage[] {
+  let totalBytes = 0;
+  let start = messages.length;
+  for (let index = messages.length - 1; index >= 0 && messages.length - index <= FEED_BUFFER_LIMIT; index -= 1) {
+    const messageBytes = messageBufferBytes(messages[index]);
+    if (start !== messages.length && totalBytes + messageBytes > FEED_BUFFER_MAX_BYTES) break;
+    totalBytes += messageBytes;
+    start = index;
+  }
+  return messages.slice(start);
 }
 
 function discardPendingMessages(feedId?: string) {
@@ -134,24 +156,38 @@ function discardPendingMessages(feedId?: string) {
   messageFlushScheduled = false;
 }
 
-async function installFeedListener(feedId: string) {
-  const stop = await api.natsListenSubscription(props.connectionId, feedId, {
+function acceptsEvent(feed: NatsFeed, sequence: number): boolean {
+  // Agent notifications can arrive after stop/reconnect transitions. Each
+  // subscription has a monotonic sequence, so an older event must not roll
+  // back a newer feed state or append after a terminal transition.
+  if (sequence <= (feed.lastEventSequence ?? 0)) return false;
+  feed.lastEventSequence = sequence;
+  return true;
+}
+
+async function installFeedListener(connectionId: string, feedId: string) {
+  const stop = await api.natsListenSubscription(connectionId, feedId, {
     onMessage(event: NatsSubscriptionMessageEvent) {
-      if (event.connectionId !== props.connectionId || event.subscriptionId !== feedId) return;
+      if (event.connectionId !== connectionId || event.subscriptionId !== feedId) return;
       const feed = feeds.value.find((item) => item.id === feedId);
-      if (!feed) return;
+      if (!feed || !acceptsEvent(feed, event.sequence)) return;
+      if (event.droppedCount !== undefined) feed.droppedCount = Math.max(feed.droppedCount, event.droppedCount);
       queueFeedMessage(feedId, event.message);
     },
     onState(event: NatsSubscriptionStateEvent) {
-      if (event.connectionId !== props.connectionId || event.subscriptionId !== feedId) return;
+      if (event.connectionId !== connectionId || event.subscriptionId !== feedId) return;
       const feed = feeds.value.find((item) => item.id === feedId);
-      if (feed) feed.state = event.state;
+      if (feed && acceptsEvent(feed, event.sequence)) {
+        feed.state = event.state;
+        if (event.droppedCount !== undefined) feed.droppedCount = Math.max(feed.droppedCount, event.droppedCount);
+      }
     },
     onError(event: NatsSubscriptionErrorEvent) {
-      if (event.connectionId !== props.connectionId || event.subscriptionId !== feedId) return;
-      error.value = event.message;
+      if (event.connectionId !== connectionId || event.subscriptionId !== feedId) return;
       const feed = feeds.value.find((item) => item.id === feedId);
-      if (feed) feed.state = "error";
+      if (!feed || !acceptsEvent(feed, event.sequence)) return;
+      error.value = event.message;
+      feed.state = "error";
     },
   });
   listeners.set(feedId, stop);
@@ -165,6 +201,7 @@ function stopListener(feedId: string) {
 async function subscribe() {
   const value = subject.value.trim();
   if (!value || busy.value) return;
+  const connectionId = props.connectionId;
   const existing = feeds.value.find((feed) => feed.kind === "live" && feed.subject === value && feed.state !== "stopped");
   if (existing) {
     selectFeed(existing.id);
@@ -174,19 +211,23 @@ async function subscribe() {
   busy.value = true;
   error.value = "";
   const id = nextSubscriptionId();
-  const feed: NatsFeed = { id, subject: value, kind: "live", state: "starting", messages: [], receivedCount: 0, droppedCount: 0 };
+  const feed: NatsFeed = { id, connectionId, subject: value, kind: "live", state: "starting", messages: [], receivedCount: 0, droppedCount: 0 };
   feeds.value = [...feeds.value, feed];
   selectFeed(id);
   try {
-    if (isTauriRuntime()) await installFeedListener(id);
-    const started = await api.natsStartSubscription(props.connectionId, { subscriptionId: id, subject: value });
+    if (isTauriRuntime()) await installFeedListener(connectionId, id);
+    const started = await api.natsStartSubscription(connectionId, { subscriptionId: id, subject: value });
     const current = feeds.value.find((item) => item.id === id);
-    if (current) {
-      current.state = started.state;
-      current.receivedCount = Math.max(started.receivedCount, current.receivedCount);
-      current.droppedCount = Math.max(started.droppedCount, current.droppedCount);
+    if (!current || current.connectionId !== connectionId || current.closing || disposed) {
+      // Teardown may have happened while the Agent was still creating this
+      // subscription. Stop the late result so it cannot outlive its panel.
+      await api.natsStopSubscription(connectionId, id).catch(() => {});
+      return;
     }
-    if (!isTauriRuntime()) await installFeedListener(id);
+    current.state = started.state;
+    current.receivedCount = Math.max(started.receivedCount, current.receivedCount);
+    current.droppedCount = Math.max(started.droppedCount, current.droppedCount);
+    if (!isTauriRuntime()) await installFeedListener(connectionId, id);
     subject.value = "";
   } catch (e) {
     stopListener(id);
@@ -202,17 +243,20 @@ async function subscribe() {
 async function capture() {
   const value = subject.value.trim();
   if (!value || busy.value) return;
+  const connectionId = props.connectionId;
   busy.value = true;
   error.value = "";
   try {
-    const result = await api.natsCapture(props.connectionId, {
+    const result = await api.natsCapture(connectionId, {
       subject: value,
       durationMs: durationMs.value,
       maxMessages: maxMessages.value,
       includeHeaders: true,
     });
+    if (disposed || connectionId !== props.connectionId) return;
     const feed: NatsFeed = {
       id: `capture-${nextSubscriptionId()}`,
+      connectionId,
       subject: value,
       kind: "capture",
       state: "stopped",
@@ -234,11 +278,12 @@ async function capture() {
 async function removeFeed(id: string) {
   const feed = feeds.value.find((item) => item.id === id);
   if (!feed) return;
+  feed.closing = true;
   stopListener(id);
   discardPendingMessages(id);
   if (feed.kind === "live" && feed.state !== "stopped") {
     try {
-      await api.natsStopSubscription(props.connectionId, id);
+      await api.natsStopSubscription(feed.connectionId, id);
     } catch (e) {
       error.value = formatError(e);
     }
@@ -264,12 +309,15 @@ function runReceiveAction() {
 
 async function stopAllFeeds() {
   const live = feeds.value.filter((feed) => feed.kind === "live" && feed.state !== "stopped");
+  live.forEach((feed) => {
+    feed.closing = true;
+  });
   listeners.forEach((stop) => stop());
   listeners.clear();
   discardPendingMessages();
   await Promise.all(
     live.map((feed) =>
-      api.natsStopSubscription(props.connectionId, feed.id).catch(() => {
+      api.natsStopSubscription(feed.connectionId, feed.id).catch(() => {
         /* best-effort teardown */
       }),
     ),
@@ -287,6 +335,7 @@ watch(
 );
 
 onBeforeUnmount(() => {
+  disposed = true;
   void stopAllFeeds();
 });
 

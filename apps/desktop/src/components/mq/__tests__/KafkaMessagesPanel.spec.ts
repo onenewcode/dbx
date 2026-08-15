@@ -173,7 +173,7 @@ describe("KafkaMessagesPanel", () => {
   });
 
   it("keeps the topic toolbar outside the scrolling content area (issue #6267)", async () => {
-    const panel = await mountPanel();
+    const panel = await mountPanel({ canSendMessage: false });
     const panelRoot = panel.querySelector<HTMLElement>(".kafka-messages-panel");
     const toolbar = panelRoot?.querySelector<HTMLElement>(".panel-toolbar");
     const content = panelRoot?.querySelector<HTMLElement>(".kafka-messages-content");

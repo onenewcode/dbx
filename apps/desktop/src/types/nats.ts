@@ -135,6 +135,7 @@ export interface NatsSubscriptionMessageEvent {
   connectionId: string;
   subscriptionId: string;
   sequence: number;
+  droppedCount?: number;
   message: NatsMessage;
 }
 
@@ -143,6 +144,7 @@ export interface NatsSubscriptionStateEvent {
   subscriptionId: string;
   sequence: number;
   state: string;
+  droppedCount?: number;
   detail?: string;
 }
 

@@ -189,4 +189,67 @@ describe("NatsMessagesPanel — multi-subscription explorer", () => {
     expect(host.querySelectorAll(".nats-msg-card")).toHaveLength(3);
     expect(host.querySelector(".feed-chip-count")?.textContent).toBe("3");
   });
+
+  it("keeps the newest messages within the per-feed byte budget", async () => {
+    const host = mount();
+    await subscribeTo(host, "orders.>");
+    const subscriptionId = backend.startReqs[0].subscriptionId;
+    for (let sequence = 1; sequence <= 3; sequence += 1) {
+      backend.handlers[subscriptionId].onMessage({
+        connectionId: "conn-1",
+        subscriptionId,
+        sequence,
+        message: { subject: "orders.created", headers: [], payloadBase64: "aGk=", payloadText: "hi", receivedAtMs: sequence, sizeBytes: 8 * 1024 * 1024 },
+      });
+    }
+    await flush();
+
+    expect(host.querySelectorAll(".nats-msg-card")).toHaveLength(2);
+    expect(host.querySelector(".feed-chip-count")?.textContent).toBe("3");
+  });
+
+  it("ignores stale subscription events after a newer state transition", async () => {
+    const host = mount();
+    await subscribeTo(host, "orders.>");
+    const subscriptionId = backend.startReqs[0].subscriptionId;
+    const handlers = backend.handlers[subscriptionId];
+
+    handlers.onState({ connectionId: "conn-1", subscriptionId, sequence: 3, state: "stopped" });
+    handlers.onMessage({
+      connectionId: "conn-1",
+      subscriptionId,
+      sequence: 2,
+      message: { subject: "orders.created", headers: [], payloadBase64: "aGk=", payloadText: "hi", receivedAtMs: 0, sizeBytes: 2 },
+    });
+    handlers.onError({ connectionId: "conn-1", subscriptionId, sequence: 1, message: "old failure" });
+    await flush();
+
+    expect(host.querySelectorAll(".nats-msg-card")).toHaveLength(0);
+    expect(host.querySelector(".feed-chip")?.classList.contains("is-error")).toBe(false);
+    host.querySelector<HTMLButtonElement>('[data-testid="nats-feed-remove"]')!.click();
+    await flush();
+    expect(backend.stopSubscription).not.toHaveBeenCalled();
+  });
+
+  it("stops a subscription that finishes creating after the panel is gone", async () => {
+    let resolveStart: ((value: { subscriptionId: string; subject: string; state: string; receivedCount: number; droppedCount: number }) => void) | undefined;
+    backend.startSubscription.mockImplementationOnce((_conn: string, req: { subscriptionId: string; subject: string }) => {
+      backend.startReqs.push(req);
+      return new Promise((resolve) => {
+        resolveStart = resolve;
+      });
+    });
+    const host = mount();
+
+    await subscribeTo(host, "orders.>");
+    const subscriptionId = backend.startReqs[0].subscriptionId;
+    app?.unmount();
+    expect(backend.stopSubscription).toHaveBeenCalledWith("conn-1", subscriptionId);
+
+    resolveStart?.({ subscriptionId, subject: "orders.>", state: "active", receivedCount: 0, droppedCount: 0 });
+    await flush();
+
+    expect(backend.stopSubscription).toHaveBeenCalledTimes(2);
+    expect(backend.stopSubscription).toHaveBeenLastCalledWith("conn-1", subscriptionId);
+  });
 });

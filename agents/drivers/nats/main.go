@@ -26,23 +26,25 @@ import (
 )
 
 const (
-	maxRPCMessageBytes       = 32 * 1024 * 1024
-	maxPublishPayloadBytes   = 16 * 1024 * 1024
-	maxSubjectBytes          = 1024
-	maxHeaderCount           = 100
-	maxHeaderKeyBytes        = 256
-	maxHeaderValueBytes      = 8 * 1024
-	maxHeaderWireBytes       = 64 * 1024
-	captureChannelCapacity   = 1
-	maxCaptureDuration       = 60 * time.Second
-	maxCaptureMessages       = 1_000
-	maxCaptureBytes          = 16 * 1024 * 1024
-	maxJetStreamProbeTimeout = time.Second
-	maxJetStreamListItems    = 200
-	maxHistoryMessages       = 1_000
-	maxHistoryBytes          = 16 * 1024 * 1024
-	maxLivePendingMessages   = 1_000
-	maxLivePendingBytes      = 16 * 1024 * 1024
+	maxRPCMessageBytes         = 32 * 1024 * 1024
+	maxPublishPayloadBytes     = 16 * 1024 * 1024
+	maxSubjectBytes            = 1024
+	maxHeaderCount             = 100
+	maxHeaderKeyBytes          = 256
+	maxHeaderValueBytes        = 8 * 1024
+	maxHeaderWireBytes         = 64 * 1024
+	captureChannelCapacity     = 1
+	maxCaptureDuration         = 60 * time.Second
+	maxCaptureMessages         = 1_000
+	maxCaptureBytes            = 16 * 1024 * 1024
+	maxJetStreamProbeTimeout   = time.Second
+	maxJetStreamListItems      = 200
+	maxHistoryMessages         = 1_000
+	maxHistoryBytes            = 16 * 1024 * 1024
+	maxLivePendingMessages     = 1_000
+	maxLivePendingBytes        = 16 * 1024 * 1024
+	maxLiveMessagePayloadBytes = 1 * 1024 * 1024
+	maxLiveMessageHeaderBytes  = 64 * 1024
 )
 
 type jsonObject map[string]any
@@ -374,6 +376,10 @@ func (s *server) close() {
 }
 
 func (s *server) deliverSubscriptionMessage(subscriptionID string, msg *nats.Msg) {
+	if !liveMessageWithinLimits(msg) {
+		s.recordLiveMessageDrop(subscriptionID)
+		return
+	}
 	item, _, err := captureMessage(msg, true)
 	if err != nil {
 		s.emit("subscription_error", map[string]any{
@@ -395,8 +401,33 @@ func (s *server) deliverSubscriptionMessage(subscriptionID string, msg *nats.Msg
 		live.info.DroppedCount = dropped
 	}
 	sequence := live.seq
+	droppedCount := live.info.DroppedCount
 	s.mu.Unlock()
-	s.emit("subscription_message", map[string]any{"subscriptionId": subscriptionID, "sequence": sequence, "message": item})
+	s.emit("subscription_message", map[string]any{
+		"subscriptionId": subscriptionID,
+		"sequence":       sequence,
+		"droppedCount":   droppedCount,
+		"message":        item,
+	})
+}
+
+func (s *server) recordLiveMessageDrop(subscriptionID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	live := s.subscriptions[subscriptionID]
+	if live == nil {
+		return
+	}
+	live.seq++
+	live.info.DroppedCount++
+	// Keep the subscription active while surfacing the drop count to the UI.
+	s.emit("subscription_state", map[string]any{
+		"subscriptionId": subscriptionID,
+		"sequence":       live.seq,
+		"state":          "active",
+		"droppedCount":   live.info.DroppedCount,
+		"detail":         "Dropped NATS message that exceeds the live display limit",
+	})
 }
 
 func (s *server) nextSubscriptionSequence(subscriptionID string) uint64 {
@@ -1023,6 +1054,14 @@ func parseHistoryOptions(history jsonObject) (historyOptions, error) {
 
 func captureMessage(msg *nats.Msg, includeHeaders bool) (map[string]any, int, error) {
 	return natsMessageValue(msg.Subject, msg.Reply, msg.Data, msg.Header, time.Now(), includeHeaders)
+}
+
+func liveMessageWithinLimits(msg *nats.Msg) bool {
+	if len(msg.Data) > maxLiveMessagePayloadBytes {
+		return false
+	}
+	headerBytes, err := serializedHeaderBytes(msg.Header)
+	return err == nil && headerBytes <= maxLiveMessageHeaderBytes
 }
 
 func streamMessage(msg *nats.RawStreamMsg) (map[string]any, int, error) {

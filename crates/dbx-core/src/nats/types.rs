@@ -299,6 +299,8 @@ pub struct NatsSubscriptionMessageEvent {
     pub connection_id: String,
     pub subscription_id: String,
     pub sequence: u64,
+    #[serde(default)]
+    pub dropped_count: usize,
     pub message: NatsMessage,
 }
 
@@ -311,6 +313,8 @@ pub struct NatsSubscriptionStateEvent {
     #[serde(default)]
     pub sequence: u64,
     pub state: String,
+    #[serde(default)]
+    pub dropped_count: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }

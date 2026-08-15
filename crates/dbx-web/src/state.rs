@@ -75,6 +75,7 @@ pub struct NatsWebRuntime {
     pub service: Mutex<Option<NatsService>>,
     pub event_forwarder_started: AtomicBool,
     pub subscriptions: RwLock<HashMap<String, Arc<NatsWebSubscription>>>,
+    operations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
 
 impl Default for NatsWebRuntime {
@@ -83,7 +84,18 @@ impl Default for NatsWebRuntime {
             service: Mutex::new(None),
             event_forwarder_started: AtomicBool::new(false),
             subscriptions: RwLock::new(HashMap::new()),
+            operations: Mutex::new(HashMap::new()),
         }
+    }
+}
+
+impl NatsWebRuntime {
+    /// Serializes registration and Agent lifecycle changes for one DBX
+    /// connection. The Agent has its own lock, but the Web subscription map
+    /// must make the same transition atomically with the Agent call.
+    pub async fn connection_operation(&self, connection_id: &str) -> Arc<Mutex<()>> {
+        let mut operations = self.operations.lock().await;
+        operations.entry(connection_id.to_string()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
     }
 }
 
@@ -136,7 +148,9 @@ impl WebState {
 
 #[cfg(test)]
 mod tests {
-    use super::NatsWebSubscription;
+    use std::sync::Arc;
+
+    use super::{NatsWebRuntime, NatsWebSubscription};
 
     #[test]
     fn nats_subscription_replays_events_before_sse_connects() {
@@ -147,5 +161,16 @@ mod tests {
 
         subscription.send(r#"{"kind":"message","data":{"sequence":2}}"#.to_string());
         assert_eq!(receiver.try_recv().unwrap(), r#"{"kind":"message","data":{"sequence":2}}"#);
+    }
+
+    #[tokio::test]
+    async fn nats_connection_operations_are_shared_only_by_connection() {
+        let runtime = NatsWebRuntime::default();
+        let first = runtime.connection_operation("connection-1").await;
+        let same_connection = runtime.connection_operation("connection-1").await;
+        let other_connection = runtime.connection_operation("connection-2").await;
+
+        assert!(Arc::ptr_eq(&first, &same_connection));
+        assert!(!Arc::ptr_eq(&first, &other_connection));
     }
 }

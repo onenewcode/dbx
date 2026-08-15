@@ -169,6 +169,19 @@ func TestCaptureRejectsUnboundedLimitsBeforeConnecting(t *testing.T) {
 	}
 }
 
+func TestLiveMessagesAreBoundedBeforeTheyReachTheEventStream(t *testing.T) {
+	if !liveMessageWithinLimits(&nats.Msg{Data: make([]byte, maxLiveMessagePayloadBytes)}) {
+		t.Fatal("a live message at the payload limit must be accepted")
+	}
+	if liveMessageWithinLimits(&nats.Msg{Data: make([]byte, maxLiveMessagePayloadBytes+1)}) {
+		t.Fatal("an oversized live payload must be dropped before event encoding")
+	}
+	largeHeader := nats.Header{"X-Large": []string{strings.Repeat("a", maxLiveMessageHeaderBytes)}}
+	if liveMessageWithinLimits(&nats.Msg{Header: largeHeader}) {
+		t.Fatal("an oversized live header block must be dropped before event encoding")
+	}
+}
+
 func TestMalformedRPCReturnsError(t *testing.T) {
 	service := &server{}
 	response, shutdown := service.handle([]byte("not-json"))
