@@ -322,7 +322,9 @@ function runReceiveAction() {
 }
 
 async function stopAllFeeds() {
-  const live = feeds.value.filter((feed) => feed.kind === "live" && feed.state !== "stopped");
+  // Include feeds that are still starting even if a late state event already
+  // marked them stopped; their start request still needs cancellation.
+  const live = feeds.value.filter((feed) => feed.kind === "live");
   const pending = live.map((feed) => [feed, pendingStarts.get(feed.id)] as const);
   pending.forEach(([, start]) => {
     if (start) start.cancelled = true;
