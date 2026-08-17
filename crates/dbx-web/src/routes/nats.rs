@@ -115,6 +115,16 @@ async fn persistent_service(state: &Arc<WebState>) -> Result<NatsService, AppErr
     Ok(service.as_ref().expect("NATS service initialized").clone())
 }
 
+fn ensure_subscription_owner(
+    subscription: Option<&crate::state::NatsWebSubscription>,
+    connection_id: &str,
+) -> Result<(), AppError> {
+    if subscription.is_some_and(|subscription| subscription.connection_id != connection_id) {
+        return Err(AppError::bad_request("NATS subscriptionId belongs to a different connection"));
+    }
+    Ok(())
+}
+
 /// Tear down live Agent subscriptions before a Web connection is removed or
 /// disconnected. This keeps a detached UI/session from retaining broker work.
 pub(crate) async fn close_nats_connection(state: &Arc<WebState>, connection_id: &str) {
@@ -277,22 +287,39 @@ pub async fn start_subscription(
     ensure_event_forwarder(&state, &service);
     let request = req.subscription.validate().map_err(AppError::bad_request)?;
     let subscription_id = request.subscription_id.clone();
-    let inserted = {
+    let subscription = {
         let mut subscriptions = state.nats.subscriptions.write().await;
         if let Some(existing) = subscriptions.get(&subscription_id) {
             if existing.connection_id != req.connection_id {
                 return Err(AppError::bad_request("NATS subscriptionId is already in use by a different connection"));
             }
-            false
+            existing.clone()
         } else {
             let subscription = Arc::new(crate::state::NatsWebSubscription::new(req.connection_id.clone()));
             subscriptions.insert(subscription_id.clone(), subscription.clone());
-            true
+            subscription
         }
     };
+    let _lifecycle = subscription.lock_lifecycle().await;
+    // A stop or connection close may have removed the map entry while a
+    // duplicate start was waiting for the same subscription lifecycle lock.
+    // Reclaim an absent entry, but never replace a newer owner.
+    {
+        let mut subscriptions = state.nats.subscriptions.write().await;
+        if let Some(current) = subscriptions.get(&subscription_id) {
+            if !Arc::ptr_eq(current, &subscription) {
+                return Err(AppError::bad_request("NATS subscriptionId is already active"));
+            }
+        } else {
+            subscriptions.insert(subscription_id.clone(), subscription.clone());
+        }
+    }
     let info = service.start_subscription(&req.connection_id, &nats, request).await.map_err(AppError::from);
-    if info.is_err() && inserted {
-        state.nats.subscriptions.write().await.remove(&subscription_id);
+    if info.is_err() {
+        let mut subscriptions = state.nats.subscriptions.write().await;
+        if subscriptions.get(&subscription_id).is_some_and(|current| Arc::ptr_eq(current, &subscription)) {
+            subscriptions.remove(&subscription_id);
+        }
     }
     let info = info?;
     Ok(Json(info))
@@ -304,9 +331,22 @@ pub async fn stop_subscription(
     Json(req): Json<NatsSubscriptionStopRouteRequest>,
 ) -> Result<Json<bool>, AppError> {
     super::mcp_policy::ensure_scope(&state, &headers, &req.connection_id).await?;
-    let service = persistent_service(&state).await?;
-    let stopped = service.stop_subscription(&req.connection_id, &req.subscription_id).await.map_err(AppError::from)?;
-    state.nats.subscriptions.write().await.remove(&req.subscription_id);
+    let subscription = state.nats.subscriptions.read().await.get(&req.subscription_id).cloned();
+    ensure_subscription_owner(subscription.as_deref(), &req.connection_id)?;
+    let stopped = if let Some(subscription) = subscription {
+        let _lifecycle = subscription.lock_lifecycle().await;
+        let service = persistent_service(&state).await?;
+        let stopped =
+            service.stop_subscription(&req.connection_id, &req.subscription_id).await.map_err(AppError::from)?;
+        let mut subscriptions = state.nats.subscriptions.write().await;
+        if subscriptions.get(&req.subscription_id).is_some_and(|current| Arc::ptr_eq(current, &subscription)) {
+            subscriptions.remove(&req.subscription_id);
+        }
+        stopped
+    } else {
+        let service = persistent_service(&state).await?;
+        service.stop_subscription(&req.connection_id, &req.subscription_id).await.map_err(AppError::from)?
+    };
     Ok(Json(stopped))
 }
 
@@ -336,4 +376,19 @@ pub async fn subscription_events(
     super::mcp_policy::ensure_scope(&state, &headers, &subscription.connection_id).await?;
     let (replay, receiver) = subscription.subscribe();
     Ok(crate::sse::sse_from_replay_lossy_channel(replay, receiver))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_subscription_owner;
+    use crate::state::NatsWebSubscription;
+
+    #[test]
+    fn subscription_stop_requires_the_owning_connection() {
+        let subscription = NatsWebSubscription::new("connection-a".to_string());
+        assert!(ensure_subscription_owner(Some(&subscription), "connection-a").is_ok());
+        let error = ensure_subscription_owner(Some(&subscription), "connection-b").unwrap_err();
+        assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
+        assert!(ensure_subscription_owner(None, "connection-b").is_ok());
+    }
 }

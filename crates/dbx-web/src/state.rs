@@ -37,12 +37,17 @@ pub struct NatsWebSubscription {
     pub connection_id: String,
     events: broadcast::Sender<String>,
     history: std::sync::Mutex<(VecDeque<String>, usize)>,
+    lifecycle: Mutex<()>,
 }
 
 impl NatsWebSubscription {
     pub fn new(connection_id: String) -> Self {
         let (events, _) = broadcast::channel(512);
-        Self { connection_id, events, history: std::sync::Mutex::new((VecDeque::new(), 0)) }
+        Self { connection_id, events, history: std::sync::Mutex::new((VecDeque::new(), 0)), lifecycle: Mutex::new(()) }
+    }
+
+    pub async fn lock_lifecycle(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.lifecycle.lock().await
     }
 
     pub fn send(&self, event: String) {

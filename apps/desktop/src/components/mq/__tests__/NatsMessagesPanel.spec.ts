@@ -3,6 +3,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp, nextTick, type App } from "vue";
 
+const runtime = vi.hoisted(() => ({ tauri: true }));
+
 const backend = vi.hoisted(() => {
   const handlers: Record<string, { onMessage: (e: unknown) => void; onState: (e: unknown) => void; onError: (e: unknown) => void }> = {};
   const stopFns: Record<string, ReturnType<typeof vi.fn>> = {};
@@ -10,9 +12,12 @@ const backend = vi.hoisted(() => {
     handlers,
     stopFns,
     startReqs: [] as Array<{ subscriptionId: string; subject: string }>,
+    startDeferreds: [] as Array<{ promise: Promise<void> }>,
     stopSubscription: vi.fn().mockResolvedValue(true),
     startSubscription: vi.fn(async (_conn: string, req: { subscriptionId: string; subject: string }) => {
       backend.startReqs.push(req);
+      const deferred = backend.startDeferreds.shift();
+      if (deferred) await deferred.promise;
       return { subscriptionId: req.subscriptionId, subject: req.subject, state: "active", receivedCount: 0, droppedCount: 0 };
     }),
     listen: vi.fn(async (_conn: string, subId: string, h: (typeof handlers)[string]) => {
@@ -27,7 +32,7 @@ const backend = vi.hoisted(() => {
 vi.mock("vue-i18n", () => ({ useI18n: () => ({ t: (key: string) => key }) }));
 vi.mock("@/composables/useMqMutationGuard", () => ({ useMqMutationGuard: () => ({ confirmMqWrite: vi.fn().mockResolvedValue(true) }) }));
 vi.mock("@/composables/useToast", () => ({ useToast: () => ({ toast: vi.fn() }) }));
-vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => true }));
+vi.mock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => runtime.tauri }));
 vi.mock("@/lib/common/clipboard", () => ({ copyToClipboard: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("@/lib/backend/errorUtils", () => ({ formatError: (cause: unknown) => String(cause) }));
 vi.mock("@/lib/backend/api", () => ({
@@ -97,6 +102,16 @@ async function subscribeTo(host: HTMLElement, subject: string) {
   await flush();
 }
 
+async function beginSubscribe(host: HTMLElement, subject: string) {
+  const input = host.querySelector<HTMLInputElement>(".sub-subject");
+  if (!input) throw new Error("Subject filter input not found");
+  input.value = subject;
+  input.dispatchEvent(new Event("input"));
+  await nextTick();
+  host.querySelector<HTMLButtonElement>('[data-testid="nats-receive-action"]')?.click();
+  await nextTick();
+}
+
 function feedChips(host: HTMLElement) {
   return host.querySelectorAll<HTMLElement>('[data-testid="nats-feed-chip"]');
 }
@@ -106,8 +121,10 @@ afterEach(() => {
   app = undefined;
   document.body.innerHTML = "";
   backend.startReqs.length = 0;
+  backend.startDeferreds.length = 0;
   Object.keys(backend.handlers).forEach((k) => delete backend.handlers[k]);
   Object.keys(backend.stopFns).forEach((k) => delete backend.stopFns[k]);
+  runtime.tauri = true;
   vi.unstubAllGlobals();
   vi.clearAllMocks();
 });
@@ -188,5 +205,33 @@ describe("NatsMessagesPanel — multi-subscription explorer", () => {
 
     expect(host.querySelectorAll(".nats-msg-card")).toHaveLength(3);
     expect(host.querySelector(".feed-chip-count")?.textContent).toBe("3");
+  });
+
+  it("rolls back the server subscription when an HTTP event listener cannot be installed", async () => {
+    runtime.tauri = false;
+    backend.listen.mockRejectedValueOnce(new Error("event stream unavailable"));
+    const host = mount();
+
+    await subscribeTo(host, "orders.>");
+
+    const subscriptionId = backend.startReqs[0].subscriptionId;
+    expect(backend.stopSubscription).toHaveBeenCalledWith("conn-1", subscriptionId);
+    expect(feedChips(host)).toHaveLength(0);
+  });
+
+  it("stops a subscription that finishes starting after the panel unmounts", async () => {
+    let resolveStart!: () => void;
+    backend.startDeferreds.push({ promise: new Promise<void>((resolve) => (resolveStart = resolve)) });
+    const host = mount();
+
+    await beginSubscribe(host, "orders.>");
+    const subscriptionId = backend.startReqs[0].subscriptionId;
+    app?.unmount();
+    app = undefined;
+
+    resolveStart();
+    await flush();
+
+    expect(backend.stopSubscription).toHaveBeenCalledWith("conn-1", subscriptionId);
   });
 });

@@ -7,6 +7,7 @@ import type { NatsMessage } from "@/types/nats";
  */
 export interface NatsFeed {
   id: string;
+  connectionId: string;
   subject: string;
   kind: "live" | "capture";
   state: string;

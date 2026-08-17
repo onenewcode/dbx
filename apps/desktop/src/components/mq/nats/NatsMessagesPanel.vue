@@ -33,6 +33,16 @@ const error = ref("");
 
 const listeners = new Map<string, () => void>();
 
+interface PendingSubscriptionStart {
+  connectionId: string;
+  cancelled: boolean;
+  requested: boolean;
+  started: boolean;
+  stopPromise?: Promise<void>;
+}
+
+const pendingStarts = new Map<string, PendingSubscriptionStart>();
+
 interface PendingFeedMessages {
   messages: NatsMessage[];
   start: number;
@@ -134,27 +144,42 @@ function discardPendingMessages(feedId?: string) {
   messageFlushScheduled = false;
 }
 
-async function installFeedListener(feedId: string) {
-  const stop = await api.natsListenSubscription(props.connectionId, feedId, {
+async function installFeedListener(connectionId: string, feedId: string) {
+  const stop = await api.natsListenSubscription(connectionId, feedId, {
     onMessage(event: NatsSubscriptionMessageEvent) {
-      if (event.connectionId !== props.connectionId || event.subscriptionId !== feedId) return;
+      if (event.connectionId !== connectionId || event.subscriptionId !== feedId) return;
       const feed = feeds.value.find((item) => item.id === feedId);
       if (!feed) return;
       queueFeedMessage(feedId, event.message);
     },
     onState(event: NatsSubscriptionStateEvent) {
-      if (event.connectionId !== props.connectionId || event.subscriptionId !== feedId) return;
+      if (event.connectionId !== connectionId || event.subscriptionId !== feedId) return;
       const feed = feeds.value.find((item) => item.id === feedId);
       if (feed) feed.state = event.state;
     },
     onError(event: NatsSubscriptionErrorEvent) {
-      if (event.connectionId !== props.connectionId || event.subscriptionId !== feedId) return;
+      if (event.connectionId !== connectionId || event.subscriptionId !== feedId) return;
       error.value = event.message;
       const feed = feeds.value.find((item) => item.id === feedId);
       if (feed) feed.state = "error";
     },
   });
   listeners.set(feedId, stop);
+}
+
+function stopStartedSubscription(id: string, pending: PendingSubscriptionStart): Promise<void> {
+  if (!pending.requested) return Promise.resolve();
+  pending.stopPromise ??= api.natsStopSubscription(pending.connectionId, id).then(() => undefined);
+  return pending.stopPromise;
+}
+
+async function rollbackStartedSubscription(id: string, pending: PendingSubscriptionStart): Promise<unknown> {
+  try {
+    await stopStartedSubscription(id, pending);
+    return undefined;
+  } catch (e) {
+    return e;
+  }
 }
 
 function stopListener(feedId: string) {
@@ -173,28 +198,53 @@ async function subscribe() {
   }
   busy.value = true;
   error.value = "";
+  const connectionId = props.connectionId;
   const id = nextSubscriptionId();
-  const feed: NatsFeed = { id, subject: value, kind: "live", state: "starting", messages: [], receivedCount: 0, droppedCount: 0 };
+  const feed: NatsFeed = { id, connectionId, subject: value, kind: "live", state: "starting", messages: [], receivedCount: 0, droppedCount: 0 };
+  const pending: PendingSubscriptionStart = { connectionId, cancelled: false, requested: false, started: false };
+  pendingStarts.set(id, pending);
   feeds.value = [...feeds.value, feed];
   selectFeed(id);
   try {
-    if (isTauriRuntime()) await installFeedListener(id);
-    const started = await api.natsStartSubscription(props.connectionId, { subscriptionId: id, subject: value });
-    const current = feeds.value.find((item) => item.id === id);
-    if (current) {
-      current.state = started.state;
-      current.receivedCount = Math.max(started.receivedCount, current.receivedCount);
-      current.droppedCount = Math.max(started.droppedCount, current.droppedCount);
+    if (isTauriRuntime()) {
+      await installFeedListener(connectionId, id);
+      if (pending.cancelled) {
+        stopListener(id);
+        return;
+      }
     }
-    if (!isTauriRuntime()) await installFeedListener(id);
+    pending.requested = true;
+    const started = await api.natsStartSubscription(connectionId, { subscriptionId: id, subject: value });
+    pending.started = true;
+    if (pending.cancelled) {
+      await stopStartedSubscription(id, pending);
+      return;
+    }
+    const current = feeds.value.find((item) => item.id === id);
+    if (!current) {
+      pending.cancelled = true;
+      await stopStartedSubscription(id, pending);
+      return;
+    }
+    current.state = started.state;
+    current.receivedCount = Math.max(started.receivedCount, current.receivedCount);
+    current.droppedCount = Math.max(started.droppedCount, current.droppedCount);
+    if (!isTauriRuntime()) await installFeedListener(connectionId, id);
+    if (pending.cancelled) {
+      stopListener(id);
+      await stopStartedSubscription(id, pending);
+      return;
+    }
     subject.value = "";
   } catch (e) {
     stopListener(id);
     discardPendingMessages(id);
     feeds.value = feeds.value.filter((item) => item.id !== id);
     if (activeFeedId.value === id) activeFeedId.value = feeds.value[feeds.value.length - 1]?.id;
-    error.value = formatError(e);
+    const rollbackError = await rollbackStartedSubscription(id, pending);
+    error.value = formatError(rollbackError ?? e);
   } finally {
+    pendingStarts.delete(id);
     busy.value = false;
   }
 }
@@ -213,6 +263,7 @@ async function capture() {
     });
     const feed: NatsFeed = {
       id: `capture-${nextSubscriptionId()}`,
+      connectionId: props.connectionId,
       subject: value,
       kind: "capture",
       state: "stopped",
@@ -234,18 +285,26 @@ async function capture() {
 async function removeFeed(id: string) {
   const feed = feeds.value.find((item) => item.id === id);
   if (!feed) return;
+  const pending = pendingStarts.get(id);
+  if (pending) pending.cancelled = true;
   stopListener(id);
   discardPendingMessages(id);
-  if (feed.kind === "live" && feed.state !== "stopped") {
-    try {
-      await api.natsStopSubscription(props.connectionId, id);
-    } catch (e) {
-      error.value = formatError(e);
-    }
-  }
   feeds.value = feeds.value.filter((item) => item.id !== id);
   if (activeFeedId.value === id) {
     activeFeedId.value = feeds.value[feeds.value.length - 1]?.id;
+  }
+  if (feed.kind === "live" && pending?.requested) {
+    try {
+      await stopStartedSubscription(id, pending);
+    } catch (e) {
+      error.value = formatError(e);
+    }
+  } else if (feed.kind === "live" && !pending && feed.state !== "stopped") {
+    try {
+      await api.natsStopSubscription(feed.connectionId, id);
+    } catch (e) {
+      error.value = formatError(e);
+    }
   }
 }
 
@@ -264,18 +323,22 @@ function runReceiveAction() {
 
 async function stopAllFeeds() {
   const live = feeds.value.filter((feed) => feed.kind === "live" && feed.state !== "stopped");
+  const pending = live.map((feed) => [feed, pendingStarts.get(feed.id)] as const);
+  pending.forEach(([, start]) => {
+    if (start) start.cancelled = true;
+  });
   listeners.forEach((stop) => stop());
   listeners.clear();
   discardPendingMessages();
+  feeds.value = [];
+  activeFeedId.value = undefined;
   await Promise.all(
-    live.map((feed) =>
-      api.natsStopSubscription(props.connectionId, feed.id).catch(() => {
+    pending.map(([feed, start]) =>
+      (start?.requested ? stopStartedSubscription(feed.id, start) : start ? Promise.resolve() : api.natsStopSubscription(feed.connectionId, feed.id)).catch(() => {
         /* best-effort teardown */
       }),
     ),
   );
-  feeds.value = [];
-  activeFeedId.value = undefined;
 }
 
 watch(
