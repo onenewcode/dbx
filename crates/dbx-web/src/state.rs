@@ -3,7 +3,7 @@ use dbx_core::nats::NatsService;
 use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::{broadcast, watch, Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -38,12 +38,27 @@ pub struct NatsWebSubscription {
     events: broadcast::Sender<String>,
     history: std::sync::Mutex<(VecDeque<String>, usize)>,
     lifecycle: Mutex<()>,
+    runtime_id: AtomicU64,
 }
 
 impl NatsWebSubscription {
     pub fn new(connection_id: String) -> Self {
         let (events, _) = broadcast::channel(512);
-        Self { connection_id, events, history: std::sync::Mutex::new((VecDeque::new(), 0)), lifecycle: Mutex::new(()) }
+        Self {
+            connection_id,
+            events,
+            history: std::sync::Mutex::new((VecDeque::new(), 0)),
+            lifecycle: Mutex::new(()),
+            runtime_id: AtomicU64::new(0),
+        }
+    }
+
+    pub fn set_runtime_id(&self, runtime_id: u64) {
+        self.runtime_id.store(runtime_id, Ordering::Release);
+    }
+
+    pub fn matches_runtime_id(&self, runtime_id: u64) -> bool {
+        runtime_id != 0 && self.runtime_id.load(Ordering::Acquire) == runtime_id
     }
 
     pub async fn lock_lifecycle(&self) -> tokio::sync::MutexGuard<'_, ()> {

@@ -18,7 +18,7 @@ const backend = vi.hoisted(() => {
       backend.startReqs.push(req);
       const deferred = backend.startDeferreds.shift();
       if (deferred) await deferred.promise;
-      return { subscriptionId: req.subscriptionId, subject: req.subject, state: "active", receivedCount: 0, droppedCount: 0 };
+      return { subscriptionId: req.subscriptionId, subject: req.subject, state: "active", receivedCount: 0, droppedCount: 0, runtimeId: 1 };
     }),
     listen: vi.fn(async (_conn: string, subId: string, h: (typeof handlers)[string]) => {
       handlers[subId] = h;
@@ -147,6 +147,7 @@ describe("NatsMessagesPanel — multi-subscription explorer", () => {
       connectionId: "conn-1",
       subscriptionId: first.subscriptionId,
       sequence: 1,
+      runtimeId: 1,
       message: { subject: "orders.created", headers: [], payloadBase64: "aGk=", payloadText: "hi", receivedAtMs: 0, sizeBytes: 2 },
     });
     await flush();
@@ -194,6 +195,7 @@ describe("NatsMessagesPanel — multi-subscription explorer", () => {
         connectionId: "conn-1",
         subscriptionId,
         sequence,
+        runtimeId: 1,
         message: { subject: "orders.created", headers: [], payloadBase64: "aGk=", payloadText: "hi", receivedAtMs: sequence, sizeBytes: 2 },
       });
     }
@@ -205,6 +207,23 @@ describe("NatsMessagesPanel — multi-subscription explorer", () => {
 
     expect(host.querySelectorAll(".nats-msg-card")).toHaveLength(3);
     expect(host.querySelector(".feed-chip-count")?.textContent).toBe("3");
+  });
+
+  it("ignores events from a different Agent runtime", async () => {
+    const host = mount();
+    await subscribeTo(host, "orders.>");
+    const subscriptionId = backend.startReqs[0].subscriptionId;
+
+    backend.handlers[subscriptionId].onMessage({
+      connectionId: "conn-1",
+      subscriptionId,
+      sequence: 1,
+      runtimeId: 2,
+      message: { subject: "orders.created", headers: [], payloadBase64: "b2xk", payloadText: "old", receivedAtMs: 0, sizeBytes: 3 },
+    });
+    await flush();
+
+    expect(host.querySelectorAll(".nats-msg-card")).toHaveLength(0);
   });
 
   it("rolls back the server subscription when an HTTP event listener cannot be installed", async () => {

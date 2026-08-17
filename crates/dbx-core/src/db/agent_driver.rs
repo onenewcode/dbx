@@ -183,6 +183,19 @@ impl AgentEventClient {
         fail_pending_requests(&self.pending, "Agent runtime terminated".to_string());
     }
 
+    pub async fn kill_and_wait(&self) {
+        self.failed.store(true, Ordering::Release);
+        fail_pending_requests(&self.pending, "Agent runtime terminated".to_string());
+        let child = self.child.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Ok(mut child) = child.lock() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        })
+        .await;
+    }
+
     pub fn stderr_tail(&self) -> String {
         stderr_tail_snapshot(&self.stderr_tail).snapshot()
     }

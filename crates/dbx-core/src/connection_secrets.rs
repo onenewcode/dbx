@@ -787,7 +787,11 @@ fn is_nats_config(value: Option<&serde_json::Value>) -> bool {
 
 fn nats_config_object(value: Option<&serde_json::Value>) -> Option<&serde_json::Map<String, serde_json::Value>> {
     let config = value?.as_object()?;
-    config.get("systemKind").and_then(serde_json::Value::as_str).filter(|kind| kind.eq_ignore_ascii_case("nats"))?;
+    config
+        .get("systemKind")
+        .or_else(|| config.get("system_kind"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|kind| kind.eq_ignore_ascii_case("nats"))?;
     Some(config)
 }
 
@@ -797,6 +801,7 @@ fn nats_config_object_mut(
     let config = value?.as_object_mut()?;
     let is_nats = config
         .get("systemKind")
+        .or_else(|| config.get("system_kind"))
         .and_then(serde_json::Value::as_str)
         .is_some_and(|kind| kind.eq_ignore_ascii_case("nats"));
     is_nats.then_some(config)

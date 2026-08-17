@@ -27,7 +27,8 @@ impl NatsConnectionConfig {
         }
         let raw = connection.external_config.as_ref().ok_or("NATS connection is missing external_config")?;
         let object = raw.as_object().ok_or("NATS external_config must be an object")?;
-        let kind = object.get("systemKind").and_then(Value::as_str).unwrap_or_default();
+        let kind =
+            object.get("systemKind").or_else(|| object.get("system_kind")).and_then(Value::as_str).unwrap_or_default();
         if !kind.eq_ignore_ascii_case("nats") {
             return Err("Message queue connection is not configured as NATS (systemKind=nats)".to_string());
         }
@@ -190,6 +191,19 @@ mod tests {
         let config = NatsConnectionConfig::from_connection(&connection).unwrap();
         assert_eq!(config.server_url, "nats://localhost:4222");
         assert_eq!(config.username.as_deref(), Some("alice"));
+    }
+
+    #[test]
+    fn accepts_legacy_snake_case_system_kind() {
+        let connection: ConnectionConfig = serde_json::from_value(json!({
+            "id":"c1","name":"nats","db_type":"mq","host":"localhost","port":4222,
+            "username":"","password":"","ssl":false,
+            "external_config":{"system_kind":"nats","server_url":"nats://localhost:4222"}
+        }))
+        .unwrap();
+
+        assert!(NatsConnectionConfig::is_nats_connection(&connection));
+        assert!(NatsConnectionConfig::from_connection(&connection).is_ok());
     }
 
     #[test]

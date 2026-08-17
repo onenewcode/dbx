@@ -129,6 +129,7 @@ export interface NatsSubscriptionInfo {
   state: string;
   receivedCount: number;
   droppedCount: number;
+  runtimeId: number;
 }
 
 export interface NatsSubscriptionMessageEvent {
@@ -136,6 +137,7 @@ export interface NatsSubscriptionMessageEvent {
   subscriptionId: string;
   sequence: number;
   message: NatsMessage;
+  runtimeId: number;
 }
 
 export interface NatsSubscriptionStateEvent {
@@ -144,6 +146,7 @@ export interface NatsSubscriptionStateEvent {
   sequence: number;
   state: string;
   detail?: string;
+  runtimeId: number;
 }
 
 export interface NatsSubscriptionErrorEvent {
@@ -151,6 +154,7 @@ export interface NatsSubscriptionErrorEvent {
   subscriptionId: string;
   sequence: number;
   message: string;
+  runtimeId: number;
 }
 
 export interface NatsSubscriptionEventHandlers {

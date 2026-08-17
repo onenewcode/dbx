@@ -158,30 +158,39 @@ fn ensure_event_forwarder(state: &Arc<WebState>, service: &NatsService) {
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
             };
-            let (subscription_id, payload) = web_subscription_event(event);
+            let (subscription_id, runtime_id, payload) = web_subscription_event(event);
             let sender = state.nats.subscriptions.read().await.get(&subscription_id).cloned();
-            if let Some(subscription) = sender {
+            if let Some(subscription) = sender.filter(|subscription| subscription.matches_runtime_id(runtime_id)) {
                 subscription.send(payload);
             }
         }
     });
 }
 
-fn web_subscription_event(event: NatsSubscriptionEvent) -> (String, String) {
+fn web_subscription_event(event: NatsSubscriptionEvent) -> (String, u64, String) {
     match event {
         NatsSubscriptionEvent::Message(message) => {
-            subscription_event_json("message", message.subscription_id.clone(), message)
+            subscription_event_json("message", message.subscription_id.clone(), message.runtime_id, message)
         }
-        NatsSubscriptionEvent::State(state) => subscription_event_json("state", state.subscription_id.clone(), state),
-        NatsSubscriptionEvent::Error(error) => subscription_event_json("error", error.subscription_id.clone(), error),
+        NatsSubscriptionEvent::State(state) => {
+            subscription_event_json("state", state.subscription_id.clone(), state.runtime_id, state)
+        }
+        NatsSubscriptionEvent::Error(error) => {
+            subscription_event_json("error", error.subscription_id.clone(), error.runtime_id, error)
+        }
     }
 }
 
-fn subscription_event_json<T: serde::Serialize>(kind: &str, subscription_id: String, event: T) -> (String, String) {
+fn subscription_event_json<T: serde::Serialize>(
+    kind: &str,
+    subscription_id: String,
+    runtime_id: u64,
+    event: T,
+) -> (String, u64, String) {
     let payload = serde_json::to_string(&json!({ "kind": kind, "data": event })).unwrap_or_else(|_| {
         r#"{"kind":"error","data":{"message":"Unable to serialize NATS subscription event"}}"#.to_string()
     });
-    (subscription_id, payload)
+    (subscription_id, runtime_id, payload)
 }
 
 pub async fn test_connection(
@@ -334,6 +343,7 @@ pub async fn start_subscription(
         }
     }
     let info = info?;
+    subscription.set_runtime_id(info.runtime_id);
     Ok(Json(info))
 }
 
@@ -404,5 +414,16 @@ mod tests {
         let error = ensure_subscription_owner(Some(&subscription), "connection-b").unwrap_err();
         assert_eq!(error.status, axum::http::StatusCode::BAD_REQUEST);
         assert!(ensure_subscription_owner(None, "connection-b").is_ok());
+    }
+
+    #[test]
+    fn subscription_events_require_the_current_runtime() {
+        let subscription = NatsWebSubscription::new("connection-a".to_string());
+        assert!(!subscription.matches_runtime_id(1));
+
+        subscription.set_runtime_id(7);
+        assert!(subscription.matches_runtime_id(7));
+        assert!(!subscription.matches_runtime_id(8));
+        assert!(!subscription.matches_runtime_id(0));
     }
 }

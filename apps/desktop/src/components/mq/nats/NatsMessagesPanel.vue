@@ -150,19 +150,20 @@ async function installFeedListener(connectionId: string, feedId: string) {
     onMessage(event: NatsSubscriptionMessageEvent) {
       if (event.connectionId !== connectionId || event.subscriptionId !== feedId) return;
       const feed = feeds.value.find((item) => item.id === feedId);
-      if (!feed) return;
+      if (!feed || feed.runtimeId === undefined || event.runtimeId !== feed.runtimeId) return;
       queueFeedMessage(feedId, event.message);
     },
     onState(event: NatsSubscriptionStateEvent) {
       if (event.connectionId !== connectionId || event.subscriptionId !== feedId) return;
       const feed = feeds.value.find((item) => item.id === feedId);
-      if (feed) feed.state = event.state;
+      if (feed && feed.runtimeId !== undefined && event.runtimeId === feed.runtimeId) feed.state = event.state;
     },
     onError(event: NatsSubscriptionErrorEvent) {
       if (event.connectionId !== connectionId || event.subscriptionId !== feedId) return;
-      error.value = event.message;
       const feed = feeds.value.find((item) => item.id === feedId);
-      if (feed) feed.state = "error";
+      if (!feed || feed.runtimeId === undefined || event.runtimeId !== feed.runtimeId) return;
+      error.value = event.message;
+      feed.state = "error";
     },
   });
   listeners.set(feedId, stop);
@@ -239,6 +240,7 @@ async function subscribe() {
       return;
     }
     current.state = started.state;
+    current.runtimeId = started.runtimeId;
     current.receivedCount = Math.max(started.receivedCount, current.receivedCount);
     current.droppedCount = Math.max(started.droppedCount, current.droppedCount);
     if (!isTauriRuntime()) await installFeedListener(connectionId, id);

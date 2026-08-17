@@ -302,6 +302,15 @@ func TestJetStreamProbeUsesRequestBound(t *testing.T) {
 	}
 }
 
+func TestTimeoutsSaturateAtMaximumDuration(t *testing.T) {
+	if timeout := requestTimeout(jsonObject{"requestTimeoutMs": int64(math.MaxInt64)}); timeout != time.Duration(math.MaxInt64) {
+		t.Fatalf("request timeout should saturate at max duration, got %s", timeout)
+	}
+	if timeout := connectTimeout(jsonObject{"connectTimeoutMs": int64(math.MaxInt64)}); timeout != time.Duration(math.MaxInt64) {
+		t.Fatalf("connect timeout should saturate at max duration, got %s", timeout)
+	}
+}
+
 func TestRedactErrorDoesNotExposeCredentials(t *testing.T) {
 	params := jsonObject{"connection": jsonObject{
 		"serverUrl": "nats://alice:hunter2@localhost:4222",

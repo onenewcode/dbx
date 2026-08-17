@@ -43,6 +43,7 @@ const (
 	maxHistoryBytes          = 16 * 1024 * 1024
 	maxLivePendingMessages   = 1_000
 	maxLivePendingBytes      = 16 * 1024 * 1024
+	maxDurationMillis        = int64(math.MaxInt64 / int64(time.Millisecond))
 )
 
 type jsonObject map[string]any
@@ -1360,7 +1361,7 @@ func requestTimeout(config jsonObject) time.Duration {
 	if !ok || ms <= 0 {
 		ms = 30_000
 	}
-	return time.Duration(ms) * time.Millisecond
+	return durationFromMillis(ms, 30*time.Second)
 }
 
 func connectTimeout(config jsonObject) time.Duration {
@@ -1368,7 +1369,17 @@ func connectTimeout(config jsonObject) time.Duration {
 	if !ok || ms <= 0 {
 		ms = 15_000
 	}
-	return time.Duration(ms) * time.Millisecond
+	return durationFromMillis(ms, 15*time.Second)
+}
+
+func durationFromMillis(milliseconds int64, fallback time.Duration) time.Duration {
+	if milliseconds <= 0 {
+		return fallback
+	}
+	if milliseconds > maxDurationMillis {
+		return time.Duration(math.MaxInt64)
+	}
+	return time.Duration(milliseconds) * time.Millisecond
 }
 
 func jetStreamProbeTimeout(config jsonObject) time.Duration {

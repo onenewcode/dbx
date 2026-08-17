@@ -1,7 +1,10 @@
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
     time::Duration,
 };
 
@@ -32,11 +35,13 @@ struct NatsLiveRegistry {
     connection_operations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     connection_generations: Mutex<HashMap<String, u64>>,
     cancelled_subscriptions: Mutex<HashSet<(String, String)>>,
+    next_runtime_id: AtomicU64,
     events: broadcast::Sender<NatsSubscriptionEvent>,
 }
 
 struct NatsLiveRuntime {
     client: Arc<AgentEventClient>,
+    id: u64,
 }
 
 #[derive(serde::Deserialize)]
@@ -58,6 +63,7 @@ impl NatsService {
                 connection_operations: Mutex::new(HashMap::new()),
                 connection_generations: Mutex::new(HashMap::new()),
                 cancelled_subscriptions: Mutex::new(HashSet::new()),
+                next_runtime_id: AtomicU64::new(0),
                 events,
             }),
         }
@@ -238,14 +244,16 @@ impl NatsService {
             return Err("NATS subscription start was cancelled".to_string());
         }
         let runtime = self.live_runtime(connection_id).await?;
-        runtime
+        let mut info = runtime
             .client
             .call(
                 "start_subscription",
                 json!({ "connection": config.agent_value(), "subscription": request }),
                 Some(self.rpc_timeout(config)),
             )
-            .await
+            .await?;
+        info.runtime_id = runtime.id;
+        Ok(info)
     }
 
     pub async fn stop_subscription(&self, connection_id: &str, subscription_id: &str) -> Result<bool, String> {
@@ -289,7 +297,7 @@ impl NatsService {
                     }
                 };
                 if let Some(runtime) = removed {
-                    runtime.client.kill();
+                    runtime.client.kill_and_wait().await;
                 }
             }
         }
@@ -303,7 +311,12 @@ impl NatsService {
         let Some(runtime) = runtime else {
             return Ok(Vec::new());
         };
-        runtime.client.call("list_subscriptions", json!({}), Some(Duration::from_secs(5))).await
+        let mut subscriptions: Vec<NatsSubscriptionInfo> =
+            runtime.client.call("list_subscriptions", json!({}), Some(Duration::from_secs(5))).await?;
+        for subscription in &mut subscriptions {
+            subscription.runtime_id = runtime.id;
+        }
+        Ok(subscriptions)
     }
 
     /// Stop and remove the persistent Agent for a DBX connection. This is used
@@ -315,7 +328,7 @@ impl NatsService {
         self.advance_connection_generation(connection_id).await;
         self.live.cancelled_subscriptions.lock().await.retain(|(owner, _)| owner != connection_id);
         if let Some(runtime) = self.live.runtimes.lock().await.remove(connection_id) {
-            runtime.client.kill();
+            runtime.client.kill_and_wait().await;
         }
     }
 
@@ -336,7 +349,8 @@ impl NatsService {
     }
 
     fn rpc_timeout(&self, config: &NatsConnectionConfig) -> Duration {
-        Duration::from_secs(config.request_timeout_secs.max(config.connect_timeout_secs).max(1))
+        let seconds = config.request_timeout_secs.max(config.connect_timeout_secs).max(1);
+        Duration::from_secs(seconds.min(Duration::MAX.as_secs()))
     }
 
     async fn connection_operation(&self, connection_id: &str) -> Arc<Mutex<()>> {
@@ -380,28 +394,42 @@ impl NatsService {
         if handshake.protocol_version < 2
             || !handshake.capabilities.iter().any(|capability| capability == "nats_subscription_events")
         {
-            client.kill();
+            client.kill_and_wait().await;
             return Err("NATS Agent does not support persistent subscription events".to_string());
         }
-        let runtime = Arc::new(NatsLiveRuntime { client: client.clone() });
-        self.start_event_router(connection_id.to_string(), client);
+        let runtime = Arc::new(NatsLiveRuntime {
+            client,
+            id: self.live.next_runtime_id.fetch_add(1, Ordering::Relaxed).wrapping_add(1),
+        });
         let mut runtimes = self.live.runtimes.lock().await;
-        if let Some(existing) = runtimes.get(connection_id).filter(|runtime| !runtime.client.is_failed()) {
-            runtime.client.kill();
+        let existing = runtimes.get(connection_id).filter(|runtime| !runtime.client.is_failed()).cloned();
+        if let Some(existing) = existing {
+            drop(runtimes);
+            runtime.client.kill_and_wait().await;
             return Ok(existing.clone());
         }
-        runtimes.insert(connection_id.to_string(), runtime.clone());
+        let previous = runtimes.insert(connection_id.to_string(), runtime.clone());
+        drop(runtimes);
+        if let Some(previous) = previous {
+            previous.client.kill_and_wait().await;
+        }
+        self.start_event_router(connection_id.to_string(), runtime.clone());
         Ok(runtime)
     }
 
-    fn start_event_router(&self, connection_id: String, client: Arc<AgentEventClient>) {
-        let mut notifications = client.subscribe();
+    fn start_event_router(&self, connection_id: String, runtime: Arc<NatsLiveRuntime>) {
+        let mut notifications = runtime.client.subscribe();
+        let live = self.live.clone();
         let events = self.live.events.clone();
         tokio::spawn(async move {
             loop {
                 match notifications.recv().await {
                     Ok(notification) => {
-                        if let Some(event) = subscription_event(&connection_id, notification) {
+                        let current = live.runtimes.lock().await.get(&connection_id).cloned();
+                        if !current.is_some_and(|current| Arc::ptr_eq(&current, &runtime)) {
+                            return;
+                        }
+                        if let Some(event) = subscription_event(&connection_id, runtime.id, notification) {
                             let _ = events.send(event);
                         }
                     }
@@ -413,23 +441,30 @@ impl NatsService {
     }
 }
 
-fn subscription_event(connection_id: &str, notification: AgentNotification) -> Option<NatsSubscriptionEvent> {
+fn subscription_event(
+    connection_id: &str,
+    runtime_id: u64,
+    notification: AgentNotification,
+) -> Option<NatsSubscriptionEvent> {
     match notification.method.as_str() {
         "subscription_message" => {
             serde_json::from_value::<NatsSubscriptionMessageEvent>(notification.params).ok().map(|mut event| {
                 event.connection_id = connection_id.to_string();
+                event.runtime_id = runtime_id;
                 NatsSubscriptionEvent::Message(event)
             })
         }
         "subscription_state" => {
             serde_json::from_value::<NatsSubscriptionStateEvent>(notification.params).ok().map(|mut event| {
                 event.connection_id = connection_id.to_string();
+                event.runtime_id = runtime_id;
                 NatsSubscriptionEvent::State(event)
             })
         }
         "subscription_error" => {
             serde_json::from_value::<NatsSubscriptionErrorEvent>(notification.params).ok().map(|mut event| {
                 event.connection_id = connection_id.to_string();
+                event.runtime_id = runtime_id;
                 NatsSubscriptionEvent::Error(event)
             })
         }
@@ -445,6 +480,7 @@ mod tests {
     fn routes_subscription_events_with_the_owning_connection() {
         let event = subscription_event(
             "nats-primary",
+            7,
             AgentNotification {
                 method: "subscription_state".to_string(),
                 params: json!({ "subscriptionId": "sub-1", "sequence": 3, "state": "active" }),
@@ -456,6 +492,7 @@ mod tests {
         assert_eq!(state.connection_id, "nats-primary");
         assert_eq!(state.subscription_id, "sub-1");
         assert_eq!(state.sequence, 3);
+        assert_eq!(state.runtime_id, 7);
     }
 
     #[tokio::test]

@@ -290,6 +290,11 @@ pub struct NatsSubscriptionInfo {
     pub received_count: usize,
     #[serde(default)]
     pub dropped_count: usize,
+    /// Identifies the persistent Agent runtime that owns this subscription.
+    /// It prevents buffered events from an older runtime being applied after
+    /// a connection is closed and started again.
+    #[serde(default)]
+    pub runtime_id: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -300,6 +305,8 @@ pub struct NatsSubscriptionMessageEvent {
     pub subscription_id: String,
     pub sequence: u64,
     pub message: NatsMessage,
+    #[serde(default)]
+    pub runtime_id: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -313,6 +320,8 @@ pub struct NatsSubscriptionStateEvent {
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    #[serde(default)]
+    pub runtime_id: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -324,6 +333,8 @@ pub struct NatsSubscriptionErrorEvent {
     #[serde(default)]
     pub sequence: u64,
     pub message: String,
+    #[serde(default)]
+    pub runtime_id: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -14,6 +14,7 @@ export interface NatsFeed {
   messages: NatsMessage[];
   receivedCount: number;
   droppedCount: number;
+  runtimeId?: number;
   stopReason?: string;
 }
 
