@@ -83,9 +83,9 @@ pub struct NatsStreamInfo {
     #[serde(default)]
     pub bytes: u64,
     #[serde(default)]
-    pub first_sequence: u64,
+    pub first_sequence: String,
     #[serde(default)]
-    pub last_sequence: u64,
+    pub last_sequence: String,
     #[serde(default)]
     pub consumers: usize,
 }
@@ -111,13 +111,13 @@ pub struct NatsConsumerInfo {
     #[serde(default)]
     pub ack_policy: String,
     #[serde(default)]
-    pub delivered_consumer_sequence: u64,
+    pub delivered_consumer_sequence: String,
     #[serde(default)]
-    pub delivered_stream_sequence: u64,
+    pub delivered_stream_sequence: String,
     #[serde(default)]
-    pub ack_floor_consumer_sequence: u64,
+    pub ack_floor_consumer_sequence: String,
     #[serde(default)]
-    pub ack_floor_stream_sequence: u64,
+    pub ack_floor_stream_sequence: String,
     #[serde(default)]
     pub pending: u64,
     #[serde(default)]
@@ -141,7 +141,7 @@ pub struct NatsConsumerList {
 pub struct NatsHistoryRequest {
     pub stream: String,
     #[serde(default)]
-    pub start_sequence: Option<u64>,
+    pub start_sequence: Option<String>,
     #[serde(default = "default_history_messages")]
     pub max_messages: usize,
     #[serde(default = "default_history_bytes")]
@@ -159,8 +159,14 @@ fn default_history_bytes() -> usize {
 impl NatsHistoryRequest {
     pub fn bounded(mut self) -> Result<Self, String> {
         self.stream = validate_jetstream_name(&self.stream, "stream")?;
-        if self.start_sequence == Some(0) {
-            return Err("NATS JetStream history startSequence must be positive when provided".to_string());
+        if let Some(sequence) = &mut self.start_sequence {
+            let parsed = sequence.parse::<u64>().map_err(|_| {
+                "NATS JetStream history startSequence must be a positive decimal string when provided".to_string()
+            })?;
+            if parsed == 0 {
+                return Err("NATS JetStream history startSequence must be positive when provided".to_string());
+            }
+            *sequence = parsed.to_string();
         }
         if self.max_messages == 0 || self.max_messages > MAX_JETSTREAM_HISTORY_MESSAGES {
             return Err("NATS JetStream history maxMessages must be between 1 and 1000".to_string());
@@ -184,7 +190,7 @@ pub struct NatsHistoryResult {
     pub skipped_count: usize,
     pub truncated: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub next_sequence: Option<u64>,
+    pub next_sequence: Option<String>,
     /// Direct stream reads never acknowledge or mutate a business consumer.
     pub ack_mode: String,
     pub consumer_kind: String,
@@ -548,7 +554,7 @@ mod tests {
     fn jetstream_history_bounds_and_names_are_validated() {
         let request = NatsHistoryRequest {
             stream: " ORDERS ".to_string(),
-            start_sequence: Some(5),
+            start_sequence: Some("5".to_string()),
             max_messages: 100,
             max_bytes: 1_024,
         }
@@ -556,7 +562,14 @@ mod tests {
         .unwrap();
         assert_eq!(request.stream, "ORDERS");
         assert!(NatsHistoryRequest { stream: "orders.stream".to_string(), ..request.clone() }.bounded().is_err());
-        assert!(NatsHistoryRequest { start_sequence: Some(0), ..request.clone() }.bounded().is_err());
+        assert!(NatsHistoryRequest { start_sequence: Some("0".to_string()), ..request.clone() }.bounded().is_err());
+        assert!(NatsHistoryRequest { start_sequence: Some("not-a-sequence".to_string()), ..request.clone() }
+            .bounded()
+            .is_err());
+        let max_sequence = u64::MAX.to_string();
+        let normalized =
+            NatsHistoryRequest { start_sequence: Some(max_sequence.clone()), ..request.clone() }.bounded().unwrap();
+        assert_eq!(normalized.start_sequence.as_deref(), Some(max_sequence.as_str()));
         assert!(NatsHistoryRequest { max_messages: 1_001, ..request }.bounded().is_err());
     }
 }

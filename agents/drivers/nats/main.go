@@ -650,7 +650,7 @@ func (s *server) fetchHistory(params jsonObject) (any, bool, error) {
 		}
 		if messageBytes > options.maxBytes-bytesUsed {
 			truncated = true
-			nextSequence = sequence
+			nextSequence = strconv.FormatUint(sequence, 10)
 			break
 		}
 		messages = append(messages, item)
@@ -658,7 +658,7 @@ func (s *server) fetchHistory(params jsonObject) (any, bool, error) {
 		sequence++
 		if len(messages) == options.maxMessages && sequence <= stream.State.LastSeq {
 			truncated = true
-			nextSequence = sequence
+			nextSequence = strconv.FormatUint(sequence, 10)
 			break
 		}
 	}
@@ -707,8 +707,8 @@ func streamInfoValue(info *nats.StreamInfo) map[string]any {
 		"retention":     strings.ToLower(info.Config.Retention.String()),
 		"messages":      info.State.Msgs,
 		"bytes":         info.State.Bytes,
-		"firstSequence": info.State.FirstSeq,
-		"lastSequence":  info.State.LastSeq,
+		"firstSequence": strconv.FormatUint(info.State.FirstSeq, 10),
+		"lastSequence":  strconv.FormatUint(info.State.LastSeq, 10),
 		"consumers":     info.State.Consumers,
 	}
 }
@@ -719,10 +719,10 @@ func consumerInfoValue(info *nats.ConsumerInfo) map[string]any {
 		"name":                      info.Name,
 		"filterSubject":             info.Config.FilterSubject,
 		"ackPolicy":                 strings.TrimPrefix(strings.ToLower(info.Config.AckPolicy.String()), "ack"),
-		"deliveredConsumerSequence": info.Delivered.Consumer,
-		"deliveredStreamSequence":   info.Delivered.Stream,
-		"ackFloorConsumerSequence":  info.AckFloor.Consumer,
-		"ackFloorStreamSequence":    info.AckFloor.Stream,
+		"deliveredConsumerSequence": strconv.FormatUint(info.Delivered.Consumer, 10),
+		"deliveredStreamSequence":   strconv.FormatUint(info.Delivered.Stream, 10),
+		"ackFloorConsumerSequence":  strconv.FormatUint(info.AckFloor.Consumer, 10),
+		"ackFloorStreamSequence":    strconv.FormatUint(info.AckFloor.Stream, 10),
 		"pending":                   info.NumPending,
 		"ackPending":                info.NumAckPending,
 		"redelivered":               info.NumRedelivered,
@@ -1003,11 +1003,11 @@ func parseHistoryOptions(history jsonObject) (historyOptions, error) {
 	}
 	startSequence := uint64(0)
 	if raw, exists := history["startSequence"]; exists && raw != nil {
-		value, ok := integerValue(raw)
-		if !ok || value < 1 {
-			return historyOptions{}, errors.New("startSequence must be a positive integer when provided")
+		sequence, err := decimalSequenceValue(raw, "startSequence")
+		if err != nil {
+			return historyOptions{}, err
 		}
-		startSequence = uint64(value)
+		startSequence = sequence
 	}
 	maxMessages, err := boundedInteger(history, "maxMessages", 100, 1, maxHistoryMessages)
 	if err != nil {
@@ -1315,6 +1315,23 @@ func boundedInteger(object jsonObject, key string, fallback, minimum, maximum in
 		return 0, fmt.Errorf("%s must be between %d and %d", key, minimum, maximum)
 	}
 	return integer, nil
+}
+
+func decimalSequenceValue(value any, key string) (uint64, error) {
+	sequence, ok := value.(string)
+	if !ok || sequence == "" {
+		return 0, fmt.Errorf("%s must be a positive decimal string when provided", key)
+	}
+	for _, digit := range sequence {
+		if digit < '0' || digit > '9' {
+			return 0, fmt.Errorf("%s must be a positive decimal string when provided", key)
+		}
+	}
+	parsed, err := strconv.ParseUint(sequence, 10, 64)
+	if err != nil || parsed == 0 {
+		return 0, fmt.Errorf("%s must be a positive decimal string when provided", key)
+	}
+	return parsed, nil
 }
 
 func integerValue(value any) (int64, bool) {

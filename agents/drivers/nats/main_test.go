@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"strconv"
 	"strings"
@@ -57,7 +58,7 @@ func TestJetStreamNamesAndHistoryLimitsAreValidatedBeforeConnecting(t *testing.T
 	for _, history := range []jsonObject{
 		{"stream": "ORDERS", "maxMessages": 1_001},
 		{"stream": "ORDERS", "maxBytes": maxHistoryBytes + 1},
-		{"stream": "ORDERS", "startSequence": 0},
+		{"stream": "ORDERS", "startSequence": "0"},
 	} {
 		if _, err := parseHistoryOptions(history); err == nil {
 			t.Fatalf("history options %#v should be rejected", history)
@@ -79,7 +80,7 @@ func TestJetStreamValuesAndHistoryMessageUseSharedDTOShape(t *testing.T) {
 		Config: nats.StreamConfig{Name: "ORDERS", Subjects: []string{"orders.created"}, Storage: nats.FileStorage, Retention: nats.LimitsPolicy},
 		State:  nats.StreamState{Msgs: 3, Bytes: 42, FirstSeq: 4, LastSeq: 6, Consumers: 2},
 	})
-	if stream["storage"] != "file" || stream["retention"] != "limits" || stream["firstSequence"] != uint64(4) {
+	if stream["storage"] != "file" || stream["retention"] != "limits" || stream["firstSequence"] != "4" || stream["lastSequence"] != "6" {
 		t.Fatalf("unexpected stream DTO: %#v", stream)
 	}
 	consumer := consumerInfoValue(&nats.ConsumerInfo{
@@ -87,7 +88,8 @@ func TestJetStreamValuesAndHistoryMessageUseSharedDTOShape(t *testing.T) {
 		Delivered: nats.SequenceInfo{Consumer: 8, Stream: 10}, AckFloor: nats.SequenceInfo{Consumer: 6, Stream: 8},
 		NumPending: 4, NumAckPending: 2, NumRedelivered: 1,
 	})
-	if consumer["ackPolicy"] != "explicit" || consumer["pending"] != uint64(4) || consumer["ackPending"] != 2 {
+	if consumer["ackPolicy"] != "explicit" || consumer["deliveredConsumerSequence"] != "8" || consumer["deliveredStreamSequence"] != "10" ||
+		consumer["ackFloorConsumerSequence"] != "6" || consumer["ackFloorStreamSequence"] != "8" || consumer["pending"] != uint64(4) || consumer["ackPending"] != 2 {
 		t.Fatalf("unexpected consumer DTO: %#v", consumer)
 	}
 	message, messageBytes, err := streamMessage(&nats.RawStreamMsg{
@@ -96,6 +98,39 @@ func TestJetStreamValuesAndHistoryMessageUseSharedDTOShape(t *testing.T) {
 	})
 	if err != nil || message["payloadBase64"] != "b2s=" || message["receivedAtMs"] != int64(1_700_000_000_000) || messageBytes <= 2 {
 		t.Fatalf("unexpected history message: value=%#v bytes=%d err=%v", message, messageBytes, err)
+	}
+}
+
+func TestJetStreamSequencesUseDecimalStringsAcrossTheRPCBoundary(t *testing.T) {
+	const sequence uint64 = 9_007_199_254_740_993
+	sequenceText := strconv.FormatUint(sequence, 10)
+
+	stream := streamInfoValue(&nats.StreamInfo{State: nats.StreamState{FirstSeq: sequence, LastSeq: sequence + 1}})
+	if stream["firstSequence"] != sequenceText || stream["lastSequence"] != strconv.FormatUint(sequence+1, 10) {
+		t.Fatalf("stream sequences must be decimal strings: %#v", stream)
+	}
+
+	consumer := consumerInfoValue(&nats.ConsumerInfo{
+		Delivered: nats.SequenceInfo{Consumer: sequence, Stream: sequence + 1},
+		AckFloor:  nats.SequenceInfo{Consumer: sequence + 2, Stream: sequence + 3},
+	})
+	for key, want := range map[string]string{
+		"deliveredConsumerSequence": sequenceText,
+		"deliveredStreamSequence":   strconv.FormatUint(sequence+1, 10),
+		"ackFloorConsumerSequence":  strconv.FormatUint(sequence+2, 10),
+		"ackFloorStreamSequence":    strconv.FormatUint(sequence+3, 10),
+	} {
+		if consumer[key] != want {
+			t.Fatalf("consumer %s must be a decimal string: got %#v want %q", key, consumer[key], want)
+		}
+	}
+
+	options, err := parseHistoryOptions(jsonObject{"stream": "ORDERS", "startSequence": sequenceText})
+	if err != nil || options.startSequence != sequence {
+		t.Fatalf("large decimal startSequence must remain exact: options=%+v err=%v", options, err)
+	}
+	if _, err := parseHistoryOptions(jsonObject{"stream": "ORDERS", "startSequence": sequence}); err == nil {
+		t.Fatal("numeric startSequence must be rejected at the agent boundary")
 	}
 }
 
@@ -113,7 +148,7 @@ func TestJetStreamReadRPCsUseOnlyReadAPIs(t *testing.T) {
 		t.Fatalf("JetStream Stream list must use API response: value=%#v err=%v", streams, err)
 	}
 	stream, _, err := service.dispatch("get_stream", jsonObject{"connection": connection, "stream": "ORDERS"})
-	if err != nil || stream.(map[string]any)["lastSequence"] != uint64(2) {
+	if err != nil || stream.(map[string]any)["lastSequence"] != "2" {
 		t.Fatalf("JetStream Stream info must succeed: value=%#v err=%v", stream, err)
 	}
 	consumers, _, err := service.dispatch("list_consumers", jsonObject{"connection": connection, "stream": "ORDERS"})

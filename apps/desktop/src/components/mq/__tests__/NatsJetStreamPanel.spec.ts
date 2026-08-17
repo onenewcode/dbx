@@ -44,8 +44,8 @@ const STREAM = {
   retention: "limits",
   messages: 10,
   bytes: 1000,
-  firstSequence: 1,
-  lastSequence: 10,
+  firstSequence: "1",
+  lastSequence: "10",
   consumers: 1,
 };
 
@@ -81,7 +81,7 @@ beforeEach(() => {
   });
   backend.natsListStreams.mockReset().mockResolvedValue({ streams: [STREAM], truncated: false });
   backend.natsGetStream.mockReset().mockResolvedValue(STREAM);
-  backend.natsFetchHistory.mockReset().mockResolvedValue({ messages: [], nextSequence: 11, truncated: false, ackMode: "none" });
+  backend.natsFetchHistory.mockReset().mockResolvedValue({ messages: [], nextSequence: "11", truncated: false, ackMode: "none" });
   backend.natsListConsumers.mockReset().mockResolvedValue({
     consumers: [{ name: "c1", ackPolicy: "explicit", pending: 0 }],
     truncated: false,
@@ -91,10 +91,10 @@ beforeEach(() => {
     name: "c1",
     filterSubject: "orders.>",
     ackPolicy: "explicit",
-    deliveredConsumerSequence: 0,
-    deliveredStreamSequence: 0,
-    ackFloorConsumerSequence: 0,
-    ackFloorStreamSequence: 0,
+    deliveredConsumerSequence: "0",
+    deliveredStreamSequence: "0",
+    ackFloorConsumerSequence: "0",
+    ackFloorStreamSequence: "0",
     pending: 0,
     ackPending: 0,
     redelivered: 0,
@@ -145,13 +145,33 @@ describe("NatsJetStreamPanel", () => {
     await expect.poll(() => backend.natsFetchHistory.mock.calls.length).toBeGreaterThan(0);
 
     backend.natsFetchHistory.mockResolvedValueOnce({ messages: [], truncated: false, ackMode: "none" });
-    const startInput = root.querySelector<HTMLInputElement>('.nats-history-filters input[type="number"]')!;
+    const startInput = root.querySelector<HTMLInputElement>('.nats-history-filters input[type="text"]')!;
     startInput.value = "2";
     startInput.dispatchEvent(new Event("input", { bubbles: true }));
     root.querySelector<HTMLButtonElement>('button[data-testid="nats-history-fetch"]')!.click();
     await flush();
 
     expect(startInput.value).toBe("2");
+  });
+
+  it("preserves large JetStream start sequences as decimal strings", async () => {
+    const root = await mount();
+    root.querySelector<HTMLElement>('[data-testid="nats-stream-row"]')!.click();
+    await flush();
+    await expect.poll(() => backend.natsFetchHistory.mock.calls.length).toBeGreaterThan(0);
+
+    const input = root.querySelector<HTMLInputElement>('.nats-history-filters input[type="text"]')!;
+    input.value = "9007199254740993";
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    await flush();
+    root.querySelector<HTMLButtonElement>('[data-testid="nats-history-fetch"]')!.click();
+    await flush();
+
+    expect(backend.natsFetchHistory).toHaveBeenLastCalledWith("c1", {
+      stream: "ORDERS",
+      startSequence: "9007199254740993",
+      maxMessages: 50,
+    });
   });
 
   it("does not display history from a stream that was left while the request was pending", async () => {

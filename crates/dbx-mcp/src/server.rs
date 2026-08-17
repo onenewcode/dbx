@@ -243,8 +243,8 @@ pub struct NatsHistoryToolRequest {
     pub selector: ConnectionSelector,
     #[schemars(description = "JetStream Stream name")]
     pub stream: String,
-    #[schemars(description = "Optional inclusive stream sequence to start from")]
-    pub start_sequence: Option<u64>,
+    #[schemars(description = "Optional inclusive stream sequence to start from, as a decimal string")]
+    pub start_sequence: Option<String>,
     #[schemars(description = "Maximum messages to return, bounded to 1-1000")]
     pub max_messages: Option<usize>,
     #[schemars(description = "Maximum payload and header bytes to return, bounded to 1-16777216")]

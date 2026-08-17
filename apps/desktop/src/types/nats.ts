@@ -68,8 +68,8 @@ export interface NatsStreamInfo {
   retention: string;
   messages: number;
   bytes: number;
-  firstSequence: number;
-  lastSequence: number;
+  firstSequence: string;
+  lastSequence: string;
   consumers: number;
 }
 
@@ -83,10 +83,10 @@ export interface NatsConsumerInfo {
   name: string;
   filterSubject: string;
   ackPolicy: string;
-  deliveredConsumerSequence: number;
-  deliveredStreamSequence: number;
-  ackFloorConsumerSequence: number;
-  ackFloorStreamSequence: number;
+  deliveredConsumerSequence: string;
+  deliveredStreamSequence: string;
+  ackFloorConsumerSequence: string;
+  ackFloorStreamSequence: string;
   pending: number;
   ackPending: number;
   redelivered: number;
@@ -100,7 +100,7 @@ export interface NatsConsumerList {
 
 export interface NatsHistoryRequest {
   stream: string;
-  startSequence?: number;
+  startSequence?: string;
   maxMessages?: number;
   maxBytes?: number;
 }
@@ -111,7 +111,7 @@ export interface NatsHistoryResult {
   receivedCount: number;
   skippedCount: number;
   truncated: boolean;
-  nextSequence?: number;
+  nextSequence?: string;
   ackMode: string;
   consumerKind: string;
 }

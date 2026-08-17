@@ -24,7 +24,7 @@ const props = withDefaults(
 const { t } = useI18n();
 
 const history = ref<NatsHistoryResult>();
-const startSequence = ref<number>();
+const startSequence = ref<string>();
 const maxMessages = ref(50);
 const subjectFilter = ref("__all__");
 const busy = ref(false);
@@ -70,7 +70,7 @@ async function fetchHistory(reset = false) {
 
 function onStartSequenceInput(event: Event) {
   const raw = (event.target as HTMLInputElement).value;
-  startSequence.value = raw === "" ? undefined : Number(raw);
+  startSequence.value = raw === "" ? undefined : raw;
 }
 
 watch(
@@ -96,7 +96,7 @@ onBeforeUnmount(() => {
       <div class="nats-sub-composer nats-history-filters">
         <label class="nats-inline-field">
           <span>{{ t("nats.jetstream.startSequence") }}</span>
-          <input class="nats-header-num" type="number" min="1" :value="startSequence" @input="onStartSequenceInput" />
+          <input class="nats-header-num" type="text" inputmode="numeric" pattern="[0-9]*" :value="startSequence" @input="onStartSequenceInput" />
         </label>
         <label class="nats-inline-field">
           <span>{{ t("nats.jetstream.maxMessages") }}</span>
