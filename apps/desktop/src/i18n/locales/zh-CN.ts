@@ -7566,7 +7566,7 @@ export default withEnglishFallback({
     subjectWorkbench: {
       title: "订阅 / 抓取",
       subjectFilter: "Subject 过滤器",
-      subjectPlaceholder: "orders.>",
+      subjectPlaceholder: "",
       captureMs: "抓取时长 (ms)",
       maxMessages: "最大条数",
       capture: "抓取",
@@ -7576,7 +7576,7 @@ export default withEnglishFallback({
     publish: {
       title: "发布",
       subject: "Subject",
-      subjectPlaceholder: "orders.created",
+      subjectPlaceholder: "",
       wildcardError: "发布 Subject 不能包含通配符（* 或 >）。",
       replyTo: "Reply-to",
       replyPlaceholder: "可选回复 Subject",

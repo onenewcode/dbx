@@ -7458,7 +7458,7 @@ export default withEnglishFallback({
     subjectWorkbench: {
       title: "訂閱 / 擷取",
       subjectFilter: "Subject 過濾器",
-      subjectPlaceholder: "orders.>",
+      subjectPlaceholder: "",
       captureMs: "擷取时长 (ms)",
       maxMessages: "最大筆數",
       capture: "擷取",
@@ -7468,7 +7468,7 @@ export default withEnglishFallback({
     publish: {
       title: "發布",
       subject: "Subject",
-      subjectPlaceholder: "orders.created",
+      subjectPlaceholder: "",
       wildcardError: "發布 Subject 不能包含萬用字元（* 或 >）。",
       replyTo: "Reply-to",
       replyPlaceholder: "可選回覆 Subject",

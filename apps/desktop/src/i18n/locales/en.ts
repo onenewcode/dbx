@@ -7582,7 +7582,7 @@ export default {
     subjectWorkbench: {
       title: "Subscribe / Capture",
       subjectFilter: "Subject filter",
-      subjectPlaceholder: "orders.>",
+      subjectPlaceholder: "",
       captureMs: "Capture ms",
       maxMessages: "Max msgs",
       capture: "Capture",
@@ -7592,7 +7592,7 @@ export default {
     publish: {
       title: "Publish",
       subject: "Subject",
-      subjectPlaceholder: "orders.created",
+      subjectPlaceholder: "",
       wildcardError: "Publish subject cannot contain wildcards (* or >).",
       replyTo: "Reply-to",
       replyPlaceholder: "Optional reply subject",

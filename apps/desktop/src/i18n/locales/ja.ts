@@ -7517,7 +7517,7 @@ export default withEnglishFallback({
     subjectWorkbench: {
       title: "購読 / キャプチャ",
       subjectFilter: "Subject フィルタ",
-      subjectPlaceholder: "orders.>",
+      subjectPlaceholder: "",
       captureMs: "キャプチャ ms",
       maxメッセージ: "Max msgs",
       capture: "キャプチャ",
@@ -7527,7 +7527,7 @@ export default withEnglishFallback({
     publish: {
       title: "発行",
       subject: "Subject",
-      subjectPlaceholder: "orders.created",
+      subjectPlaceholder: "",
       wildcardError: "発行 subject cannot contain wildcards (* or >).",
       replyTo: "Reply-to",
       replyPlaceholder: "Optional reply subject",
