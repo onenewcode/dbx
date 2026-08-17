@@ -135,4 +135,20 @@ describe("NatsJetStreamPanel", () => {
     expect(root.querySelector('[data-testid="nats-stream-row"]')).not.toBeNull();
     expect(root.querySelector('[data-testid="nats-js-back"]')).toBeNull();
   });
+
+  it("keeps the requested start sequence when history has no next page", async () => {
+    const root = await mount();
+    root.querySelector<HTMLElement>('[data-testid="nats-stream-row"]')!.click();
+    await flush();
+    await expect.poll(() => backend.natsFetchHistory.mock.calls.length).toBeGreaterThan(0);
+
+    backend.natsFetchHistory.mockResolvedValueOnce({ messages: [], truncated: false, ackMode: "none" });
+    const startInput = root.querySelector<HTMLInputElement>('.nats-history-filters input[type="number"]')!;
+    startInput.value = "2";
+    startInput.dispatchEvent(new Event("input", { bubbles: true }));
+    root.querySelector<HTMLButtonElement>('button[data-testid="nats-history-fetch"]')!.click();
+    await flush();
+
+    expect(startInput.value).toBe("2");
+  });
 });

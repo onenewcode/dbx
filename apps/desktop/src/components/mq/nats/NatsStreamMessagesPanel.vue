@@ -51,7 +51,8 @@ async function fetchHistory(reset = false) {
       maxMessages: maxMessages.value,
     });
     history.value = res;
-    startSequence.value = res.nextSequence;
+    // Keep the requested sequence when the page has no continuation cursor.
+    if (res.nextSequence !== undefined) startSequence.value = res.nextSequence;
   } catch (e) {
     error.value = formatError(e);
   } finally {
@@ -102,7 +103,7 @@ watch(
         <span v-if="history" class="msg-summary status-text">
           {{ t("nats.jetstream.historySummary", { count: rows.length, mode: history.ackMode ?? "none" }) }}
         </span>
-        <button type="button" class="mq-btn-primary" :disabled="busy || !stream" @click="fetchHistory()">
+        <button type="button" class="mq-btn-primary" data-testid="nats-history-fetch" :disabled="busy || !stream" @click="fetchHistory()">
           {{ t("nats.jetstream.fetchHistory") }}
         </button>
       </div>
