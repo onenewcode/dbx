@@ -256,7 +256,8 @@ async function subscribe() {
     if (rollbackError === undefined) {
       removeFeedState(id);
     } else {
-      feeds.value.find((item) => item.id === id)?.state = "error";
+      const current = feeds.value.find((item) => item.id === id);
+      if (current) current.state = "error";
     }
     error.value = formatError(rollbackError ?? e);
   } finally {
@@ -317,7 +318,8 @@ async function removeFeed(id: string) {
       await stopStartedSubscription(id, pending);
     } catch (e) {
       error.value = formatError(e);
-      feeds.value.find((item) => item.id === id)?.state = "error";
+      const current = feeds.value.find((item) => item.id === id);
+      if (current) current.state = "error";
       return;
     }
   } else if (pending) {
@@ -328,7 +330,8 @@ async function removeFeed(id: string) {
       await api.natsStopSubscription(feed.connectionId, id);
     } catch (e) {
       error.value = formatError(e);
-      feeds.value.find((item) => item.id === id)?.state = "error";
+      const current = feeds.value.find((item) => item.id === id);
+      if (current) current.state = "error";
       return;
     }
   }
