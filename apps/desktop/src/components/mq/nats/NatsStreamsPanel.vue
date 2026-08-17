@@ -3,7 +3,7 @@
  * JetStream Streams tab — resource table with nats-page shell.
  * Selecting a stream scopes Stored-messages / Consumers tabs.
  */
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import * as api from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
@@ -27,6 +27,7 @@ const streamList = ref<NatsStreamList>();
 const search = ref("");
 const busy = ref(false);
 const error = ref("");
+let requestGeneration = 0;
 
 const filtered = computed(() => {
   const list = streamList.value?.streams ?? [];
@@ -36,29 +37,38 @@ const filtered = computed(() => {
 });
 
 async function loadStreams() {
+  const generation = ++requestGeneration;
+  const connectionId = props.connectionId;
   busy.value = true;
   error.value = "";
   try {
-    const [js, streams] = await Promise.all([api.natsJetstreamInfo(props.connectionId), api.natsListStreams(props.connectionId)]);
+    const [js, streams] = await Promise.all([api.natsJetstreamInfo(connectionId), api.natsListStreams(connectionId)]);
+    if (generation !== requestGeneration || connectionId !== props.connectionId) return;
     info.value = js;
     streamList.value = streams;
   } catch (e) {
+    if (generation !== requestGeneration) return;
     error.value = formatError(e);
   } finally {
-    busy.value = false;
+    if (generation === requestGeneration) busy.value = false;
   }
 }
 
 async function selectStream(name: string) {
+  const generation = ++requestGeneration;
+  const connectionId = props.connectionId;
   busy.value = true;
   error.value = "";
   try {
-    emit("stream-selected", await api.natsGetStream(props.connectionId, name));
+    const stream = await api.natsGetStream(connectionId, name);
+    if (generation !== requestGeneration || connectionId !== props.connectionId) return;
+    emit("stream-selected", stream);
     emit("navigate-tab", { tab: "streammessages" });
   } catch (e) {
+    if (generation !== requestGeneration) return;
     error.value = formatError(e);
   } finally {
-    busy.value = false;
+    if (generation === requestGeneration) busy.value = false;
   }
 }
 
@@ -67,6 +77,7 @@ onMounted(loadStreams);
 watch(
   () => props.connectionId,
   () => {
+    requestGeneration += 1;
     info.value = undefined;
     streamList.value = undefined;
     search.value = "";
@@ -74,6 +85,10 @@ watch(
     void loadStreams();
   },
 );
+
+onBeforeUnmount(() => {
+  requestGeneration += 1;
+});
 </script>
 
 <template>

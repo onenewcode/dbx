@@ -79,6 +79,7 @@ impl NatsWebSubscription {
 pub struct NatsWebRuntime {
     pub service: Mutex<Option<NatsService>>,
     pub event_forwarder_started: AtomicBool,
+    pub connection_operations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     pub subscriptions: RwLock<HashMap<String, Arc<NatsWebSubscription>>>,
 }
 
@@ -87,6 +88,7 @@ impl Default for NatsWebRuntime {
         Self {
             service: Mutex::new(None),
             event_forwarder_started: AtomicBool::new(false),
+            connection_operations: Mutex::new(HashMap::new()),
             subscriptions: RwLock::new(HashMap::new()),
         }
     }

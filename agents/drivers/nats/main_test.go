@@ -372,12 +372,16 @@ func TestPersistentSubscriptionLifecycleIsIdempotent(t *testing.T) {
 		t.Fatalf("unexpected active subscriptions: %#v", items)
 	}
 	result, _, err = service.dispatch("stop_subscription", jsonObject{"subscriptionId": "sub-1"})
-	if err != nil || !result.(map[string]any)["ok"].(bool) {
+	if err != nil || !result.(map[string]any)["ok"].(bool) || !result.(map[string]any)["found"].(bool) {
 		t.Fatalf("stop subscription failed: result=%#v error=%v", result, err)
 	}
 	result, _, err = service.dispatch("list_subscriptions", jsonObject{})
 	if err != nil || len(result.([]subscriptionInfo)) != 0 {
 		t.Fatalf("subscription must be removed after stop: result=%#v error=%v", result, err)
+	}
+	result, _, err = service.dispatch("stop_subscription", jsonObject{"subscriptionId": "missing"})
+	if err != nil || result.(map[string]any)["found"].(bool) {
+		t.Fatalf("unknown subscription should report found=false: result=%#v error=%v", result, err)
 	}
 }
 

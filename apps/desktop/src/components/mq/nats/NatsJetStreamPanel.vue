@@ -3,7 +3,7 @@
  * JetStream workspace (NUI-style): stream list → stream detail with
  * overview / messages / consumers subviews. Not three top-level tabs.
  */
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import * as api from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
@@ -27,6 +27,7 @@ const busy = ref(false);
 const error = ref("");
 const selectedStream = ref<NatsStreamInfo>();
 const detailTab = ref<DetailTab>("messages");
+let requestGeneration = 0;
 
 const filtered = computed(() => {
   const list = streamList.value?.streams ?? [];
@@ -38,40 +39,53 @@ const filtered = computed(() => {
 const inDetail = computed(() => !!selectedStream.value);
 
 async function loadStreams() {
+  const generation = ++requestGeneration;
+  const connectionId = props.connectionId;
   busy.value = true;
   error.value = "";
   try {
-    const [js, streams] = await Promise.all([api.natsJetstreamInfo(props.connectionId), api.natsListStreams(props.connectionId)]);
+    const [js, streams] = await Promise.all([api.natsJetstreamInfo(connectionId), api.natsListStreams(connectionId)]);
+    if (generation !== requestGeneration || connectionId !== props.connectionId) return;
     info.value = js;
     streamList.value = streams;
     // Refresh selected stream stats if still present.
     const name = selectedStream.value?.name;
     if (name && streams.streams.some((s) => s.name === name)) {
-      selectedStream.value = await api.natsGetStream(props.connectionId, name);
+      const selected = await api.natsGetStream(connectionId, name);
+      if (generation !== requestGeneration || connectionId !== props.connectionId) return;
+      selectedStream.value = selected;
     } else if (name) {
       selectedStream.value = undefined;
     }
   } catch (e) {
+    if (generation !== requestGeneration) return;
     error.value = formatError(e);
   } finally {
-    busy.value = false;
+    if (generation === requestGeneration) busy.value = false;
   }
 }
 
 async function openStream(name: string) {
+  const generation = ++requestGeneration;
+  const connectionId = props.connectionId;
   busy.value = true;
   error.value = "";
   try {
-    selectedStream.value = await api.natsGetStream(props.connectionId, name);
+    const stream = await api.natsGetStream(connectionId, name);
+    if (generation !== requestGeneration || connectionId !== props.connectionId) return;
+    selectedStream.value = stream;
     detailTab.value = "messages";
   } catch (e) {
+    if (generation !== requestGeneration) return;
     error.value = formatError(e);
   } finally {
-    busy.value = false;
+    if (generation === requestGeneration) busy.value = false;
   }
 }
 
 function backToList() {
+  requestGeneration += 1;
+  busy.value = false;
   selectedStream.value = undefined;
   detailTab.value = "messages";
 }
@@ -93,6 +107,7 @@ onMounted(loadStreams);
 watch(
   () => props.connectionId,
   () => {
+    requestGeneration += 1;
     info.value = undefined;
     streamList.value = undefined;
     search.value = "";
@@ -101,6 +116,10 @@ watch(
     void loadStreams();
   },
 );
+
+onBeforeUnmount(() => {
+  requestGeneration += 1;
+});
 </script>
 
 <template>

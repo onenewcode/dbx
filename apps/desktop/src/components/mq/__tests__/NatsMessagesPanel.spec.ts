@@ -229,9 +229,28 @@ describe("NatsMessagesPanel — multi-subscription explorer", () => {
     app?.unmount();
     app = undefined;
 
+    // Teardown must not race the still-pending start request.
+    expect(backend.stopSubscription).not.toHaveBeenCalled();
+
     resolveStart();
     await flush();
 
     expect(backend.stopSubscription).toHaveBeenCalledWith("conn-1", subscriptionId);
+  });
+
+  it("keeps a feed available for retry when stopping it fails", async () => {
+    const host = mount();
+    await subscribeTo(host, "orders.>");
+    backend.stopSubscription.mockRejectedValueOnce(new Error("stop unavailable"));
+
+    host.querySelector<HTMLButtonElement>('[data-testid="nats-feed-remove"]')!.click();
+    await flush();
+
+    expect(feedChips(host)).toHaveLength(1);
+    expect(feedChips(host)[0].className).toContain("is-error");
+
+    host.querySelector<HTMLButtonElement>('[data-testid="nats-feed-remove"]')!.click();
+    await flush();
+    expect(feedChips(host)).toHaveLength(0);
   });
 });

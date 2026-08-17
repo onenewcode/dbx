@@ -324,7 +324,7 @@ func (s *server) stopSubscription(params jsonObject) (any, bool, error) {
 	}
 	live := s.removeSubscription(subscriptionID)
 	if live == nil {
-		return map[string]any{"ok": true}, false, nil
+		return map[string]any{"ok": true, "found": false}, false, nil
 	}
 	if err := live.sub.Unsubscribe(); err != nil && !errors.Is(err, nats.ErrBadSubscription) {
 		live.nc.Close()
@@ -333,7 +333,7 @@ func (s *server) stopSubscription(params jsonObject) (any, bool, error) {
 	live.nc.Close()
 	live.seq++
 	s.emit("subscription_state", map[string]any{"subscriptionId": subscriptionID, "sequence": live.seq, "state": "stopped"})
-	return map[string]any{"ok": true}, false, nil
+	return map[string]any{"ok": true, "found": true}, false, nil
 }
 
 func (s *server) listSubscriptions() any {

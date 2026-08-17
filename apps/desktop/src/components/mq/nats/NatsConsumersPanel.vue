@@ -2,7 +2,7 @@
 /**
  * JetStream consumers list + detail stats — embedded under JetStream detail.
  */
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import * as api from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
@@ -24,41 +24,55 @@ const consumerList = ref<NatsConsumerList>();
 const selectedConsumer = ref<NatsConsumerInfo>();
 const busy = ref(false);
 const error = ref("");
+let requestGeneration = 0;
 
 const streamName = computed(() => props.stream?.name);
 const consumers = computed(() => consumerList.value?.consumers ?? []);
 
 async function loadConsumers() {
+  const generation = ++requestGeneration;
+  const connectionId = props.connectionId;
   const name = streamName.value;
   const previous = selectedConsumer.value?.name;
   consumerList.value = undefined;
   selectedConsumer.value = undefined;
-  if (!name) return;
+  if (!name) {
+    busy.value = false;
+    return;
+  }
   busy.value = true;
   error.value = "";
   try {
-    consumerList.value = await api.natsListConsumers(props.connectionId, name);
+    const result = await api.natsListConsumers(connectionId, name);
+    if (generation !== requestGeneration || connectionId !== props.connectionId || name !== streamName.value) return;
+    consumerList.value = result;
     const list = consumerList.value.consumers;
     const keep = previous && list.some((item) => item.name === previous) ? previous : list[0]?.name;
     if (keep) await selectConsumer(keep);
   } catch (e) {
+    if (generation !== requestGeneration) return;
     error.value = formatError(e);
   } finally {
-    busy.value = false;
+    if (generation === requestGeneration) busy.value = false;
   }
 }
 
 async function selectConsumer(name: string) {
+  const generation = ++requestGeneration;
+  const connectionId = props.connectionId;
   const stream = streamName.value;
   if (!stream) return;
   busy.value = true;
   error.value = "";
   try {
-    selectedConsumer.value = await api.natsGetConsumer(props.connectionId, stream, name);
+    const consumer = await api.natsGetConsumer(connectionId, stream, name);
+    if (generation !== requestGeneration || connectionId !== props.connectionId || stream !== streamName.value) return;
+    selectedConsumer.value = consumer;
   } catch (e) {
+    if (generation !== requestGeneration) return;
     error.value = formatError(e);
   } finally {
-    busy.value = false;
+    if (generation === requestGeneration) busy.value = false;
   }
 }
 
@@ -68,6 +82,10 @@ watch(
   () => void loadConsumers(),
   { immediate: true },
 );
+
+onBeforeUnmount(() => {
+  requestGeneration += 1;
+});
 
 defineExpose({ loadConsumers });
 </script>

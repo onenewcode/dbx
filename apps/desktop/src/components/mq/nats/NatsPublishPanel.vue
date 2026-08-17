@@ -26,6 +26,7 @@ const payloadMode = ref<NatsPayloadMode>("text");
 const busy = ref(false);
 const error = ref("");
 const success = ref("");
+let publishGeneration = 0;
 
 const subjectHasWildcard = computed(() => isWildcardSubject(subject.value));
 const canPublish = computed(() => !props.readOnly && !!payload.value.trim() && !!subject.value.trim() && !subjectHasWildcard.value);
@@ -36,25 +37,31 @@ const payloadPlaceholder = computed(() => {
 });
 
 async function publish() {
+  const generation = ++publishGeneration;
   success.value = "";
   error.value = "";
   if (props.readOnly || !canPublish.value) return;
+  const connectionId = props.connectionId;
   if (!(await confirmMqWrite(t("nats.publish.confirm", { subject: subject.value.trim() })))) return;
+  if (connectionId !== props.connectionId) return;
   busy.value = true;
   try {
-    const result = await api.natsPublish(props.connectionId, buildNatsPublishRequest(subject.value, replyTo.value, headerText.value, payload.value, payloadMode.value));
+    const result = await api.natsPublish(connectionId, buildNatsPublishRequest(subject.value, replyTo.value, headerText.value, payload.value, payloadMode.value));
+    if (connectionId !== props.connectionId) return;
     success.value = t("nats.publish.success", { bytes: result.payloadBytes, subject: subject.value.trim() });
     payload.value = "";
   } catch (e) {
-    error.value = formatError(e);
+    if (generation === publishGeneration && connectionId === props.connectionId) error.value = formatError(e);
   } finally {
-    busy.value = false;
+    if (generation === publishGeneration) busy.value = false;
   }
 }
 
 watch(
   () => props.connectionId,
   () => {
+    publishGeneration += 1;
+    busy.value = false;
     error.value = "";
     success.value = "";
   },

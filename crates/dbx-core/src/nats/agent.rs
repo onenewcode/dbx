@@ -1,4 +1,9 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -25,6 +30,8 @@ struct NatsLiveRegistry {
     // a stop arriving while start is still creating the Agent runtime must
     // wait until the subscription exists before stopping it.
     connection_operations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    connection_generations: Mutex<HashMap<String, u64>>,
+    cancelled_subscriptions: Mutex<HashSet<(String, String)>>,
     events: broadcast::Sender<NatsSubscriptionEvent>,
 }
 
@@ -35,7 +42,11 @@ struct NatsLiveRuntime {
 #[derive(serde::Deserialize)]
 struct StopSubscriptionResult {
     ok: bool,
+    #[serde(default)]
+    found: Option<bool>,
 }
+
+const MAX_CANCELLED_SUBSCRIPTIONS: usize = 4_096;
 
 impl NatsService {
     pub fn new(launch: AgentLaunchSpec) -> Self {
@@ -45,6 +56,8 @@ impl NatsService {
             live: Arc::new(NatsLiveRegistry {
                 runtimes: Mutex::new(HashMap::new()),
                 connection_operations: Mutex::new(HashMap::new()),
+                connection_generations: Mutex::new(HashMap::new()),
+                cancelled_subscriptions: Mutex::new(HashSet::new()),
                 events,
             }),
         }
@@ -215,8 +228,15 @@ impl NatsService {
             return Err("NATS connection id is required".to_string());
         }
         let request = request.validate()?;
+        let generation = self.connection_generation(connection_id).await;
         let operation = self.connection_operation(connection_id).await;
         let _operation = operation.lock().await;
+        if self.connection_generation(connection_id).await != generation {
+            return Err("NATS connection lifecycle changed".to_string());
+        }
+        if self.take_cancelled_subscription(connection_id, &request.subscription_id).await {
+            return Err("NATS subscription start was cancelled".to_string());
+        }
         let runtime = self.live_runtime(connection_id).await?;
         runtime
             .client
@@ -229,20 +249,31 @@ impl NatsService {
     }
 
     pub async fn stop_subscription(&self, connection_id: &str, subscription_id: &str) -> Result<bool, String> {
+        if connection_id.trim().is_empty() {
+            return Err("NATS connection id is required".to_string());
+        }
         let subscription_id = subscription_id.trim();
         if subscription_id.is_empty() {
             return Err("NATS subscriptionId is required".to_string());
         }
+        let generation = self.connection_generation(connection_id).await;
         let operation = self.connection_operation(connection_id).await;
         let _operation = operation.lock().await;
+        if self.connection_generation(connection_id).await != generation {
+            return Ok(true);
+        }
         let runtime = self.live.runtimes.lock().await.get(connection_id).cloned();
         let Some(runtime) = runtime else {
+            self.cancel_subscription(connection_id, subscription_id).await;
             return Ok(true);
         };
         let result: StopSubscriptionResult = runtime
             .client
             .call("stop_subscription", json!({ "subscriptionId": subscription_id }), Some(Duration::from_secs(5)))
             .await?;
+        if result.ok && result.found == Some(false) {
+            self.cancel_subscription(connection_id, subscription_id).await;
+        }
         if result.ok {
             // Do not retain an idle Agent process once its last live
             // subscription ends. A failed list is non-fatal because stop has
@@ -281,6 +312,8 @@ impl NatsService {
     pub async fn close_connection(&self, connection_id: &str) {
         let operation = self.connection_operation(connection_id).await;
         let _operation = operation.lock().await;
+        self.advance_connection_generation(connection_id).await;
+        self.live.cancelled_subscriptions.lock().await.retain(|(owner, _)| owner != connection_id);
         if let Some(runtime) = self.live.runtimes.lock().await.remove(connection_id) {
             runtime.client.kill();
         }
@@ -309,6 +342,30 @@ impl NatsService {
     async fn connection_operation(&self, connection_id: &str) -> Arc<Mutex<()>> {
         let mut operations = self.live.connection_operations.lock().await;
         operations.entry(connection_id.to_string()).or_insert_with(|| Arc::new(Mutex::new(()))).clone()
+    }
+
+    async fn connection_generation(&self, connection_id: &str) -> u64 {
+        self.live.connection_generations.lock().await.get(connection_id).copied().unwrap_or_default()
+    }
+
+    async fn advance_connection_generation(&self, connection_id: &str) {
+        let mut generations = self.live.connection_generations.lock().await;
+        let generation = generations.entry(connection_id.to_string()).or_default();
+        *generation = generation.wrapping_add(1);
+    }
+
+    async fn cancel_subscription(&self, connection_id: &str, subscription_id: &str) {
+        let mut cancelled = self.live.cancelled_subscriptions.lock().await;
+        if cancelled.len() >= MAX_CANCELLED_SUBSCRIPTIONS {
+            if let Some(oldest) = cancelled.iter().next().cloned() {
+                cancelled.remove(&oldest);
+            }
+        }
+        cancelled.insert((connection_id.to_string(), subscription_id.to_string()));
+    }
+
+    async fn take_cancelled_subscription(&self, connection_id: &str, subscription_id: &str) -> bool {
+        self.live.cancelled_subscriptions.lock().await.remove(&(connection_id.to_string(), subscription_id.to_string()))
     }
 
     async fn live_runtime(&self, connection_id: &str) -> Result<Arc<NatsLiveRuntime>, String> {
@@ -399,5 +456,42 @@ mod tests {
         assert_eq!(state.connection_id, "nats-primary");
         assert_eq!(state.subscription_id, "sub-1");
         assert_eq!(state.sequence, 3);
+    }
+
+    #[tokio::test]
+    async fn cancelled_subscription_start_is_consumed_once() {
+        let service = NatsService::new(AgentLaunchSpec::new("dbx-agent-nats"));
+        service.cancel_subscription("connection-a", "subscription-1").await;
+
+        assert!(service.take_cancelled_subscription("connection-a", "subscription-1").await);
+        assert!(!service.take_cancelled_subscription("connection-a", "subscription-1").await);
+    }
+
+    #[tokio::test]
+    async fn stop_before_start_prevents_agent_creation() {
+        let service = NatsService::new(AgentLaunchSpec::new("/path/that/does/not/exist"));
+        assert!(service.stop_subscription("connection-a", "subscription-1").await.unwrap());
+
+        let config = NatsConnectionConfig {
+            server_url: "nats://127.0.0.1:4222".to_string(),
+            connect_host: None,
+            connect_port: None,
+            username: None,
+            password: None,
+            token: None,
+            tls_skip_verify: false,
+            connect_timeout_secs: 1,
+            request_timeout_secs: 1,
+        };
+        let request = NatsSubscriptionRequest {
+            subscription_id: "subscription-1".to_string(),
+            subject: "orders.>".to_string(),
+            queue_group: None,
+        };
+
+        assert_eq!(
+            service.start_subscription("connection-a", &config, request).await.unwrap_err(),
+            "NATS subscription start was cancelled"
+        );
     }
 }

@@ -49,6 +49,8 @@ const STREAM = {
   consumers: 1,
 };
 
+const STREAM_TWO = { ...STREAM, name: "PAYMENTS", subjects: ["payments.>"] };
+
 let app: App | undefined;
 let host: HTMLElement | undefined;
 
@@ -150,5 +152,70 @@ describe("NatsJetStreamPanel", () => {
     await flush();
 
     expect(startInput.value).toBe("2");
+  });
+
+  it("does not display history from a stream that was left while the request was pending", async () => {
+    backend.natsListStreams.mockResolvedValueOnce({ streams: [STREAM, STREAM_TWO], truncated: false });
+    backend.natsGetStream.mockImplementation((name: string) => Promise.resolve(name === STREAM_TWO.name ? STREAM_TWO : STREAM));
+    let resolveOldHistory!: (result: unknown) => void;
+    backend.natsFetchHistory.mockReset().mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveOldHistory = resolve;
+        }),
+    );
+    backend.natsFetchHistory.mockResolvedValue({
+      messages: [{ subject: "payments.created", headers: [], payloadBase64: "cGF5", payloadText: "pay", receivedAtMs: 0, sizeBytes: 3 }],
+      truncated: false,
+      ackMode: "none",
+    });
+
+    const root = await mount();
+    root.querySelector<HTMLElement>('[data-testid="nats-stream-row"]')!.click();
+    await flush();
+    await expect.poll(() => backend.natsFetchHistory.mock.calls.length).toBe(1);
+
+    root.querySelector<HTMLButtonElement>('[data-testid="nats-js-back"]')!.click();
+    await flush();
+    const rows = root.querySelectorAll<HTMLElement>('[data-testid="nats-stream-row"]');
+    rows[1].click();
+    await flush();
+    await expect.poll(() => backend.natsFetchHistory.mock.calls.length).toBe(2);
+
+    resolveOldHistory({
+      messages: [{ subject: "orders.created", headers: [], payloadBase64: "b2xk", payloadText: "old", receivedAtMs: 0, sizeBytes: 3 }],
+      truncated: false,
+      ackMode: "none",
+    });
+    await flush();
+
+    expect(root.querySelector(".nats-msg-list")?.textContent).toContain("payments.created");
+    expect(root.querySelector(".nats-msg-list")?.textContent).not.toContain("orders.created");
+  });
+
+  it("does not leave refresh disabled after returning while refresh is pending", async () => {
+    const root = await mount();
+    root.querySelector<HTMLElement>('[data-testid="nats-stream-row"]')!.click();
+    await flush();
+
+    let resolveRefresh!: (result: unknown) => void;
+    backend.natsJetstreamInfo.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRefresh = resolve;
+        }),
+    );
+    const refresh = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("nats.refresh"));
+    refresh!.click();
+    await flush();
+
+    root.querySelector<HTMLButtonElement>('[data-testid="nats-js-back"]')!.click();
+    await flush();
+
+    const listRefresh = [...root.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent?.includes("nats.refresh"));
+    expect(listRefresh?.disabled).toBe(false);
+
+    resolveRefresh({ enabled: true, memoryBytes: 0, storageBytes: 1000, streams: 1, consumers: 1 });
+    await flush();
   });
 });

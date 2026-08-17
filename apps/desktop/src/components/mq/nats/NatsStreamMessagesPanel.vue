@@ -2,7 +2,7 @@
 /**
  * JetStream stored messages — used embedded inside NatsJetStreamPanel detail.
  */
-import { computed, ref, watch } from "vue";
+import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import * as api from "@/lib/backend/api";
 import { formatError } from "@/lib/backend/errorUtils";
@@ -29,6 +29,7 @@ const maxMessages = ref(50);
 const subjectFilter = ref("__all__");
 const busy = ref(false);
 const error = ref("");
+let requestGeneration = 0;
 
 const streamName = computed(() => props.stream?.name);
 const subjectOptions = computed(() => props.stream?.subjects ?? []);
@@ -41,22 +42,29 @@ const rows = computed(() => {
 
 async function fetchHistory(reset = false) {
   const name = streamName.value;
-  if (!name) return;
+  if (!name) {
+    busy.value = false;
+    return;
+  }
+  const generation = ++requestGeneration;
+  const connectionId = props.connectionId;
   busy.value = true;
   error.value = "";
   try {
-    const res = await api.natsFetchHistory(props.connectionId, {
+    const res = await api.natsFetchHistory(connectionId, {
       stream: name,
       startSequence: reset ? undefined : startSequence.value || undefined,
       maxMessages: maxMessages.value,
     });
+    if (generation !== requestGeneration || connectionId !== props.connectionId || name !== streamName.value) return;
     history.value = res;
     // Keep the requested sequence when the page has no continuation cursor.
     if (res.nextSequence !== undefined) startSequence.value = res.nextSequence;
   } catch (e) {
+    if (generation !== requestGeneration) return;
     error.value = formatError(e);
   } finally {
-    busy.value = false;
+    if (generation === requestGeneration) busy.value = false;
   }
 }
 
@@ -66,8 +74,9 @@ function onStartSequenceInput(event: Event) {
 }
 
 watch(
-  streamName,
+  [() => props.connectionId, streamName],
   () => {
+    requestGeneration += 1;
     history.value = undefined;
     startSequence.value = undefined;
     subjectFilter.value = "__all__";
@@ -75,6 +84,10 @@ watch(
   },
   { immediate: true },
 );
+
+onBeforeUnmount(() => {
+  requestGeneration += 1;
+});
 </script>
 
 <template>

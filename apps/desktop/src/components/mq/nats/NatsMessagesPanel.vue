@@ -37,7 +37,7 @@ interface PendingSubscriptionStart {
   connectionId: string;
   cancelled: boolean;
   requested: boolean;
-  started: boolean;
+  startPromise?: ReturnType<typeof api.natsStartSubscription>;
   stopPromise?: Promise<void>;
 }
 
@@ -55,6 +55,7 @@ const pendingMessages = new Map<string, PendingFeedMessages>();
 let messageFlushScheduled = false;
 let messageFlushFrame: number | undefined;
 let messageFlushGeneration = 0;
+let captureGeneration = 0;
 
 const activeFeed = computed(() => feeds.value.find((feed) => feed.id === activeFeedId.value));
 const activeMessages = computed(() => activeFeed.value?.messages ?? []);
@@ -169,7 +170,12 @@ async function installFeedListener(connectionId: string, feedId: string) {
 
 function stopStartedSubscription(id: string, pending: PendingSubscriptionStart): Promise<void> {
   if (!pending.requested) return Promise.resolve();
-  pending.stopPromise ??= api.natsStopSubscription(pending.connectionId, id).then(() => undefined);
+  // A stop sent before the start reaches the backend is a no-op there. Wait
+  // for the start request to settle so teardown cannot leave an orphan feed.
+  pending.stopPromise ??= (pending.startPromise ?? Promise.resolve())
+    .catch(() => undefined)
+    .then(() => api.natsStopSubscription(pending.connectionId, id))
+    .then(() => undefined);
   return pending.stopPromise;
 }
 
@@ -187,6 +193,11 @@ function stopListener(feedId: string) {
   listeners.delete(feedId);
 }
 
+function removeFeedState(id: string) {
+  feeds.value = feeds.value.filter((item) => item.id !== id);
+  if (activeFeedId.value === id) activeFeedId.value = feeds.value[feeds.value.length - 1]?.id;
+}
+
 async function subscribe() {
   const value = subject.value.trim();
   if (!value || busy.value) return;
@@ -201,23 +212,24 @@ async function subscribe() {
   const connectionId = props.connectionId;
   const id = nextSubscriptionId();
   const feed: NatsFeed = { id, connectionId, subject: value, kind: "live", state: "starting", messages: [], receivedCount: 0, droppedCount: 0 };
-  const pending: PendingSubscriptionStart = { connectionId, cancelled: false, requested: false, started: false };
+  const pending: PendingSubscriptionStart = { connectionId, cancelled: false, requested: false };
   pendingStarts.set(id, pending);
   feeds.value = [...feeds.value, feed];
   selectFeed(id);
   try {
-    if (isTauriRuntime()) {
-      await installFeedListener(connectionId, id);
-      if (pending.cancelled) {
-        stopListener(id);
-        return;
-      }
+    if (isTauriRuntime()) await installFeedListener(connectionId, id);
+    if (pending.cancelled) {
+      stopListener(id);
+      removeFeedState(id);
+      return;
     }
     pending.requested = true;
-    const started = await api.natsStartSubscription(connectionId, { subscriptionId: id, subject: value });
-    pending.started = true;
+    const startPromise = api.natsStartSubscription(connectionId, { subscriptionId: id, subject: value });
+    pending.startPromise = startPromise;
+    const started = await startPromise;
     if (pending.cancelled) {
       await stopStartedSubscription(id, pending);
+      removeFeedState(id);
       return;
     }
     const current = feeds.value.find((item) => item.id === id);
@@ -233,15 +245,19 @@ async function subscribe() {
     if (pending.cancelled) {
       stopListener(id);
       await stopStartedSubscription(id, pending);
+      removeFeedState(id);
       return;
     }
     subject.value = "";
   } catch (e) {
     stopListener(id);
     discardPendingMessages(id);
-    feeds.value = feeds.value.filter((item) => item.id !== id);
-    if (activeFeedId.value === id) activeFeedId.value = feeds.value[feeds.value.length - 1]?.id;
     const rollbackError = await rollbackStartedSubscription(id, pending);
+    if (rollbackError === undefined) {
+      removeFeedState(id);
+    } else {
+      feeds.value.find((item) => item.id === id)?.state = "error";
+    }
     error.value = formatError(rollbackError ?? e);
   } finally {
     pendingStarts.delete(id);
@@ -252,18 +268,21 @@ async function subscribe() {
 async function capture() {
   const value = subject.value.trim();
   if (!value || busy.value) return;
+  const generation = ++captureGeneration;
+  const connectionId = props.connectionId;
   busy.value = true;
   error.value = "";
   try {
-    const result = await api.natsCapture(props.connectionId, {
+    const result = await api.natsCapture(connectionId, {
       subject: value,
       durationMs: durationMs.value,
       maxMessages: maxMessages.value,
       includeHeaders: true,
     });
+    if (generation !== captureGeneration || connectionId !== props.connectionId) return;
     const feed: NatsFeed = {
       id: `capture-${nextSubscriptionId()}`,
-      connectionId: props.connectionId,
+      connectionId,
       subject: value,
       kind: "capture",
       state: "stopped",
@@ -276,9 +295,9 @@ async function capture() {
     selectFeed(feed.id);
     subject.value = "";
   } catch (e) {
-    error.value = formatError(e);
+    if (generation === captureGeneration) error.value = formatError(e);
   } finally {
-    busy.value = false;
+    if (generation === captureGeneration) busy.value = false;
   }
 }
 
@@ -289,23 +308,31 @@ async function removeFeed(id: string) {
   if (pending) pending.cancelled = true;
   stopListener(id);
   discardPendingMessages(id);
-  feeds.value = feeds.value.filter((item) => item.id !== id);
-  if (activeFeedId.value === id) {
-    activeFeedId.value = feeds.value[feeds.value.length - 1]?.id;
+  if (feed.kind !== "live") {
+    removeFeedState(id);
+    return;
   }
-  if (feed.kind === "live" && pending?.requested) {
+  if (pending?.requested) {
     try {
       await stopStartedSubscription(id, pending);
     } catch (e) {
       error.value = formatError(e);
+      feeds.value.find((item) => item.id === id)?.state = "error";
+      return;
     }
-  } else if (feed.kind === "live" && !pending && feed.state !== "stopped") {
+  } else if (pending) {
+    removeFeedState(id);
+    return;
+  } else if (feed.state !== "stopped") {
     try {
       await api.natsStopSubscription(feed.connectionId, id);
     } catch (e) {
       error.value = formatError(e);
+      feeds.value.find((item) => item.id === id)?.state = "error";
+      return;
     }
   }
+  removeFeedState(id);
 }
 
 function clearActiveMessages() {
@@ -322,6 +349,8 @@ function runReceiveAction() {
 }
 
 async function stopAllFeeds() {
+  captureGeneration += 1;
+  busy.value = false;
   // Include feeds that are still starting even if a late state event already
   // marked them stopped; their start request still needs cancellation.
   const live = feeds.value.filter((feed) => feed.kind === "live");
