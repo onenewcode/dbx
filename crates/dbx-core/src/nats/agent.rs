@@ -244,7 +244,7 @@ impl NatsService {
             return Err("NATS subscription start was cancelled".to_string());
         }
         let runtime = self.live_runtime(connection_id).await?;
-        let mut info = runtime
+        let mut info: NatsSubscriptionInfo = runtime
             .client
             .call(
                 "start_subscription",
