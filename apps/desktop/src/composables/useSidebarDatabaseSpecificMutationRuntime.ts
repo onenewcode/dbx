@@ -117,7 +117,15 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
   }
 
   const canDropMongoDatabase = computed(() => activeNode.value.type === "mongo-db" && !!activeNode.value.database && usesAnyMongoDriver(activeNode.value));
-  const canDropMilvusDatabase = computed(() => activeNode.value.type === "vector-database" && !!activeNode.value.database && connectionStore.getConfig(activeNode.value.connectionId || "")?.db_type === "milvus");
+  function canDropMilvusDatabaseNode(node: TreeNode): boolean {
+    const connectionId = node.connectionId;
+    const database = node.database;
+    if (node.type !== "vector-database" || !connectionId || !database || database === "default") return false;
+    const config = connectionStore.getConfig(connectionId);
+    return config?.db_type === "milvus" && config.database !== database;
+  }
+
+  const canDropMilvusDatabase = computed(() => canDropMilvusDatabaseNode(activeNode.value));
 
   function canMutateMongoCollectionNode(node: TreeNode): boolean {
     if (node.type !== "mongo-collection" || !node.connectionId || !node.database) return false;
@@ -854,7 +862,7 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
     const node = sidebarDangerTarget.value ?? activeNode.value;
     const connectionId = node.connectionId;
     const database = node.database;
-    if (node.type !== "vector-database" || !connectionId || !database || connectionStore.getConfig(connectionId)?.db_type !== "milvus") return;
+    if (!connectionId || !database || !canDropMilvusDatabaseNode(node)) return;
     await runMongoSidebarMutation({
       connection: connectionStore.getConfig(connectionId),
       database,
