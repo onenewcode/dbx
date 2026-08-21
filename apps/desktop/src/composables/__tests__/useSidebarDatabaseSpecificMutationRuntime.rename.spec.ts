@@ -8,7 +8,11 @@ const mocks = vi.hoisted(() => ({
   toast: vi.fn(),
   ensureConnected: vi.fn().mockResolvedValue(undefined),
   loadMongoCollections: vi.fn().mockResolvedValue(undefined),
+  loadVectorCollections: vi.fn().mockResolvedValue(undefined),
   mongoRenameCollection: vi.fn(),
+  vectorRenameCollection: vi.fn(),
+  replacePinnedTreeNode: vi.fn(),
+  removeTreeNode: vi.fn(),
   getConfig: vi.fn(() => ({
     id: "conn-1",
     name: "Mongo",
@@ -36,12 +40,16 @@ vi.mock("@/stores/connectionStore", () => ({
     getConfig: mocks.getConfig,
     ensureConnected: mocks.ensureConnected,
     loadMongoCollections: mocks.loadMongoCollections,
+    loadVectorCollections: mocks.loadVectorCollections,
+    replacePinnedTreeNode: mocks.replacePinnedTreeNode,
+    removeTreeNode: mocks.removeTreeNode,
     treeNodes: [],
   }),
 }));
 
 vi.mock("@/lib/backend/api", () => ({
   mongoRenameCollection: (...args: unknown[]) => mocks.mongoRenameCollection(...args),
+  vectorRenameCollection: (...args: unknown[]) => mocks.vectorRenameCollection(...args),
   mongoDropCollection: vi.fn(),
   mongoDropDatabase: vi.fn(),
   mongoDropIndexes: vi.fn(),
@@ -154,5 +162,85 @@ describe("confirmRenameMongoCollection existing target failure", () => {
     expect(showRenameMongoCollectionDialog.value).toBe(true);
     expect(renameMongoCollectionError.value).toBe("");
     expect(mocks.toast).not.toHaveBeenCalled();
+  });
+});
+
+function milvusCollectionNode(): TreeNode {
+  return {
+    id: "milvus-1:__vector_collection:analytics:events",
+    label: "events",
+    type: "vector-collection",
+    connectionId: "milvus-1",
+    database: "analytics",
+    isExpanded: false,
+  };
+}
+
+describe("Milvus collection rename", () => {
+  beforeEach(() => {
+    setActivePinia(createPinia());
+    vi.clearAllMocks();
+    mocks.getConfig.mockReturnValue({
+      id: "milvus-1",
+      name: "Milvus",
+      db_type: "milvus",
+      host: "localhost",
+      port: 19530,
+      username: "",
+      password: "",
+    } as any);
+    mocks.ensureConnected.mockResolvedValue(undefined);
+    mocks.loadVectorCollections.mockResolvedValue(undefined);
+    mocks.vectorRenameCollection.mockResolvedValue(undefined);
+    sidebarFormTarget.value = milvusCollectionNode();
+  });
+
+  it("renames a Milvus collection and refreshes its database node", async () => {
+    renameMongoCollectionName.value = "events_archive";
+    showRenameMongoCollectionDialog.value = true;
+    const feature = useSidebarDatabaseSpecificMutationRuntime({
+      activeNode: shallowRef(milvusCollectionNode()),
+      connectionStore: {
+        getConfig: mocks.getConfig,
+        ensureConnected: mocks.ensureConnected,
+        loadVectorCollections: mocks.loadVectorCollections,
+        replacePinnedTreeNode: mocks.replacePinnedTreeNode,
+        removeTreeNode: mocks.removeTreeNode,
+        treeNodes: [],
+      } as any,
+    });
+
+    expect(feature.canRenameMongoCollection.value).toBe(true);
+    expect(feature.canCloneMongoCollection.value).toBe(false);
+    await feature.confirmRenameMongoCollection();
+
+    expect(mocks.vectorRenameCollection).toHaveBeenCalledWith("milvus-1", "analytics", "events", "events_archive");
+    expect(mocks.loadVectorCollections).toHaveBeenCalledWith("milvus-1", "analytics");
+    expect(showRenameMongoCollectionDialog.value).toBe(false);
+  });
+
+  it("keeps a successful rename successful when metadata refresh fails", async () => {
+    mocks.loadVectorCollections.mockRejectedValueOnce(new Error("metadata timeout"));
+    renameMongoCollectionName.value = "events_archive";
+    showRenameMongoCollectionDialog.value = true;
+    const node = milvusCollectionNode();
+    const feature = useSidebarDatabaseSpecificMutationRuntime({
+      activeNode: shallowRef(node),
+      connectionStore: {
+        getConfig: mocks.getConfig,
+        ensureConnected: mocks.ensureConnected,
+        loadVectorCollections: mocks.loadVectorCollections,
+        replacePinnedTreeNode: mocks.replacePinnedTreeNode,
+        removeTreeNode: mocks.removeTreeNode,
+        treeNodes: [],
+      } as any,
+    });
+
+    await feature.confirmRenameMongoCollection();
+
+    expect(mocks.vectorRenameCollection).toHaveBeenCalledOnce();
+    expect(showRenameMongoCollectionDialog.value).toBe(false);
+    expect(mocks.removeTreeNode).toHaveBeenCalledWith(node.id);
+    expect(renameMongoCollectionError.value).toBe("");
   });
 });
