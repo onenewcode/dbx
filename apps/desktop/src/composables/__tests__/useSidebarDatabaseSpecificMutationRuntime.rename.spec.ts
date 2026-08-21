@@ -25,7 +25,8 @@ const mocks = vi.hoisted(() => ({
   })),
 }));
 
-vi.mock("vue-i18n", () => ({
+vi.mock("vue-i18n", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("vue-i18n")>()),
   useI18n: () => ({
     t: (key: string, params?: Record<string, unknown>) => (params ? `${key}:${JSON.stringify(params)}` : key),
   }),
@@ -217,6 +218,54 @@ describe("Milvus collection rename", () => {
     expect(mocks.vectorRenameCollection).toHaveBeenCalledWith("milvus-1", "analytics", "events", "events_archive");
     expect(mocks.loadVectorCollections).toHaveBeenCalledWith("milvus-1", "analytics");
     expect(showRenameMongoCollectionDialog.value).toBe(false);
+  });
+
+  it("preserves a pinned Milvus collection after its rename refresh", async () => {
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: vi.fn((key: string) => storage.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => storage.set(key, value)),
+      removeItem: vi.fn((key: string) => storage.delete(key)),
+    });
+    vi.doMock("@/lib/backend/tauriRuntime", () => ({ isTauriRuntime: () => false }));
+
+    const { useConnectionStore } = await vi.importActual<typeof import("@/stores/connectionStore")>("@/stores/connectionStore");
+    const store = useConnectionStore();
+    const originalNode = milvusCollectionNode();
+    const renamedNode: TreeNode = {
+      ...originalNode,
+      id: "milvus-1:__vector_collection:analytics:events_archive",
+      label: "events_archive",
+    };
+    const databaseNode: TreeNode = {
+      id: "milvus-1:analytics",
+      label: "analytics",
+      type: "vector-database",
+      connectionId: "milvus-1",
+      database: "analytics",
+      isExpanded: true,
+      children: [originalNode],
+    };
+    store.connections = [mocks.getConfig() as any];
+    store.treeNodes = [databaseNode];
+    store.toggleTreeNodePin(originalNode);
+    vi.spyOn(store, "ensureConnected").mockResolvedValue(undefined);
+    vi.spyOn(store, "loadVectorCollections").mockImplementation(async () => {
+      databaseNode.children = [renamedNode];
+    });
+
+    sidebarFormTarget.value = originalNode;
+    renameMongoCollectionName.value = "events_archive";
+    showRenameMongoCollectionDialog.value = true;
+    const feature = useSidebarDatabaseSpecificMutationRuntime({
+      activeNode: shallowRef(originalNode),
+      connectionStore: store,
+    });
+
+    await feature.confirmRenameMongoCollection();
+
+    expect(store.isTreeNodePinned(renamedNode)).toBe(true);
+    expect(store.isTreeNodePinned(originalNode)).toBe(false);
   });
 
   it("keeps a successful rename successful when metadata refresh fails", async () => {

@@ -207,18 +207,16 @@ export function useSidebarDatabaseSpecificMutationRuntime(options: SidebarDataba
       onSuccess: async () => {
         toast(t("contextMenu.renameObjectSuccess", { oldName, newName }), 3000);
         showRenameMongoCollectionDialog.value = false;
-        if (canMutateMilvusCollectionNode(node)) {
-          connectionStore.replacePinnedTreeNode(node, {
-            ...node,
-            id: `${connectionId}:__vector_collection:${database}:${newName}`,
-            label: newName,
-            objectName: newName,
-            tableName: newName,
-          });
-        }
         try {
           if (canMutateMilvusCollectionNode(node)) {
             await connectionStore.loadVectorCollections(connectionId, database);
+            connectionStore.replacePinnedTreeNode(node, {
+              ...node,
+              id: `${connectionId}:__vector_collection:${database}:${newName}`,
+              label: newName,
+              objectName: newName,
+              tableName: newName,
+            });
           } else {
             await connectionStore.loadMongoCollections(connectionId, database);
           }
