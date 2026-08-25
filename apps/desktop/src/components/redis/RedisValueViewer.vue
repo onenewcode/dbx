@@ -3496,7 +3496,7 @@ defineExpose({ focusSearch });
         />
         <DialogHeader class="border-b px-5 py-4 pr-12">
           <DialogTitle class="flex items-center gap-2">
-            <Input v-if="isEditingMember && selectedMemberContext?.kind === 'hash'" v-model="memberFieldEditValue" class="h-7 min-w-0 flex-1 text-sm" :placeholder="t('redis.field')" @keydown.enter="saveMemberEdit" />
+            <Input v-if="isEditingMember && selectedMemberContext?.kind === 'hash'" v-model="memberFieldEditValue" class="h-7 min-w-0 flex-1 text-sm" :placeholder="t('redis.field')" :aria-label="t('redis.field')" @keydown.enter="saveMemberEdit" />
             <span v-else class="truncate">{{ selectedMemberTitle ? formatValue(selectedMemberTitle) : t("redis.memberDetail") }}</span>
             <Badge variant="outline" class="shrink-0 text-xs">{{ redisFormatLabel(memberValueView, selectedMemberDetail.rawLabel) }}</Badge>
             <Badge v-if="memberGzipBadge && memberValueCodec === 'none'" variant="outline" class="shrink-0 text-xs text-muted-foreground" :title="t('redis.gzipBadgeTitle')" :aria-label="t('redis.gzipBadgeTitle')">
