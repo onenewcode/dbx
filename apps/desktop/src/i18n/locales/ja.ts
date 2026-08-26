@@ -4617,6 +4617,7 @@ export default withEnglishFallback({
         keyspace: "キースペース",
       },
     },
+    field: "フィールド",
   },
   mongo: {
     documents: "{count}ドキュメント",

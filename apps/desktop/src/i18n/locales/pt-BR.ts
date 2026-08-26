@@ -4590,6 +4590,7 @@ export default withEnglishFallback({
         keyspace: "Espaço de chaves",
       },
     },
+    field: "campo",
   },
   mongo: {
     documents: "{count} documentos",
