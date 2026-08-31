@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { elasticsearchClearIndexPreview, isElasticsearchClearConfirmed, isElasticsearchIndexPattern, isElasticsearchProtocolIndex, isPartialElasticsearchClear } from "@/lib/sidebar/elasticsearchIndexActions";
+import { elasticsearchClearIndexPreview, isElasticsearchClearConfirmed, isElasticsearchIndexPattern, isElasticsearchProtocolIndex, isPartialElasticsearchClear, matchesElasticsearchIndexPattern } from "@/lib/sidebar/elasticsearchIndexActions";
 import type { ElasticsearchDeleteByQueryResult } from "@/lib/backend/tauri";
 
 function clearResult(overrides: Partial<ElasticsearchDeleteByQueryResult> = {}): ElasticsearchDeleteByQueryResult {
@@ -22,6 +22,15 @@ describe("Elasticsearch index actions", () => {
     expect(preview).toContain('"match_all"');
     // The index itself must not appear as a DELETE target.
     expect(preview).not.toContain("DELETE");
+  });
+
+  it("matches concrete indexes under a grouped node's pattern", () => {
+    expect(matchesElasticsearchIndexPattern("logs-2026.08.*", "logs-2026.08.01")).toBe(true);
+    expect(matchesElasticsearchIndexPattern("logs-?.*", "logs-1.daily")).toBe(true);
+    expect(matchesElasticsearchIndexPattern("logs-2026.08.*", "logs-2026.09.01")).toBe(false);
+    expect(matchesElasticsearchIndexPattern("logs-?", "logs-12")).toBe(false);
+    expect(matchesElasticsearchIndexPattern("logs", "logs-daily")).toBe(false);
+    expect(matchesElasticsearchIndexPattern("*", "anything")).toBe(true);
   });
 
   it("separates grouped wildcard nodes from real index names", () => {

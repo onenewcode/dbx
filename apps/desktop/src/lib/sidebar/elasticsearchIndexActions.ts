@@ -22,6 +22,32 @@ export function isElasticsearchIndexPattern(index: string): boolean {
 }
 
 /**
+ * Whether a concrete index name falls under a grouped node's pattern, so
+ * surfaces open on that index (e.g. document tabs) know a wildcard clear
+ * touched their data too. `*` matches any run of characters and `?` exactly
+ * one, mirroring the sidebar grouping semantics.
+ */
+export function matchesElasticsearchIndexPattern(pattern: string, index: string): boolean {
+  const match = (patternOffset: number, indexOffset: number): boolean => {
+    while (patternOffset < pattern.length) {
+      const character = pattern[patternOffset]!;
+      if (character === "*") {
+        for (let next = indexOffset; next <= index.length; next++) {
+          if (match(patternOffset + 1, next)) return true;
+        }
+        return false;
+      }
+      if (character !== "?" && character !== index[indexOffset]) return false;
+      if (indexOffset >= index.length) return false;
+      patternOffset++;
+      indexOffset++;
+    }
+    return indexOffset === index.length;
+  };
+  return match(0, 0);
+}
+
+/**
  * Whether the operator has cleared the extra hurdle a wildcard node imposes.
  *
  * A concrete index name confirms with the button alone. A pattern node clears
