@@ -4578,11 +4578,16 @@ routeDangerDialog(showClearElasticsearchIndexConfirm, () => {
               clearElasticsearchIndexTypedName.value = value;
             },
           },
-          get confirmDisabled() {
-            return !isElasticsearchClearConfirmed(index, clearElasticsearchIndexTypedName.value);
-          },
         }
       : {}),
+    // Declared directly on this literal, never inside the spread above: object
+    // spread evaluates an accessor once and copies the resulting value, which
+    // would freeze the gate shut at its construction-time answer. Concrete
+    // index names need no gate, and `isElasticsearchClearConfirmed` already
+    // returns true for them, so this stays unlocked for them.
+    get confirmDisabled() {
+      return !isElasticsearchClearConfirmed(index, clearElasticsearchIndexTypedName.value);
+    },
     closeOnConfirm: false,
     confirm: confirmClearElasticsearchIndex,
   });

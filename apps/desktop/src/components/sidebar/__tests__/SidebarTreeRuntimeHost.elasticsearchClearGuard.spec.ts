@@ -15,7 +15,26 @@ describe("Elasticsearch clear-index wildcard guard wiring", () => {
     const clearRoute = runtimeHostSource.slice(runtimeHostSource.indexOf("routeDangerDialog(showClearElasticsearchIndexConfirm"));
     expect(clearRoute).toContain("const isPattern = isElasticsearchIndexPattern(index)");
     expect(clearRoute).toMatch(/\.\.\.\(isPattern\s*\?\s*\{/);
-    expect(clearRoute).toMatch(/get confirmDisabled\(\) \{\s*return !isElasticsearchClearConfirmed\(index, clearElasticsearchIndexTypedName\.value\);/);
+  });
+
+  /**
+   * Regression: the gate once lived inside the `...(isPattern ? {…} : {})`
+   * spread. Object spread *invokes* an accessor and copies the resulting value
+   * as a plain data property, so the getter answered once at construction time
+   * — while the input was still empty — and the confirm button stayed disabled
+   * no matter what was typed. The wording read correctly and the getter was
+   * present in the source the whole time, so only its position catches this.
+   */
+  it("declares confirmDisabled outside the spread, so it stays a live getter", () => {
+    const clearRoute = runtimeHostSource.slice(runtimeHostSource.indexOf("routeDangerDialog(showClearElasticsearchIndexConfirm"), runtimeHostSource.indexOf("routeDangerDialog(showFlushRedisDbConfirm"));
+    const spreadStart = clearRoute.indexOf("...(isPattern");
+    const spreadEnd = clearRoute.indexOf(": {}),", spreadStart);
+    expect(spreadStart).toBeGreaterThan(-1);
+    expect(spreadEnd).toBeGreaterThan(spreadStart);
+    // Nothing spread into the request may be an accessor.
+    expect(clearRoute.slice(spreadStart, spreadEnd)).not.toMatch(/\bget\s+\w+\s*\(/);
+    // It has to sit directly on the request literal instead.
+    expect(clearRoute.slice(spreadEnd)).toMatch(/get confirmDisabled\(\) \{\s*return !isElasticsearchClearConfirmed\(index, clearElasticsearchIndexTypedName\.value\);/);
   });
 
   it("pins the index label for the life of the dialog instead of following the tree selection", () => {
