@@ -3373,6 +3373,7 @@ export default {
     procedures: "Procedures",
     functions: "Functions",
     sequences: "Sequences",
+    schedulerJobs: "Scheduled Jobs",
     synonyms: "Synonyms",
     packages: "Packages",
     types: "Types",
@@ -3620,6 +3621,14 @@ export default {
     applySql: "Apply SQL",
     applySuccess: "Job operation applied",
     applyFailed: "Execution failed: {message}",
+  },
+  xuguSchedulerJob: {
+    enable: "Enable",
+    disable: "Disable",
+    run: "Run now",
+    drop: "Drop job",
+    confirmDrop: 'Drop scheduled job "{name}"? This cannot be undone.',
+    actionSuccess: '{action} completed for "{name}".',
   },
   damengUserAdmin: {
     title: "Dameng Users",
