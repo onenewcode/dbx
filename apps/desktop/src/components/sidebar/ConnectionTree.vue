@@ -8,6 +8,7 @@ import { useSavedSqlStore } from "@/stores/savedSqlStore";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import type { ObjectSourceKind, QueryTab, TableInfo, TableNameFilter, TreeNode, TreeNodeType } from "@/types/database";
+import type { ElasticsearchIndexMetadataKind } from "@/lib/backend/tauri";
 import {
   createSidebarSearchSubtreePreserver,
   filterSidebarSearchRootsByConnectionState,
@@ -76,7 +77,7 @@ import { createSidebarActionTarget, findSidebarActionTarget, matchesSidebarActio
 import { syncSidebarTreeNodeExpansion } from "@/lib/sidebar/sidebarTreeExpansion";
 import type { SidebarDangerDialogOption, SidebarDangerDialogRequest } from "@/lib/sidebar/sidebarDangerDialog";
 import { resetSidebarTreeDialogState, sidebarDangerRunningExecutionId } from "./sidebarTreeDialogState";
-import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleNacosNamespacesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
+import { SidebarDangerConfirmDialog, SidebarDdlViewDialog, SidebarElasticsearchIndexMetadataDialog, SidebarObjectSourceDialog, SidebarProcedureExecutionDialog, SidebarVisibleDatabasesDialog, SidebarVisibleNacosNamespacesDialog, SidebarVisibleSchemasDialog } from "./sidebarAsyncDialogs";
 import { sortConnectionListForDisplay } from "@/lib/sidebar/connectionListSort";
 import { sidebarDisplayTableName } from "@/lib/sidebar/sidebarTableNameDisplay";
 import { alignedSidebarCommentLabelWidths, isSidebarCommentAlignableNode, sidebarTreeNaturalContentWidth, sidebarTreeNodeComment, usesFullWidthTreeLabel } from "@/lib/sidebar/sidebarTreeItemLayout";
@@ -130,6 +131,8 @@ const sidebarTreeRuntime = createSidebarTreeRuntime();
 const sidebarTreeRuntimeInitialNode: TreeNode = { id: "__sidebar-runtime__", label: "", type: "connection-group" };
 const sidebarDdlTarget = ref<TreeNode | null>(null);
 const sidebarDdlOpen = ref(false);
+const sidebarElasticsearchIndexMetadataTarget = ref<{ node: TreeNode; kind: ElasticsearchIndexMetadataKind } | null>(null);
+const sidebarElasticsearchIndexMetadataOpen = ref(false);
 const sidebarObjectSourceTarget = ref<{ node: TreeNode; initialEditing: boolean } | null>(null);
 const sidebarObjectSourceOpen = ref(false);
 const sidebarProcedureTarget = ref<TreeNode | null>(null);
@@ -1904,6 +1907,7 @@ async function openSidebarExtensionDetails(node: TreeNode) {
 function beginSidebarAction(): number {
   sidebarActionGeneration += 1;
   sidebarDdlOpen.value = false;
+  sidebarElasticsearchIndexMetadataOpen.value = false;
   sidebarObjectSourceOpen.value = false;
   sidebarProcedureOpen.value = false;
   sidebarVisibleDatabasesOpen.value = false;
@@ -1911,6 +1915,7 @@ function beginSidebarAction(): number {
   sidebarVisibleNacosNamespacesOpen.value = false;
   sidebarTableNameFilterOpen.value = false;
   sidebarDdlTarget.value = null;
+  sidebarElasticsearchIndexMetadataTarget.value = null;
   sidebarObjectSourceTarget.value = null;
   sidebarProcedureTarget.value = null;
   sidebarVisibleDatabasesTarget.value = null;
@@ -1939,6 +1944,13 @@ function openSidebarDdlForSelection(): boolean {
   if (!node || !sidebarNodeSupportsDdlView(node)) return false;
   openSidebarDdl(node);
   return true;
+}
+
+function openSidebarElasticsearchIndexMetadata(node: TreeNode, kind: ElasticsearchIndexMetadataKind) {
+  if (!node.connectionId) return;
+  beginSidebarAction();
+  sidebarElasticsearchIndexMetadataTarget.value = { node: createSidebarActionTarget(node), kind };
+  sidebarElasticsearchIndexMetadataOpen.value = true;
 }
 
 function openSidebarObjectSource(node: TreeNode, initialEditing: boolean) {
@@ -2095,6 +2107,10 @@ async function refreshSidebarActionTarget() {
 
 watch(sidebarDdlOpen, (open) => {
   if (!open) sidebarDdlTarget.value = null;
+});
+
+watch(sidebarElasticsearchIndexMetadataOpen, (open) => {
+  if (!open) sidebarElasticsearchIndexMetadataTarget.value = null;
 });
 
 watch(sidebarObjectSourceOpen, (open) => {
@@ -2339,6 +2355,7 @@ onUnmounted(() => {
   sidebarContextMenuTarget.value = null;
   sidebarContextMenuItems.value = [];
   sidebarDdlTarget.value = null;
+  sidebarElasticsearchIndexMetadataTarget.value = null;
   sidebarObjectSourceTarget.value = null;
   sidebarProcedureTarget.value = null;
   sidebarVisibleDatabasesTarget.value = null;
@@ -2377,6 +2394,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
       @search-toggle="onSearchToggle"
       @node-toggled="onNodeToggled"
       @open-ddl="openSidebarDdl"
+      @open-elasticsearch-index-metadata="openSidebarElasticsearchIndexMetadata"
       @open-object-source="openSidebarObjectSource"
       @open-procedure="openSidebarProcedure"
       @open-settings="openSidebarSettings"
@@ -2590,6 +2608,14 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
       :format-dialect="sqlFormatDialectForDbType(sidebarDdlDatabaseType)"
     />
 
+    <SidebarElasticsearchIndexMetadataDialog
+      v-if="sidebarElasticsearchIndexMetadataTarget"
+      v-model:open="sidebarElasticsearchIndexMetadataOpen"
+      :connection-id="sidebarElasticsearchIndexMetadataTarget.node.connectionId!"
+      :index="sidebarElasticsearchIndexMetadataTarget.node.label"
+      :kind="sidebarElasticsearchIndexMetadataTarget.kind"
+    />
+
     <SidebarObjectSourceDialog
       v-if="sidebarObjectSourceTarget && sidebarObjectSourceType"
       v-model:open="sidebarObjectSourceOpen"
@@ -2676,6 +2702,7 @@ defineExpose({ focusSearch, createNewGroup, collapseAllTreeNodes, locateTabInSid
       :details-text="sidebarDangerDialogRequest.detailsText"
       :confirm-label="sidebarDangerDialogRequest.confirmLabel"
       :loading="sidebarDangerDialogConfirming || sidebarDangerDialogRequest.loading"
+      :confirm-disabled="sidebarDangerDialogRequest.confirmDisabled"
       :close-on-confirm="false"
       :cancelable="!!sidebarDangerDialogRequest.cancelRunning"
       :cancel-running-loading="sidebarDangerDialogCancelling"
