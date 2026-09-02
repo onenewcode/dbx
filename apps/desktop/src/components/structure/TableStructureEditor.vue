@@ -3957,19 +3957,21 @@ watch([activeTab, loading, ddlLoading, ddlContent], ([tab, structureIsLoading, d
   if (tab === "ddl" && !structureIsLoading && !ddlIsLoading) scheduleDdlEditorInit();
 });
 
-// The DDL pane lives in a reka-ui TabsContent, whose slot only mounts once
-// Presence has flipped to `present` — one tick *after* the tab itself became
-// active. So a single `nextTick` guess (scheduleDdlEditorInit) can run while the
-// container is still unmounted, and on a revisit nothing else fires again
-// (`ddlFetched` short-circuits fetchDdl, so ddlLoading/ddlContent never change)
-// which left the tab permanently blank. Drive creation off the container ref
-// itself instead, like useDataGridCellDetail/DataGrid do for their editors.
+// The DDL pane lives in a reka-ui TabsContent that stays mounted across tab
+// switches via force-mount (see the TabsContent in the template), so the
+// historical "revisit renders blank" race is closed at the mount level. Two
+// windows remain for this watch: the pane still mounts one tick *after* the
+// tab becomes active (Presence flips asynchronously), so a single `nextTick`
+// guess (scheduleDdlEditorInit) can run before the container exists; and the
+// loading branch swaps the container node. Drive creation off the container
+// ref itself, like useDataGridCellDetail/DataGrid do for their editors.
 watch(
   ddlEditorContainer,
   (container) => {
     if (!container) {
-      // Leaving the tab or entering the loading branch removes the container:
-      // drop the view rather than leaving it attached to a detached node.
+      // The container only goes away on real unmount or when the loading
+      // branch swaps it out: drop the view rather than leaving it attached
+      // to a detached node.
       destroyDdlEditor();
       return;
     }
