@@ -487,6 +487,13 @@ interface DataGridProps {
   columnWidthCacheKey?: string;
   pendingStateKey?: string;
   /**
+   * Owner key for the tab-switch view snapshot. Defaults to `cacheKey`, which
+   * is what query and data tabs use. Document tabs (MongoDB collections) set it
+   * on its own because `cacheKey` also scopes structured filters, column widths
+   * and pending edits, and they must keep those scopes as they are (#8679).
+   */
+  viewStateKey?: string;
+  /**
    * Logical-result identity (`QueryTab.resultViewGeneration`) the grid is
    * currently rendering. The tab-switch view snapshot is captured with this
    * value and replayed only when it still matches, so a replaced dataset never
@@ -4960,6 +4967,9 @@ function cancelViewSnapshotRestoreFrame() {
 }
 
 /** Bounded integrity probe of the result the grid is currently rendering. */
+/** Snapshot owner; falls back to `cacheKey` for query and data tabs. */
+const viewSnapshotOwnerKey = computed(() => props.viewStateKey?.trim() || props.cacheKey?.trim() || undefined);
+
 function currentViewProbe(): string {
   const rows = props.result.rows;
   return buildDataGridViewProbe({
@@ -5086,13 +5096,14 @@ function expandRowRange(range: readonly number[], displayCount: number): number[
  */
 function captureTabSwitchViewSnapshot() {
   if (!DATA_GRID_VIEW_SNAPSHOT_RESTORE) return;
-  if (!props.cacheKey || !props.viewGeneration) return;
+  const ownerKey = viewSnapshotOwnerKey.value;
+  if (!ownerKey || !props.viewGeneration) return;
   if (showTranspose.value) return;
   const scroller = useCanvasGridRows.value ? canvasScrollerElement() : gridScrollerElement();
   if (!scroller) return;
   const { selection, droppedSelection } = captureViewSelection();
   saveDataGridViewSnapshot({
-    ownerKey: props.cacheKey,
+    ownerKey,
     viewGeneration: props.viewGeneration,
     probe: currentViewProbe(),
     renderer: useCanvasGridRows.value ? "canvas" : "dom",
@@ -5112,7 +5123,7 @@ function captureTabSwitchViewSnapshot() {
 function restoreTabSwitchViewSnapshot() {
   if (!DATA_GRID_VIEW_SNAPSHOT_RESTORE) return;
   if (!structuredFilterHydrationReady.value) return;
-  const ownerKey = props.cacheKey;
+  const ownerKey = viewSnapshotOwnerKey.value;
   if (!ownerKey || !props.viewGeneration) return;
   if (showTranspose.value) return;
   const snapshot = peekDataGridViewSnapshot(ownerKey);

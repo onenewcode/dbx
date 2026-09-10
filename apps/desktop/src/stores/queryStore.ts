@@ -61,6 +61,7 @@ import { classifySqlRisk } from "@/lib/sql/sqlRisk";
 import { externalSqlFileDisplayTitles, normalizeExternalSqlPath } from "@/lib/sql/sqlFileOpen";
 import { clearDataGridPendingSnapshot, clearDataGridPendingSnapshotsForTab } from "@/composables/useDataGridEditor";
 import { beginClosingDataGridViewSnapshotsForTab, clearDataGridViewSnapshot, clearDataGridViewSnapshotsForTab } from "@/lib/dataGrid/dataGridViewStateCache";
+import { beginClosingBrowserState } from "@/lib/tabs/documentBrowserStateCache";
 import { clearDataGridStructuredFilterStatesForTab } from "@/lib/dataGrid/dataGridFilterBuilderPersistence";
 import { clearDataGridSearchStatesForTab } from "@/lib/dataGrid/dataGridSearchStatePersistence";
 import { buildTabResultSnapshot, deleteTabResultSnapshot, pruneTabResultSnapshots, readTabResultSnapshot, tabResultCacheKey, writeTabResultSnapshot } from "@/lib/tabs/tabResultCache";
@@ -3424,6 +3425,7 @@ export const useQueryStore = defineStore("query", () => {
     if (tab.mode === "sqlserver-trace") void disposeSqlServerActivityTrace(tab.id);
     clearDataGridPendingSnapshotsForTab(id);
     beginClosingDataGridViewSnapshotsForTab(id);
+    beginClosingBrowserState(id);
     clearDataGridStructuredFilterStatesForTab(id);
     clearDataGridSearchStatesForTab(id);
     if (tabs.value[idx].txnSessionId) void rollbackTransaction(id);
@@ -3786,6 +3788,7 @@ export const useQueryStore = defineStore("query", () => {
         if (tab.mode === "sqlserver-trace") void disposeSqlServerActivityTrace(tab.id);
         clearDataGridPendingSnapshotsForTab(tab.id);
         beginClosingDataGridViewSnapshotsForTab(tab.id);
+        beginClosingBrowserState(tab.id);
         clearDataGridStructuredFilterStatesForTab(tab.id);
         clearDataGridSearchStatesForTab(tab.id);
         if (tab.txnSessionId) void rollbackTransaction(tab.id);
@@ -4005,6 +4008,7 @@ export const useQueryStore = defineStore("query", () => {
         rollbackTabTransaction(tab, { resetAutoCommit: true });
         clearDataGridPendingSnapshotsForTab(tab.id);
         beginClosingDataGridViewSnapshotsForTab(tab.id);
+        beginClosingBrowserState(tab.id);
         clearDataGridStructuredFilterStatesForTab(tab.id);
         clearDataGridSearchStatesForTab(tab.id);
         if (tab.isExecuting) void cancelTabExecution(tab.id);

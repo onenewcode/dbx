@@ -2427,13 +2427,13 @@ defineExpose({
 
     <template v-else-if="activeTab.mode === 'mongo-gridfs'">
       <div class="flex-1 min-h-0">
-        <MongoGridFsBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" />
+        <MongoGridFsBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" :state-key="activeTab.id" />
       </div>
     </template>
 
     <template v-else-if="activeTab.mode === 'mongo-bucket'">
       <div class="flex-1 min-h-0">
-        <MongoBucketBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" :bucket="activeTab.mongoBucket?.bucketName || activeTab.sql" />
+        <MongoBucketBrowser :key="activeTab.id" :connection-id="activeTab.connectionId" :database="activeTab.database" :bucket="activeTab.mongoBucket?.bucketName || activeTab.sql" :state-key="activeTab.id" />
       </div>
     </template>
 
