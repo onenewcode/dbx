@@ -2284,6 +2284,7 @@ export default withEnglishFallback({
     save: "Salvar",
     clear: "Limpar",
     retry: "Tentar novamente",
+    refresh: "Atualizar",
     more: "Mais",
     decrease: "Diminuir",
     increase: "Aumentar",

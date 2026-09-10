@@ -2285,6 +2285,7 @@ export default withEnglishFallback({
     import: "Importa",
     remove: "Rimuovi",
     retry: "Riprova",
+    refresh: "Aggiorna",
     more: "Altro",
     decrease: "Riduci",
     increase: "Aumenta",

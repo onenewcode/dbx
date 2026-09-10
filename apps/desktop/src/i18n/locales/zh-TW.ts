@@ -2285,6 +2285,7 @@ export default withEnglishFallback({
     import: "匯入",
     remove: "移除",
     retry: "重試",
+    refresh: "重新整理",
     more: "更多",
     decrease: "縮小",
     increase: "放大",

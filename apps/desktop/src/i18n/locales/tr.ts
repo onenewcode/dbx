@@ -2355,6 +2355,7 @@ export default withEnglishFallback({
     import: "İçe Aktar",
     remove: "Kaldır",
     retry: "Yeniden dene",
+    refresh: "Yenile",
     more: "Daha fazla",
     decrease: "Azalt",
     increase: "Artır",

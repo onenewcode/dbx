@@ -2378,6 +2378,7 @@ export default {
     import: "Import",
     remove: "Remove",
     retry: "Retry",
+    refresh: "Refresh",
     more: "More",
     decrease: "Decrease",
     increase: "Increase",

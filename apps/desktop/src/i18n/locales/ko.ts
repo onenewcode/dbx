@@ -2186,6 +2186,7 @@ export default withEnglishFallback({
     import: "가져오기",
     remove: "제거",
     retry: "다시 시도",
+    refresh: "새로고침",
     more: "더보기",
     decrease: "감소",
     increase: "증가",

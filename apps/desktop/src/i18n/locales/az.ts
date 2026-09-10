@@ -2377,6 +2377,7 @@ export default withEnglishFallback({
     import: "İdxal et",
     remove: "Çıxar",
     retry: "Yenidən cəhd et",
+    refresh: "Yenilə",
     more: "Daha çox",
     decrease: "Azalt",
     increase: "Artır",

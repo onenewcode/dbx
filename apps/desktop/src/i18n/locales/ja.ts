@@ -2309,6 +2309,7 @@ export default withEnglishFallback({
     save: "保存",
     clear: "クリア",
     retry: "再試行",
+    refresh: "更新",
     more: "もっと見る",
     decrease: "縮小",
     increase: "拡大",
