@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { dispatch, findOne, mountComponent } from "@/components/grid/__tests__/vueHostHarness";
 import type { ConnectionConfig, SidebarLayout } from "@/types/database";
 
@@ -62,6 +62,17 @@ function modeButton(root: ReturnType<typeof mountComponent>["root"], mode: "all"
 }
 
 describe("McpResourceScopePicker", () => {
+  let confirmMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    confirmMock = vi.fn().mockReturnValue(true);
+    vi.stubGlobal("confirm", confirmMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("emits allow-all when switching from a custom group and connection selection", () => {
     const { mounted, update } = mountPicker({
       allowedGroupIds: ["g1"],
@@ -78,10 +89,25 @@ describe("McpResourceScopePicker", () => {
     const { mounted, update } = mountPicker(customScope);
 
     dispatch(modeButton(mounted.root, "all"), "click");
+    expect(confirmMock).toHaveBeenCalledWith("settings.mcpResourceScopeAllConfirm");
     await mounted.setProps({ allowedGroupIds: [], allowedConnectionIds: null });
     dispatch(modeButton(mounted.root, "custom"), "click");
 
     expect(update).toHaveBeenLastCalledWith(customScope);
+  });
+
+  it("keeps the custom scope without emitting when the all-connections confirm is cancelled", () => {
+    confirmMock.mockReturnValue(false);
+    const { mounted, update } = mountPicker({
+      allowedGroupIds: ["g1"],
+      allowedConnectionIds: ["c2"],
+    });
+
+    dispatch(modeButton(mounted.root, "all"), "click");
+
+    expect(confirmMock).toHaveBeenCalledWith("settings.mcpResourceScopeAllConfirm");
+    expect(modeButton(mounted.root, "all").props["aria-checked"]).toBe(false);
+    expect(update).not.toHaveBeenCalled();
   });
 
   it("starts custom scope empty when there is no previous custom snapshot", () => {
@@ -102,6 +128,7 @@ describe("McpResourceScopePicker", () => {
     });
 
     dispatch(modeButton(mounted.root, "all"), "click");
+    expect(confirmMock).not.toHaveBeenCalled();
     await mounted.setProps({ allowedGroupIds: [], allowedConnectionIds: null });
     dispatch(modeButton(mounted.root, "custom"), "click");
 

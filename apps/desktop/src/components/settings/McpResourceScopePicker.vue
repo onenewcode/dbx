@@ -213,6 +213,7 @@ function copyCustomScope(groupIds: readonly string[], connectionIds: readonly st
 function setScopeMode(mode: ScopeMode) {
   if (props.disabled || props.busy || mode === scopeMode.value) return;
   if (mode === "all") {
+    if ((props.allowedGroupIds.length > 0 || (props.allowedConnectionIds?.length ?? 0) > 0) && !window.confirm(t("settings.mcpResourceScopeAllConfirm"))) return;
     lastCustomScope.value = copyCustomScope(props.allowedGroupIds, props.allowedConnectionIds);
     emit("update:scope", { allowedGroupIds: [], allowedConnectionIds: null });
     return;
