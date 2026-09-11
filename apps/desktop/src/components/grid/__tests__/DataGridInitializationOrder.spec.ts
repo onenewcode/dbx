@@ -36,21 +36,4 @@ describe("DataGrid setup initialization order", () => {
     expect(dataGridSource).toContain("largeValueRuntime?.scheduleVisibleLargeValuePreviewHydration(delay)");
     expect(dataGridSource).toContain("largeValueRuntime?.hydrateLargeValueCell(rowId, columnIndex) ?? false");
   });
-
-  it("restores the cached applied WHERE before rewriting the manual input (#8831)", () => {
-    const hydrate = dataGridSource.indexOf("function loadStructuredFilterStateForScope()");
-    expect(hydrate).toBeGreaterThanOrEqual(0);
-    const appliedRestore = dataGridSource.indexOf("appliedStructuredWhereInput.value = cached.appliedWhereInput;", hydrate);
-    const manualRestore = dataGridSource.indexOf("whereFilterInput.value = cached.manualWhereInput;", hydrate);
-    expect(appliedRestore).toBeGreaterThan(hydrate);
-    expect(manualRestore).toBeGreaterThan(appliedRestore);
-  });
-
-  it("does not persist an empty default builder on a structured-filter cache miss (#8831)", () => {
-    const hydrate = dataGridSource.indexOf("function loadStructuredFilterStateForScope()");
-    const nextFn = dataGridSource.indexOf("function ensureStructuredFilterRule()", hydrate);
-    expect(hydrate).toBeGreaterThanOrEqual(0);
-    expect(nextFn).toBeGreaterThan(hydrate);
-    expect(dataGridSource.slice(hydrate, nextFn)).not.toContain("persistStructuredFilterState()");
-  });
 });

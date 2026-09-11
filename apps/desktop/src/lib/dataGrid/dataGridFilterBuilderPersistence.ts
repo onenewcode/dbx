@@ -19,7 +19,7 @@ export type DataGridStructuredFilterCacheState = {
 const STRUCTURED_FILTER_STATE_CACHE_MAX_ENTRIES = 128;
 const STORAGE_KEY = "dbx-data-grid-structured-filters";
 const STORAGE_VERSION = 1;
-const FILTER_MODES = new Set<DataGridContextFilterMode>([
+const FILTER_MODE_LIST = [
   "equals",
   "not-equals",
   "is-null",
@@ -38,7 +38,10 @@ const FILTER_MODES = new Set<DataGridContextFilterMode>([
   "not-in",
   "between",
   "not-between",
-]);
+] as const satisfies readonly DataGridContextFilterMode[];
+// Type-level guard: breaks compilation when DataGridContextFilterMode gains a member missing from FILTER_MODE_LIST.
+type _MissingFilterModes = Exclude<DataGridContextFilterMode, (typeof FILTER_MODE_LIST)[number]>;
+const FILTER_MODES: Set<DataGridContextFilterMode> & ([_MissingFilterModes] extends [never] ? unknown : never) = new Set<DataGridContextFilterMode>(FILTER_MODE_LIST);
 
 const structuredFilterStateCache = new Map<string, DataGridStructuredFilterCacheState>();
 let hydrated = false;
