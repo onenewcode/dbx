@@ -1495,9 +1495,11 @@ function loadStructuredFilterStateForScope() {
     const cacheKey = structuredFilterCacheKey.value;
     const scopeKey = structuredFilterScopeKey.value;
     structuredFilterRules.value = cloneDataGridStructuredFilterRules(cached.rules);
-    whereFilterInput.value = cached.manualWhereInput;
+    appliedStructuredWhereInput.value = cached.appliedWhereInput;
     serverColumnFilters.value = structuredClone(cached.serverColumnFilters ?? {});
-    appliedStructuredWhereInput.value = "";
+    // Restore the applied SQL before the manual input so the whereInput watcher
+    // emits the combined condition instead of a brief empty WHERE (#8831).
+    whereFilterInput.value = cached.manualWhereInput;
     void buildStructuredWhereFromRules(structuredFilterRules.value)
       .then((whereInput) => {
         if (requestId !== structuredFilterHydrationRequestId || structuredFilterCacheKey.value !== cacheKey || structuredFilterScopeKey.value !== scopeKey) return;
@@ -1520,7 +1522,6 @@ function loadStructuredFilterStateForScope() {
   appliedStructuredWhereInput.value = "";
   serverColumnFilters.value = {};
   structuredFilterRules.value = filterBuilderColumnOptions.value.length > 0 ? [defaultStructuredFilterRule()] : [];
-  persistStructuredFilterState();
   markConditionInputsApplied();
   structuredFilterHydrationReady.value = true;
 }
