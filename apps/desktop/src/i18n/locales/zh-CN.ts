@@ -3515,6 +3515,7 @@ export default withEnglishFallback({
     },
     linkedServers: "链接服务器",
     defaultDatabase: "默认库",
+    elasticsearchAlias: "别名",
     columns: "字段",
     attributes: "属性",
     methods: "方法",

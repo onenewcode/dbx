@@ -3353,6 +3353,7 @@ export default withEnglishFallback({
     },
     linkedServers: "연결된 서버",
     defaultDatabase: "기본 DB",
+    elasticsearchAlias: "별칭",
     columns: "컬럼",
     attributes: "속성",
     methods: "메서드",

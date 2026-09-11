@@ -3951,7 +3951,7 @@ export async function vectorRenameCollection(connectionId: string, database: str
 
 export async function elasticsearchListIndices(connectionId: string): Promise<string[]> {
   const collections = await documentListCollections(connectionId, "default");
-  return collections.map((c) => c.name);
+  return [...new Set(collections.flatMap((collection) => [collection.name, ...(collection.aliases ?? [])].filter((name) => name.trim())))];
 }
 
 /** Lists every Meilisearch index visible to the current connection credentials. */

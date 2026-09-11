@@ -3474,6 +3474,7 @@ export default withEnglishFallback({
     linkedServers: "連結伺服器",
     materializedViews: "具體化檢視",
     defaultDatabase: "預設庫",
+    elasticsearchAlias: "別名",
     columns: "欄位",
     attributes: "屬性",
     methods: "方法",

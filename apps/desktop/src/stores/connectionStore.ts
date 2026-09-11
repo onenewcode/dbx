@@ -4989,7 +4989,21 @@ export const useConnectionStore = defineStore("connection", () => {
       await ensureConnected(connectionId);
       load = reclaimTreeNodeLoad(load, node);
       const isMeilisearch = getConfig(connectionId)?.db_type === "meilisearch";
-      const indices = await withMetadataLoadTimeout(connectionId, isMeilisearch ? api.meilisearchListIndexes(connectionId) : api.elasticsearchListIndices(connectionId), isMeilisearch ? "Meilisearch indexes" : "Elasticsearch indices");
+      const collections = isMeilisearch
+        ? sortSidebarNames(await withMetadataLoadTimeout(connectionId, api.meilisearchListIndexes(connectionId), "Meilisearch indexes")).map((name) => ({ name, aliases: [] as string[] }))
+        : [...(await withMetadataLoadTimeout(connectionId, api.documentListCollections(connectionId, "default"), "Elasticsearch indices"))].sort((left, right) => compareSidebarNames(left.name, right.name));
+      const indexNodes = collections.map((collection) => {
+        const aliases = collection.aliases?.filter((alias) => alias.trim());
+        return {
+          id: `${connectionId}:__collection:${collection.name}`,
+          label: collection.name,
+          type: "elasticsearch-index" as const,
+          connectionId,
+          database: "default",
+          isExpanded: false,
+          ...(aliases?.length ? { searchAliases: aliases } : {}),
+        };
+      });
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
       setChildren(
@@ -4997,14 +5011,7 @@ export const useConnectionStore = defineStore("connection", () => {
         withSavedSqlRoot(
           connectionId,
           [
-            ...sortSidebarNames(indices).map((index) => ({
-              id: `${connectionId}:__collection:${index}`,
-              label: index,
-              type: "elasticsearch-index" as const,
-              connectionId,
-              database: "default",
-              isExpanded: false,
-            })),
+            ...indexNodes,
             ...(isMeilisearch
               ? [
                   {

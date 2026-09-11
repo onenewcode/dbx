@@ -3567,6 +3567,7 @@ export default withEnglishFallback({
     },
     linkedServers: "Bağlı Sunucular",
     defaultDatabase: "Varsayılan VT",
+    elasticsearchAlias: "Takma ad",
     columns: "Sütunlar",
     attributes: "Öznitelikler",
     methods: "Yöntemler",
