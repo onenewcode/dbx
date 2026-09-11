@@ -271,6 +271,7 @@ async function initializeUpdatePreparation() {
           dialogs.showTransferDialog,
           dialogs.showSqlFileDialog,
           dialogs.showTableImportDialog,
+          dialogs.showMongoImportDialog,
           dialogs.showTableDataGenerateDialog,
           dialogs.showDatabaseExportDialog,
           dialogs.showSchemaDiffDialog,

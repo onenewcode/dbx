@@ -2504,11 +2504,109 @@ fn json_update_to_modifications(value: &serde_json::Value) -> Result<UpdateModif
     }
 }
 
-fn json_object_to_document_extended_json(value: &serde_json::Value) -> Result<Document, String> {
+pub fn json_object_to_document_extended_json(value: &serde_json::Value) -> Result<Document, String> {
     match Bson::try_from(value.clone()).map_err(|e| e.to_string())? {
         Bson::Document(doc) => Ok(doc),
         other => Err(format!("Expected a JSON object, got {other:?}")),
     }
+}
+
+pub fn document_to_canonical_extended_json(document: &Document) -> serde_json::Value {
+    Bson::Document(document.clone()).into_canonical_extjson()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MongoBulkWriteError {
+    pub message: String,
+    pub index: Option<usize>,
+    pub code: Option<i32>,
+    pub retryable: bool,
+}
+
+pub async fn insert_bson_documents(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    documents: Vec<Document>,
+) -> Result<u64, MongoBulkWriteError> {
+    if documents.is_empty() {
+        return Ok(0);
+    }
+    let col = client.database(database).collection::<Document>(collection);
+    match col.insert_many(documents).await {
+        Ok(result) => Ok(result.inserted_ids.len() as u64),
+        Err(error) => Err(map_insert_many_error(error)),
+    }
+}
+
+fn map_insert_many_error(error: mongodb::error::Error) -> MongoBulkWriteError {
+    use mongodb::error::{ErrorKind, WriteFailure};
+    match error.kind.as_ref() {
+        ErrorKind::Write(WriteFailure::WriteError(write_error)) => MongoBulkWriteError {
+            message: write_error.message.clone(),
+            index: None,
+            code: Some(write_error.code),
+            retryable: is_retryable_mongo_write_code(write_error.code),
+        },
+        ErrorKind::InsertMany(failure) => {
+            let first = failure.write_errors.as_ref().and_then(|errors| errors.iter().min_by_key(|error| error.index));
+            MongoBulkWriteError {
+                message: first.map(|error| error.message.clone()).unwrap_or_else(|| error.to_string()),
+                index: first.map(|error| error.index),
+                code: first.map(|error| error.code),
+                retryable: first.map(|error| is_retryable_mongo_write_code(error.code)).unwrap_or(true),
+            }
+        }
+        ErrorKind::BulkWrite(failure) => {
+            let first = failure.write_errors.iter().min_by_key(|(index, _)| *index);
+            MongoBulkWriteError {
+                message: first.map(|(_, error)| error.message.clone()).unwrap_or_else(|| error.to_string()),
+                index: first.map(|(index, _)| *index),
+                code: first.map(|(_, error)| error.code),
+                retryable: first.map(|(_, error)| is_retryable_mongo_write_code(error.code)).unwrap_or(true),
+            }
+        }
+        ErrorKind::Io(_) | ErrorKind::ConnectionPoolCleared { .. } | ErrorKind::ServerSelection { .. } => {
+            MongoBulkWriteError { message: error.to_string(), index: None, code: None, retryable: true }
+        }
+        _ => MongoBulkWriteError { message: error.to_string(), index: None, code: None, retryable: false },
+    }
+}
+
+fn is_retryable_mongo_write_code(code: i32) -> bool {
+    !matches!(code, 11000 | 11001 | 12582)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn for_each_find_document(
+    client: &Client,
+    database: &str,
+    collection: &str,
+    filter: Option<&str>,
+    projection: Option<&str>,
+    sort: Option<&str>,
+    collation: Option<&str>,
+    batch_size: u32,
+    mut on_document: impl FnMut(Document) -> Result<(), String>,
+) -> Result<(), String> {
+    let col = client.database(database).collection::<Document>(collection);
+    let filter_doc = parse_optional_filter_document(filter)?.unwrap_or_default();
+    let mut find = col.find(filter_doc).batch_size(batch_size);
+    if let Some(projection) = parse_optional_json_document(projection, "projection")? {
+        find = find.projection(projection);
+    }
+    if let Some(sort) = parse_optional_json_document(sort, "sort")? {
+        find = find.sort(sort);
+    }
+    if let Some(collation) = parse_find_collation(collation)? {
+        find = find.collation(collation);
+    }
+    let mut cursor = find.await.map_err(|error| error.to_string())?;
+    while cursor.advance().await.map_err(|error| error.to_string())? {
+        let document = cursor.deserialize_current().map_err(|error| error.to_string())?;
+        on_document(document)?;
+    }
+    Ok(())
 }
 
 fn json_object_to_document_preserving_existing(

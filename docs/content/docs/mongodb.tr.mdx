@@ -99,14 +99,29 @@ GridFS çalışma alanı bucket'ları ve dosyaları yönetir:
 
 Bir bucket'ı silmek dosyalarını ve parçalarını kaldırır. Üretimde bunu yapmadan önce bucket adını ve yedeği doğrulayın.
 
-## Kopyalama ve Dışa Aktarma
+## İçe ve Dışa Aktarma
 
-- Geçerli belgeyi, seçili belgeleri ya da alan değerlerini kopyalayın
-- Düz JSON ya da tür bilgisini koruyan Genişletilmiş JSON olarak kopyalayın
-- Izgara sonucundan çoklu biçim kopyalama ve dışa aktarma kullanın
-- Bir MongoDB `find` sonucunu dışa aktarma; yalnızca görüntülenen sayfayla sınırlı kalmaz, sorgu ve dışa aktarma sınırlarına tabi olarak sonucun tamamını kapsar
+Koleksiyon belgelerinin CSV/JSON içe aktarma ve CSV/NDJSON dışa aktarma iş akışı, ilişkisel Tablo İçe Aktarma’dan ayrıdır. Her CSV satırı bir belge olur, iç içe değerler korunur ve `$oid`, `$date` gibi Extended JSON türleri saklanabilir.
 
-Büyük bir koleksiyonu dışa aktarmadan önce filtreleri daraltın; sunucu imleç kullanımını, ağ aktarımını ve yerel dosya boyutunu izleyin.
+### Veri içe aktarma
+
+1. Bir koleksiyona sağ tıklayıp **Veri içe aktar**’ı seçin.
+2. Bir `.csv`, `.json` veya `.ndjson` dosyası seçin. Masaüstü yerel yolu okur; Web geçici bir sunucu dosyasına yükler.
+3. Kodlama, ayırıcı, başlık, boş değer ve tür ayarlarını önizlemeyle doğrulayın.
+4. Yalnızca ekleme yazımını onaylayın. Yinelenen `_id` içe aktarmayı durdurur. Gönderilmiş toplu işler geri alınmaz.
+
+CSV, MongoDB Compass ile aynıdır: başlık satırı, noktalı iç içe alanlar (`address.city`), 24 karakterlik onaltılık ObjectId, ISO-8601 tarih ve boş hücreler null. İçe aktarma sütun türlerini Compass gibi çıkarır; `_id` onaltılığı ObjectId olarak geri yüklenir. JSON/NDJSON Extended JSON (`$oid`, `$date`) kullanır. Tüm metin kipi her hücreyi metin tutar.
+
+İlk sürüm sınırları: yalnızca ekleme (truncate veya upsert yok), Excel/GridFS/BSON ikili içe aktarma yok ve başarısız toplu işler otomatik yeniden denenmez.
+
+### Veri dışa aktarma
+
+- Bir koleksiyona sağ tıklayıp **Veri dışa aktar**, ardından CSV veya NDJSON seçin. Tablo dışa aktarmada olduğu gibi kaydetme iletişim kutusu hemen açılır.
+- Dışa aktarma her zaman tam sorgu sonucunu sürdürür; geçerli sayfada durmaz.
+- CSV’deki iç içe nesneler ve diziler Extended JSON dizeleridir. NDJSON her satıra bir kanonik Extended JSON belgesi yazar.
+- 256’dan fazla ayırt edici alanı olan koleksiyonlar NDJSON kullanmalıdır.
+
+Yalnızca görünen seçim gerekiyorsa, ızgaradan geçerli belgeyi, seçili belgeleri veya alan değerlerini düz JSON ya da Extended JSON olarak kopyalayabilirsiniz.
 
 ## Güvenlik ve Uyumluluk Sınırları
 

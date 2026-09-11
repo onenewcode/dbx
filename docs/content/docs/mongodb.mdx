@@ -99,14 +99,29 @@ The GridFS workspace manages buckets and files:
 
 Dropping a bucket removes its files and chunks. Verify the bucket name and backup before doing this in production.
 
-## Copy and Export
+## Import and Export
 
-- Copy the current document, selected documents, or field values
-- Copy as plain JSON or Extended JSON that preserves type information
-- Use multi-format copy and export from the grid result
-- Exporting a MongoDB `find` result continues through the full result scope instead of only the currently displayed page, subject to query and export limits
+Collection documents have a dedicated CSV/JSON import and CSV/NDJSON export workflow. This is separate from relational Table Import: each CSV row becomes a document, nested values stay nested, and Extended JSON types such as `$oid` and `$date` can be preserved.
 
-Narrow filters before exporting a large collection and monitor server cursor use, network transfer, and local file size.
+### Import data
+
+1. Right-click a collection and choose **Import data**.
+2. Select a `.csv`, `.json`, or `.ndjson` file. Desktop reads the local path; Web uploads it to a temporary server file.
+3. Review encoding, delimiter, header, empty-value, and type settings against the preview.
+4. Confirm append-only insert. Duplicate `_id` values stop the import. Batches that already committed are not rolled back.
+
+CSV follows MongoDB Compass: a header row, nested fields as dotted paths (`address.city`), ObjectId as 24-character hex, dates as ISO-8601, and empty cells as null. Import infers column types the same way Compass does; `_id` hex is restored as ObjectId. JSON/NDJSON still use Extended JSON (`$oid`, `$date`). All strings keeps every cell as text.
+
+First-release limits: append only (no truncate or upsert), no Excel/GridFS/BSON binary import, and no automatic retry of failed batches.
+
+### Export data
+
+- Right-click a collection and choose **Export data**, then CSV or NDJSON. This opens the save-file dialog immediately, the same as table export.
+- The export always continues through the complete query result. It does not stop at the current page.
+- CSV nested objects and arrays are Extended JSON strings. NDJSON writes one canonical Extended JSON document per line.
+- Collections with more than 256 distinct fields should use NDJSON.
+
+Copy the current document, selected documents, or field values as plain JSON or Extended JSON from the grid when you only need the visible selection.
 
 ## Safety and Compatibility Boundaries
 

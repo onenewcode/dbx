@@ -127,6 +127,16 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     };
   }
 
+  function openMongoImport() {
+    const node = activeNode.value;
+    if (!node.connectionId || !node.database || node.type !== "mongo-collection") return;
+    connectionStore.mongoImportSource = {
+      connectionId: node.connectionId,
+      database: node.database,
+      collection: node.label,
+    };
+  }
+
   function openStructureEditor() {
     const node = activeNode.value;
     if (!node.connectionId || !node.database) return;
@@ -168,6 +178,7 @@ export function useSidebarTreeToolRuntime(options: SidebarTreeToolRuntimeOptions
     openDiagram,
     openDocs,
     openFieldLineage,
+    openMongoImport,
     openScheduledBackups,
     openSchemaDiff,
     openSqlFileExecution,
