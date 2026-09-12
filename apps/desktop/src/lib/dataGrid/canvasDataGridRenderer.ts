@@ -1,4 +1,4 @@
-import { firstLineCellDisplayValue, type CellValue } from "@/lib/dataGrid/cellValue";
+import { gridCellDisplayValue, type CellValue } from "@/lib/dataGrid/cellValue";
 import { BOOLEAN_CHECKBOX_SIZE, isBooleanCellValue, normalizeBooleanCellValue } from "@/lib/dataGrid/dataGridBooleanColumn";
 import { resolveDataGridCellTextRole } from "@/lib/dataGrid/dataGridCellTextVisual";
 import type { DataGridTypeVisualKind } from "@/lib/dataGrid/dataGridColumnType";
@@ -100,6 +100,7 @@ export interface DrawCanvasDataGridOptions {
   rightAlignedActionCell?: CanvasRightAlignedActionCell | null;
   booleanDisplayMode?: "checkbox" | "dropdown";
   flatteningMultiLineEnabled: boolean;
+  showWhitespace?: boolean;
 }
 
 type NumericCanvasContext = CanvasRenderingContext2D & {
@@ -361,6 +362,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
     columnIsBoolean,
     booleanDisplayMode = "dropdown",
     flatteningMultiLineEnabled,
+    showWhitespace = false,
   } = options;
   // 框选热路径：整次绘制只判断一次。常见情况（单矩形 / 多列且每段都是多格）可跳过逐格 kind 查询
   const paintSelectionOuterFrame = dataGridSelectionUsesOuterFrame(selectionFrames);
@@ -596,7 +598,7 @@ export function drawCanvasDataGrid(options: DrawCanvasDataGridOptions) {
         }
       } else {
         const rawDisplayText = (value === null ? newRowCellPlaceholder?.(item, actualColIdx) : null) ?? formatCell(value, actualColIdx, item);
-        const displayText = isEditingThisCell ? "" : firstLineCellDisplayValue(rawDisplayText, flatteningMultiLineEnabled);
+        const displayText = isEditingThisCell ? "" : gridCellDisplayValue(rawDisplayText, flatteningMultiLineEnabled, showWhitespace && value !== null);
         const text = isEditingThisCell ? displayText : fitCanvasText(ctx, displayText, cellMaxWidth, isBooleanNullCell ? "left" : isRightAlign ? "right" : "left");
         const anchorX = isBooleanNullCell ? alignCanvasPixel(drawX + colWidth / 2, scaleX) : textAnchorX;
         ctx.fillText(text, anchorX, textY);

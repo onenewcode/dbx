@@ -384,6 +384,7 @@ export const previewSqlFile = forward("previewSqlFile");
 export const executeSqlFile = forward("executeSqlFile");
 export const executeSqlFiles = forward("executeSqlFiles");
 export const cancelSqlFileExecution = forward("cancelSqlFileExecution");
+export const inspectSqlFileTables = forward("inspectSqlFileTables");
 export const listenSqlFileProgress = forward("listenSqlFileProgress");
 export const pendingOpenSqlFiles = forward("pendingOpenSqlFiles");
 export const pendingOpenDbFiles = forward("pendingOpenDbFiles");
@@ -514,6 +515,8 @@ export const redisJsonSet = forward("redisJsonSet");
 export const redisCheckJsonModule = forward("redisCheckJsonModule");
 export const redisSetTtl = forward("redisSetTtl");
 export const redisSetExpireAt = forward("redisSetExpireAt");
+export const redisSetKeysTtl = forward("redisSetKeysTtl");
+export const redisSetKeysExpireAt = forward("redisSetKeysExpireAt");
 export const redisDeleteKeys = forward("redisDeleteKeys");
 export const redisFlushDb = forward("redisFlushDb");
 export const redisExecuteCommand = forward("redisExecuteCommand");
@@ -905,6 +908,7 @@ export type {
   RedisDatabaseInfo,
   RedisHashItem,
   RedisKeyInfo,
+  RedisKeysExpiryResult,
   RedisListItem,
   RedisSetItem,
   RedisStreamConsumer,
@@ -973,6 +977,7 @@ export type {
   SqlFileStatus,
   SqlFileRequest,
   SqlFilePreview,
+  SqlFileTable,
   SqlFileProgress,
   TransferRequest,
   TransferProgress,

@@ -662,6 +662,8 @@ async fn main() {
         .route("/redis/check-json-module", post(routes::redis::check_json_module))
         .route("/redis/set-ttl", post(routes::redis::set_ttl))
         .route("/redis/set-expire-at", post(routes::redis::set_expire_at))
+        .route("/redis/set-keys-ttl", post(routes::redis::set_keys_ttl))
+        .route("/redis/set-keys-expire-at", post(routes::redis::set_keys_expire_at))
         .route("/redis/delete-keys", post(routes::redis::delete_keys))
         .route("/redis/flush-db", post(routes::redis::flush_db))
         .route("/redis/execute-command", post(routes::redis::execute_command))
@@ -1036,6 +1038,7 @@ async fn main() {
                 .layer(DefaultBodyLimit::max(routes::sql_file::sql_file_upload_hard_cap_bytes())),
         )
         .route("/sql-file/execute", post(routes::sql_file::execute_sql_file))
+        .route("/sql-file/tables", post(routes::sql_file::inspect_sql_file_tables))
         .route("/sql-file/progress/{executionId}", get(routes::sql_file::sql_file_progress))
         .route("/sql-file/cancel", post(routes::sql_file::cancel_sql_file))
         // Table import

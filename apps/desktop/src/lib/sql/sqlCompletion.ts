@@ -18,6 +18,7 @@ import { identifierMatchScore, matchesIdentifierSearch } from "@/lib/sql/identif
 import { containsHan, orderedSubsequenceSpan, pinyinFirstLetters } from "@/lib/common/pinyin";
 import { quoteTableIdentifier } from "@/lib/table/tableSelectSql";
 import { driverProfileCompletionObjects, driverProfileCompletionTableMetadata, driverProfileCompletionTables, driverProfileRoutineSignatures } from "@/lib/database/driverProfileExtensions";
+import { DORIS_FUNCTION_DOCS, DORIS_FUNCTION_SIGNATURES } from "@/lib/sql/doris/functions";
 
 export { DEFAULT_SQL_SNIPPETS, resolveSqlSnippetBodyForDatabase } from "@/lib/sql/sqlSnippetTemplates";
 
@@ -585,8 +586,8 @@ const DATABASE_SQL_KEYWORDS: Partial<Record<DatabaseType, string[]>> = {
   manticoresearch: MANTICORESEARCH_SQL_KEYWORDS,
   duckdb: ["COMMENT"],
   clickhouse: ["COMMENT"],
-  doris: ["COMMENT"],
-  starrocks: ["COMMENT"],
+  doris: ["COMMENT", "MATERIALIZED", "MATERIALIZED VIEW", "DISTRIBUTED BY HASH", "DUPLICATE KEY", "AGGREGATE KEY", "UNIQUE KEY", "PRIMARY KEY", "PROPERTIES", "PARTITION BY", "BUCKETS", "LATERAL VIEW", "EXPLODE", "ARRAY", "MAP", "STRUCT", "BITMAP", "HLL"],
+  starrocks: ["COMMENT", "MATERIALIZED", "MATERIALIZED VIEW", "DISTRIBUTED BY HASH", "DUPLICATE KEY", "PROPERTIES", "PARTITION BY", "BUCKETS", "LATERAL VIEW"],
   dameng: ["COMMENT"],
   kingbase: ["COMMENT"],
   vastbase: ["COMMENT"],
@@ -645,9 +646,11 @@ const JOIN_MODIFIERS = new Set(["left", "right", "inner", "outer", "cross", "ful
 const JOIN_MODIFIER_KEYWORD_PHRASES = ["LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "FULL JOIN", "CROSS JOIN", "NATURAL JOIN", "LEFT OUTER JOIN", "RIGHT OUTER JOIN", "FULL OUTER JOIN"];
 const MAX_TABLE_COMPLETION_ITEMS = 200;
 const EXACT_LABEL_MATCH_BOOST = 10000;
+const EXACT_CUSTOM_SNIPPET_TRIGGER_BOOST = 40000;
 
 function isTableTriggerKeyword(keyword: string, options: SqlSemanticBuildOptions): boolean {
-  return TABLE_TRIGGER_KEYWORDS.has(keyword) || (keyword === "desc" && resolveSqlDialectId(options) === "mysql");
+  const dialectId = resolveSqlDialectId(options);
+  return TABLE_TRIGGER_KEYWORDS.has(keyword) || (keyword === "desc" && (dialectId === "mysql" || dialectId === "doris"));
 }
 
 // Keywords that only make sense in DDL / statement-start contexts (not inside SELECT/INSERT/UPDATE/DELETE)
@@ -1130,6 +1133,8 @@ const DATABASE_FUNCTION_SIGNATURES: Partial<Record<DatabaseType, Map<string, str
   "cloudflare-d1": CLOUDFLARE_D1_FUNCTION_SIGNATURES,
   sqlserver: SQLSERVER_FUNCTION_SIGNATURES,
   manticoresearch: MANTICORESEARCH_FUNCTION_SIGNATURES,
+  doris: DORIS_FUNCTION_SIGNATURES,
+  starrocks: DORIS_FUNCTION_SIGNATURES,
 };
 
 const MYSQL_FUNCTION_APPLY_TEMPLATES = new Map<string, string>([
@@ -1540,15 +1545,22 @@ class SqlCompletionProvider {
       return dedupeAndSort(buildMongoCompletionItemsFromContext({ mode: "root", prefix: context.prefix, from: 0 }).map(mongoCompletionItemToSqlCompletionItem));
     }
 
+    const snippets = this.databaseType === "manticoresearch" ? [...(this.input.snippets ?? DEFAULT_SQL_SNIPPETS), ...MANTICORESEARCH_SQL_SNIPPETS] : (this.input.snippets ?? DEFAULT_SQL_SNIPPETS);
+    const customSnippetItems = buildSnippetItems(
+      context.prefix,
+      snippets.filter((snippet) => !shouldFormatBuiltinSnippet(snippet)),
+      this.input.keywordCase,
+      this.databaseType,
+    );
     if (context.preferredValueKeywords?.length) {
-      return dedupeAndSort(buildPreferredKeywordItems(context.prefix, context.preferredValueKeywords, this.input.keywordCase));
+      return dedupeAndSort([...customSnippetItems, ...buildPreferredKeywordItems(context.prefix, context.preferredValueKeywords, this.input.keywordCase)]);
     }
 
     const preferReferencedColumns = hasMatchingReferencedColumnPrefix(context, this.input.columnsByTable);
+    this.items.push(...customSnippetItems);
     if (!pendingJoinKeyword && !context.exclusiveTableSuggestions && !context.exclusiveColumnSuggestions && !context.exclusiveRoutineSuggestions) {
-      const snippets = this.databaseType === "manticoresearch" ? [...(this.input.snippets ?? DEFAULT_SQL_SNIPPETS), ...MANTICORESEARCH_SQL_SNIPPETS] : (this.input.snippets ?? DEFAULT_SQL_SNIPPETS);
       if (!preferReferencedColumns) {
-        this.items.push(...buildSnippetItems(context.prefix, snippets, this.input.keywordCase, this.databaseType));
+        this.items.push(...buildSnippetItems(context.prefix, snippets.filter(shouldFormatBuiltinSnippet), this.input.keywordCase, this.databaseType));
       }
       if (!preferReferencedColumns || context.suggestRoutines) {
         const functionItems = context.dataTypeContext ? [] : buildFunctionSnippetItems(context.prefix, getFunctionDescriptions(this.t), this.databaseType, context.openingParenAfterCursor, this.input.keywordCase, this.input.functionCase);
@@ -4999,6 +5011,7 @@ function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?:
       const boostByPrefix = computeBoost(snippet.prefix, prefix);
       const boostByLabel = computeBoost(snippet.label, prefix);
       const matchesByPrefix = matchesPrefix(snippet.prefix, prefix);
+      const isExactCustomTrigger = !shouldFormatBuiltinSnippet(snippet) && snippet.prefix.toLowerCase() === prefix.toLowerCase();
       // When the user types past the snippet prefix (e.g. "sele" vs prefix "sel"),
       // they are likely typing the actual keyword — reduce the base boost so
       // the real keyword can rank higher.
@@ -5014,7 +5027,8 @@ function buildSnippetItems(prefix: string, snippets: SqlSnippet[], keywordCase?:
         type: "snippet" as const,
         detail: body,
         apply,
-        boost: Math.max(boostByPrefix, boostByLabel) + baseBoost,
+        exactMatch: isExactCustomTrigger || undefined,
+        boost: Math.max(boostByPrefix, boostByLabel) + baseBoost + (isExactCustomTrigger ? EXACT_CUSTOM_SNIPPET_TRIGGER_BOOST : 0),
       };
     });
 }
@@ -5027,6 +5041,13 @@ function activeFunctionSignatures(databaseType?: DatabaseType): Map<string, stri
     for (const [name, parameters] of databaseSignatures) signatures.set(name, parameters);
   }
   return signatures;
+}
+
+const DORIS_FUNCTION_DESCRIPTIONS = new Map(DORIS_FUNCTION_DOCS);
+const EMPTY_FUNCTION_DESCRIPTIONS = new Map<string, string>();
+
+function activeFunctionDescriptions(databaseType?: DatabaseType): Map<string, string> {
+  return databaseType === "doris" || databaseType === "starrocks" ? DORIS_FUNCTION_DESCRIPTIONS : EMPTY_FUNCTION_DESCRIPTIONS;
 }
 
 function formatFunctionSignatureApply(definition: ClickHouseFunctionDefinition, omitOpeningParen: boolean): string {
@@ -5079,7 +5100,7 @@ function buildFunctionSnippetItems(prefix: string, functionDescriptions: Map<str
     items.push({
       label: functionName,
       type: "function" as const,
-      detail: functionDescriptions.get(name) ?? "function",
+      detail: activeFunctionDescriptions(databaseType).get(name) ?? functionDescriptions.get(name) ?? "function",
       apply: mysqlApply ? `${functionName}${applyGeneratedSqlTemplateKeywordCase(mysqlApply.slice(name.length), keywordCase)}` : `${functionName}(${paramStr})`,
       boost: computeBoost(name, prefix) + 300,
     });

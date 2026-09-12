@@ -86,6 +86,7 @@ import type {
   RedisStreamPage,
   RedisStreamPendingPage,
   RedisValue,
+  RedisKeysExpiryResult,
   RedisScanResult,
   RedisCommandResult,
   RedisSlowlogEntry,
@@ -121,6 +122,7 @@ import type {
   HistoryConnectionOption,
   SqlFileRequest,
   SqlFilePreview,
+  SqlFileTable,
   SqlFileProgress,
   TransferRequest,
   TransferProgress,
@@ -253,6 +255,7 @@ import type {
 } from "@/types/nacos";
 import { safeLocalStorageGet, safeLocalStorageSet } from "@/lib/backend/safeStorage";
 import { appendDebugLog, isDebugLoggingEnabled } from "@/lib/backend/debugLog";
+import { collectBrowserSupportInfo } from "@/lib/app/supportInfo";
 import { normalizeConnectionTestResult } from "@/lib/connection/connectionDatabaseInfo";
 import type { AnnotationFile, SchemaSnapshot } from "@/docs/types";
 
@@ -2260,6 +2263,10 @@ export async function executeSqlFile(request: SqlFileRequest): Promise<void> {
   return post("/api/sql-file/execute", { request });
 }
 
+export async function inspectSqlFileTables(filePath: string): Promise<SqlFileTable[]> {
+  return post("/api/sql-file/tables", { filePath });
+}
+
 export async function executeSqlFiles(request: SqlFileRequest, filePaths: string[]): Promise<void> {
   return post("/api/sql-file/execute", { request, filePaths });
 }
@@ -3072,6 +3079,14 @@ export async function redisSetExpireAt(connectionId: string, db: number, keyRaw:
     keyRaw,
     expireAt,
   });
+}
+
+export async function redisSetKeysTtl(connectionId: string, db: number, keyRaws: string[], ttl: number): Promise<RedisKeysExpiryResult> {
+  return post("/api/redis/set-keys-ttl", { connectionId, db, keyRaws, ttl });
+}
+
+export async function redisSetKeysExpireAt(connectionId: string, db: number, keyRaws: string[], expireAt: number): Promise<RedisKeysExpiryResult> {
+  return post("/api/redis/set-keys-expire-at", { connectionId, db, keyRaws, expireAt });
 }
 
 export async function redisDeleteKeys(connectionId: string, db: number, keyRaws: string[]): Promise<number> {
@@ -3987,7 +4002,7 @@ export async function mongoCloneCollection(connectionId: string, database: strin
 
 export async function elasticsearchListIndices(connectionId: string): Promise<string[]> {
   const collections = await documentListCollections(connectionId, "default");
-  return collections.map((c) => c.name);
+  return [...new Set(collections.flatMap((collection) => [collection.name, ...(collection.aliases ?? [])].filter((name) => name.trim())))];
 }
 
 /** Lists every Meilisearch index visible to the current connection credentials. */
@@ -4636,6 +4651,7 @@ export async function getAppSupportInfo(): Promise<AppSupportInfo> {
     osName: navigator.platform || "web",
     osVersion: null,
     arch: "",
+    userAgent: collectBrowserSupportInfo(),
   };
 }
 

@@ -301,6 +301,16 @@ export const AI_PROVIDER_PRESETS: Record<AiProvider, AiProviderPreset> = {
     authMethod: "bearer",
     requiresApiKey: true,
   },
+  zhipu: {
+    label: "Zhipu",
+    iconSlug: "zhipu",
+    provider: "zhipu",
+    endpoint: "https://open.bigmodel.cn/api/paas/v4",
+    model: "glm-5.3",
+    apiStyle: "completions",
+    authMethod: "bearer",
+    requiresApiKey: true,
+  },
   minimax: {
     label: "MiniMax",
     iconSlug: "minimax",
@@ -490,6 +500,9 @@ export function getAiProviderPresetDefaultEndpoint(preset: AiProviderPreset | Ai
   if (preset.provider === "minimax" && locale === "zh-CN") {
     return "https://api.minimaxi.com/v1";
   }
+  if (preset.provider === "zhipu" && locale !== "zh-CN") {
+    return "https://api.z.ai/api/paas/v4";
+  }
   return preset.endpoint;
 }
 
@@ -588,6 +601,7 @@ function inferAiProviderFromConfig(config: Partial<AiConfig> | null | undefined)
   if (endpoint.includes("deepseek") || model.includes("deepseek")) return "deepseek";
   if (endpoint.includes("moonshot") || endpoint.includes("kimi.com") || model.includes("kimi")) return "kimi";
   if (endpoint.includes("dashscope") || endpoint.includes("aliyuncs") || model.includes("qwen")) return "qwen";
+  if (endpoint.includes("bigmodel.cn") || endpoint.includes("api.z.ai") || model.startsWith("glm-")) return "zhipu";
   if (endpoint.includes("generativelanguage.googleapis.com") || model.includes("gemini")) return "gemini";
   if (endpoint.includes("minimax.io") || endpoint.includes("minimaxi.com") || model.includes("minimax")) return "minimax";
   if (endpoint.includes("localhost:11434") || endpoint.includes("127.0.0.1:11434")) return "ollama";
@@ -781,6 +795,7 @@ export interface EditorSettings {
   /** Preserved for downgrade compatibility; current clients use queryResultMaxRows. */
   infiniteScrollMaxRows: number;
   flatteningMultiLineText: boolean;
+  dataGridShowWhitespace: boolean;
   regexMaxMatchCount: number;
   autoCalculateTotalRows: boolean;
   mongoViewMode: "document" | "table";
@@ -1018,6 +1033,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   infiniteScroll: false,
   infiniteScrollMaxRows: 5000,
   flatteningMultiLineText: false,
+  dataGridShowWhitespace: false,
   regexMaxMatchCount: 1000,
   autoCalculateTotalRows: false,
   mongoViewMode: "document",
@@ -1476,6 +1492,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     infiniteScroll: settings.infiniteScroll ?? DEFAULT_EDITOR_SETTINGS.infiniteScroll,
     infiniteScrollMaxRows: typeof settings.infiniteScrollMaxRows === "number" && settings.infiniteScrollMaxRows >= 1000 && settings.infiniteScrollMaxRows <= 50000 ? Math.round(settings.infiniteScrollMaxRows) : DEFAULT_EDITOR_SETTINGS.infiniteScrollMaxRows,
     flatteningMultiLineText: settings.flatteningMultiLineText ?? DEFAULT_EDITOR_SETTINGS.flatteningMultiLineText,
+    dataGridShowWhitespace: settings.dataGridShowWhitespace ?? DEFAULT_EDITOR_SETTINGS.dataGridShowWhitespace,
     regexMaxMatchCount: typeof settings.regexMaxMatchCount === "number" && Number.isFinite(settings.regexMaxMatchCount) && settings.regexMaxMatchCount >= 100 && settings.regexMaxMatchCount <= 10000 ? Math.round(settings.regexMaxMatchCount) : DEFAULT_EDITOR_SETTINGS.regexMaxMatchCount,
     autoCalculateTotalRows: settings.autoCalculateTotalRows ?? DEFAULT_EDITOR_SETTINGS.autoCalculateTotalRows,
     mongoViewMode: settings.mongoViewMode === "table" ? "table" : DEFAULT_EDITOR_SETTINGS.mongoViewMode,
@@ -2333,6 +2350,7 @@ export const useSettingsStore = defineStore("settings", () => {
     if (partial.completionTriggerMode !== undefined) editorSettings.value.completionTriggerMode = normalizeCompletionTriggerMode(partial.completionTriggerMode);
     if (partial.defaultTransactionMode !== undefined) editorSettings.value.defaultTransactionMode = normalizeDefaultTransactionMode(partial.defaultTransactionMode);
     if (partial.flatteningMultiLineText !== undefined) editorSettings.value.flatteningMultiLineText = partial.flatteningMultiLineText;
+    if (partial.dataGridShowWhitespace !== undefined) editorSettings.value.dataGridShowWhitespace = partial.dataGridShowWhitespace;
   }
 
   function updateEditorSettings(partial: Partial<EditorSettings>) {

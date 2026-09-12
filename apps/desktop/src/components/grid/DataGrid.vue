@@ -67,6 +67,7 @@ import { Tabs, TabsContent } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import ErrorBanner from "@/components/ui/ErrorBanner.vue";
 import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
+import DataGridValueTransform from "@/components/grid/DataGridValueTransform.vue";
 import DataGridCellDetailPanel from "@/components/grid/DataGridCellDetailPanel.vue";
 import DataGridPagination from "@/components/grid/DataGridPagination.vue";
 import DataGridSearchBar from "@/components/grid/DataGridSearchBar.vue";
@@ -137,7 +138,7 @@ import {
   type TransposeScrollAlignment,
 } from "@/lib/dataGrid/dataGridTranspose";
 import { canApplyGridSelectionValue, canDeleteGridRowItem, canEditGridCellDetail, matchesRowStatusFilter, shouldShowQuickEntryDraftRow, type RowStatus, type RowStatusFilter } from "@/lib/dataGrid/gridRowStatus";
-import { displayCellValue, firstLineCellDisplayValue, limitDataGridCellDisplay, SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH, type CellValue } from "@/lib/dataGrid/cellValue";
+import { displayCellValue, firstLineCellDisplayValue, gridCellDisplayValue, limitDataGridCellDisplay, SQLSERVER_DATA_GRID_CELL_DISPLAY_MAX_LENGTH, type CellValue } from "@/lib/dataGrid/cellValue";
 import { cellExternalUrl } from "@/lib/dataGrid/cellExternalUrl";
 import { getApplicablePreviewActions, type PreviewAction } from "@/lib/dataGrid/resultPreviewRegistry";
 import "@/lib/dataGrid/geometryMapPreview";
@@ -502,6 +503,10 @@ interface DataGridProps {
    * adopts a stale viewport or selection (#7341).
    */
   viewGeneration?: string;
+  /** Stable logical query identity used to gate local-filter restoration. */
+  localColumnFilterRestoreKey?: string;
+  /** Column names captured with a document-store local-filter snapshot. */
+  localColumnFilterColumns?: string[];
   exportSql?: string;
   onExecuteSql?: (sql: string) => Promise<void>;
   fullExportResult?: (onProgress?: (info: { rowsExported: number; totalRows: number | null }) => void) => Promise<QueryResult | undefined>;
@@ -746,6 +751,7 @@ const infiniteScrollEnabled = computed(() => props.paginationEnabled && settings
 const queryResultMaxRows = computed(() => effectiveQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows));
 const paginationMaxRows = computed(() => (isResultsContext.value ? queryResultMaxRows.value : undefined));
 const infiniteScrollMaxRows = computed(() => continuousQueryResultMaxRows(settingsStore.editorSettings.queryResultMaxRowsEnabled, settingsStore.editorSettings.queryResultMaxRows));
+const showWhitespaceEnabled = computed(() => settingsStore.editorSettings.dataGridShowWhitespace);
 const flatteningMultiLineEnabled = computed(() => settingsStore.editorSettings.flatteningMultiLineText);
 const expandedCellEditor = ref<{ rowId: number; col: number } | null>(null);
 const readonlyTextCell = ref<{
@@ -1074,7 +1080,7 @@ type FilterMode = DataGridContextFilterMode;
 
 type StructuredFilterRule = DataGridStructuredFilterRule;
 
-const localColumnFilters = ref<Record<number, Set<string>>>(restoreDataGridLocalColumnFilters(props.result.local_column_filters, props.result.columns.length));
+const localColumnFilters = ref<Record<number, Set<string>>>(restoreDataGridLocalColumnFilters(props.result.local_column_filters, props.result.columns.length, props.result.columns, props.localColumnFilterColumns));
 const localFilterOpenColumn = ref<number | null>(null);
 const headerActionMenuOpenColumn = ref<number | null>(null);
 const headerSortMenuOpenColumn = ref<number | null>(null);
@@ -1495,9 +1501,11 @@ function loadStructuredFilterStateForScope() {
     const cacheKey = structuredFilterCacheKey.value;
     const scopeKey = structuredFilterScopeKey.value;
     structuredFilterRules.value = cloneDataGridStructuredFilterRules(cached.rules);
-    whereFilterInput.value = cached.manualWhereInput;
+    appliedStructuredWhereInput.value = cached.appliedWhereInput;
     serverColumnFilters.value = structuredClone(cached.serverColumnFilters ?? {});
-    appliedStructuredWhereInput.value = "";
+    // Restore the applied SQL before the manual input so the whereInput watcher
+    // emits the combined condition instead of a brief empty WHERE (#8831).
+    whereFilterInput.value = cached.manualWhereInput;
     void buildStructuredWhereFromRules(structuredFilterRules.value)
       .then((whereInput) => {
         if (requestId !== structuredFilterHydrationRequestId || structuredFilterCacheKey.value !== cacheKey || structuredFilterScopeKey.value !== scopeKey) return;
@@ -1520,7 +1528,6 @@ function loadStructuredFilterStateForScope() {
   appliedStructuredWhereInput.value = "";
   serverColumnFilters.value = {};
   structuredFilterRules.value = filterBuilderColumnOptions.value.length > 0 ? [defaultStructuredFilterRule()] : [];
-  persistStructuredFilterState();
   markConditionInputsApplied();
   structuredFilterHydrationReady.value = true;
 }
@@ -1595,11 +1602,45 @@ function buildGroupedWhere(conditions: string[], rules: StructuredFilterRule[]):
   return result;
 }
 
-async function applyStructuredFilters() {
-  if (!canUseWhereSearch.value) return;
-  appliedStructuredWhereInput.value = await buildStructuredWhereFromRules(structuredFilterRules.value);
+async function applyStructuredWhere(where: string) {
+  appliedStructuredWhereInput.value = where;
   if (!isFilterEditorPinnedOpen.value) filterBuilderOpen.value = false;
   await applyWhereFilter();
+}
+
+async function applyStructuredFilters() {
+  if (!canUseWhereSearch.value) return;
+  await applyStructuredWhere(await buildStructuredWhereFromRules(structuredFilterRules.value));
+}
+
+const applyingOnlyStructuredFilter = ref(false);
+async function applyOnlyStructuredFilter(ruleId: string) {
+  if (!canUseWhereSearch.value || applyingOnlyStructuredFilter.value || isApplyingWhere.value) return;
+  const rule = structuredFilterRules.value.find((item) => item.id === ruleId);
+  if (!rule) return;
+  if (!rule.columnName || !isStructuredFilterRuleComplete(rule)) {
+    toast(t("grid.filterBuilderCompleteRuleFirst"));
+    return;
+  }
+  applyingOnlyStructuredFilter.value = true;
+  const scopeKey = structuredFilterScopeKey.value;
+  const cacheKey = structuredFilterCacheKey.value;
+  const rulesSnapshot = JSON.stringify(structuredFilterRules.value);
+  try {
+    // Build before changing enabled states so an invalid condition cannot clear the filter.
+    const where = await buildStructuredWhereFromRules([{ ...rule, disabled: false }]);
+    if (scopeKey !== structuredFilterScopeKey.value || cacheKey !== structuredFilterCacheKey.value || rulesSnapshot !== JSON.stringify(structuredFilterRules.value)) return;
+    if (!where) {
+      toast(t("grid.filterBuilderCompleteRuleFirst"));
+      return;
+    }
+    filterBuilder.enableOnlyRule(ruleId);
+    await applyStructuredWhere(where);
+  } catch (error: unknown) {
+    toast(error instanceof Error ? error.message : String(error));
+  } finally {
+    applyingOnlyStructuredFilter.value = false;
+  }
 }
 
 let structuredFilterPreviewRequestId = 0;
@@ -2185,7 +2226,8 @@ let columnFormatterForWidth: ((columnIndex: number) => ColumnFormatterConfig | u
 
 function columnWidthDisplayValue(value: CellValue, columnIndex: number): CellValue {
   const formatter = columnFormatterForWidth?.(columnIndex);
-  return formatter ? applyColumnFormatter(value, formatter) : value;
+  const display = formatter ? applyColumnFormatter(value, formatter) : value;
+  return showWhitespaceEnabled.value && typeof display === "string" ? gridCellDisplayValue(display, flatteningMultiLineEnabled.value, true) : display;
 }
 
 const { initColumnWidths, onResizeStart, autoFitColumn, renderedColumnWidths, totalWidth, columnVars, getIsResizing } = useDataGridColumnResize({
@@ -2823,14 +2865,13 @@ const localFilterScopeKey = computed(() =>
     (props.sourceColumns ?? []).map((column) => column ?? "").join("\0"),
   ].join("\u0001"),
 );
-watch(
-  () => localFilterScopeKey.value,
-  () => {
-    localColumnFilters.value = {};
-    resetColumnVisibility();
-    closeLocalFilter();
-  },
-);
+const localFilterRestoreKey = computed(() => props.localColumnFilterRestoreKey);
+watch([localFilterScopeKey, localFilterRestoreKey], ([, restoreKey], [, previousRestoreKey]) => {
+  const canRestoreForSameQuery = restoreKey !== undefined && restoreKey === previousRestoreKey;
+  localColumnFilters.value = canRestoreForSameQuery ? restoreDataGridLocalColumnFilters(props.result.local_column_filters, props.result.columns.length, props.result.columns, props.localColumnFilterColumns) : {};
+  resetColumnVisibility();
+  closeLocalFilter();
+});
 
 // --- Pagination ---
 const pageSizePreference = computed(() => resolveDataGridPageSizePreference(props.context, props.pageSizePreference));
@@ -5748,6 +5789,10 @@ const showCompactDetailJson = computed(() => {
 
 // CodeMirror-based cell detail editors
 const valueEditorContainer = ref<HTMLElement>();
+const detailTransformOpen = ref(false);
+watch([showCellDetail, activeCellDetailTab, () => activeCellDetail.value?.rowId, () => activeCellDetail.value?.colIndex], () => {
+  detailTransformOpen.value = false;
+});
 let valueDetailEditor: UseCellDetailEditorReturn | null = null;
 
 const editorThemeAccessor = () => settingsStore.editorSettings.theme;
@@ -5778,7 +5823,7 @@ watch(valueEditorContainer, async (el) => {
       },
       onEscape: () => restoreDetailOriginalValue(),
       onBlur: () => {
-        if (!detailValueDiffOpen.value) commitValueEditorEdit();
+        if (!detailValueDiffOpen.value && !detailTransformOpen.value) commitValueEditorEdit();
       },
       editorTheme: editorThemeAccessor,
       appAppearance: editorAppAppearance,
@@ -5786,7 +5831,16 @@ watch(valueEditorContainer, async (el) => {
       fontSize: editorFontSize,
       fontFamily: detailEditorFontFamily,
     });
-    await valueDetailEditor.create(el, detailEditValue.value, activeCellDetail.value?.type);
+    const editor = valueDetailEditor;
+    await editor.create(el, detailEditValue.value, activeCellDetail.value?.type);
+    // The editor initializes asynchronously (theme loading can yield here), so
+    // detailEditValue may have changed before CodeMirror owns the document.
+    // Reconcile the latest value after create and ignore an editor replaced by
+    // a fast tab unmount/remount.
+    if (valueDetailEditor !== editor) return;
+    if (editor.getValue() !== detailEditValue.value) {
+      editor.setValue(detailEditValue.value, activeCellDetail.value?.type);
+    }
   } else if (!el && valueDetailEditor) {
     valueDetailEditor.destroy();
     valueDetailEditor = null;
@@ -5809,7 +5863,7 @@ const detailEdit = useDataGridCellDetailEdit({
   restoreCellValue,
   syncEditor: (value, columnType) => {
     const editor = getDetailEditor();
-    if (editor) editor.setValue(value, columnType);
+    if (editor && editor.getValue() !== value) editor.setValue(value, columnType);
   },
   refreshDetail: () => {
     detailCell.value = detailCell.value ? { ...detailCell.value } : null;
@@ -6796,9 +6850,11 @@ async function onCanvasDblClick(event: MouseEvent) {
 function canvasCellContentOverflows(item: RowItem, actualColIdx: number, visibleColIdx: number): boolean {
   const cellWidth = renderedColumnWidths.value[visibleColIdx] ?? 0;
   if (cellWidth <= 0) return false;
-  const displayText = formatCellCached(item.data[actualColIdx], actualColIdx);
+  const formattedText = formatCellCached(item.data[actualColIdx], actualColIdx);
   const editText = cellEditorTextForValue(item.data[actualColIdx], actualColIdx);
-  if (editText.includes("\n") || editText.includes("\r") || editText.length > displayText.length) return true;
+  // Detect truncated previews before visual whitespace markers add characters.
+  if (editText.includes("\n") || editText.includes("\r") || editText.length > formattedText.length) return true;
+  const displayText = showWhitespaceEnabled.value ? gridCellDisplayValue(formattedText, flatteningMultiLineEnabled.value, true) : formattedText;
   const canvas = activeCanvasSurface();
   const context = canvas?.getContext("2d");
   if (!context) {
@@ -7034,6 +7090,7 @@ function drawCanvasGrid() {
     columnIsBoolean: isBooleanGridColumn,
     booleanDisplayMode: booleanDisplayMode.value,
     flatteningMultiLineEnabled: flatteningMultiLineEnabled.value,
+    showWhitespace: showWhitespaceEnabled.value,
   });
   flipCanvasSurface();
 }
@@ -7058,6 +7115,7 @@ watch(showDataGridTopbar, () => nextTick(observeDataGridTopbarWidth), {
 watch(columnAligns, () => scheduleCanvasDraw());
 watch(booleanDisplayMode, () => scheduleCanvasDraw());
 watch(flatteningMultiLineEnabled, () => scheduleCanvasDraw());
+watch(showWhitespaceEnabled, () => scheduleCanvasDraw());
 watch(colorizeDataGridCellTypes, () => scheduleCanvasDraw());
 watch(
   [
@@ -11512,6 +11570,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   @ensure-rule="ensureStructuredFilterRule"
                   @add-rule="addStructuredFilterRule"
                   @apply-filters="applyStructuredFilters"
+                  :apply-only-busy="applyingOnlyStructuredFilter || isApplyingWhere"
+                  @apply-only="applyOnlyStructuredFilter"
                   @reset-filters="resetStructuredFilters"
                   @clear-filters="clearAllFilters"
                   @remove-rule="removeStructuredFilterRule"
@@ -11650,6 +11710,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @ensure-rule="ensureStructuredFilterRule"
           @add-rule="addStructuredFilterRule"
           @apply="applyStructuredFilters"
+          :apply-only-busy="applyingOnlyStructuredFilter || isApplyingWhere"
+          @apply-only="applyOnlyStructuredFilter"
           @reset="resetStructuredFilters"
           @clear="clearAllFilters"
           @copy-sql="copyFilterSqlPreview"
@@ -11672,6 +11734,8 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
           @ensure-rule="ensureStructuredFilterRule"
           @add-rule="addStructuredFilterRule"
           @apply="applyStructuredFilters"
+          :apply-only-busy="applyingOnlyStructuredFilter || isApplyingWhere"
+          @apply-only="applyOnlyStructuredFilter"
           @reset="resetStructuredFilters"
           @clear="clearAllFilters"
           @copy-sql="copyFilterSqlPreview"
@@ -11935,7 +11999,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                         <template v-if="newRowCellPlaceholder(displayItems[cell.recordIndex], cell.valueIndex)">
                           <span class="text-muted-foreground/70 italic">{{ firstLineCellDisplayValue(newRowCellPlaceholder(displayItems[cell.recordIndex], cell.valueIndex) ?? "", flatteningMultiLineEnabled) }}</span>
                         </template>
-                        <template v-else>{{ firstLineCellDisplayValue(cell.display, flatteningMultiLineEnabled) }}</template>
+                        <template v-else>{{ gridCellDisplayValue(cell.display, flatteningMultiLineEnabled, showWhitespaceEnabled) }}</template>
                         <div v-if="cellDetailButtonVisible(cell.recordIndex, cell.valueIndex)" class="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
                           <LightDropdownMenu
                             v-if="canQuickDownloadCellValue(cell.recordIndex, cell.valueIndex)"
@@ -12855,7 +12919,7 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                           <template v-if="newRowCellPlaceholder(item, col.actualColIdx)">
                             <span class="text-muted-foreground/70 italic">{{ firstLineCellDisplayValue(newRowCellPlaceholder(item, col.actualColIdx) ?? "", flatteningMultiLineEnabled) }}</span>
                           </template>
-                          <template v-else>{{ firstLineCellDisplayValue(formatGridItemCell(item, col.actualColIdx), flatteningMultiLineEnabled) }}</template>
+                          <template v-else>{{ gridCellDisplayValue(formatGridItemCell(item, col.actualColIdx), flatteningMultiLineEnabled, showWhitespaceEnabled) }}</template>
                           <div v-if="cellDetailButtonVisible(item.displayIndex, col.actualColIdx)" class="absolute right-2 top-1/2 flex -translate-y-1/2 items-center gap-1">
                             <LightDropdownMenu
                               v-if="canQuickDownloadCellValue(item.displayIndex, col.actualColIdx)"
@@ -13155,6 +13219,14 @@ useUpdateBlocker(() => (hasPendingChanges.value || hasPendingDataEditorDraft.val
                   <div v-else ref="valueEditorContainer" data-cell-detail-editor-root class="min-h-0 min-w-0 flex-1 w-full rounded border overflow-auto" />
                 </div>
                 <div class="min-w-0 flex flex-wrap gap-1 mt-2 shrink-0">
+                  <DataGridValueTransform
+                    v-if="activeCellDetail && !isBinaryCellColumnType(activeCellDetail.type)"
+                    v-model:open="detailTransformOpen"
+                    :source="isEditingDetail && !((activeCellDetail.isNull ?? activeCellDetail.value === null) && detailEditValue === detailEditOriginalValue) ? detailEditValue : null"
+                    :identity="`${activeCellDetail.rowId}:${activeCellDetail.colIndex}:${activeCellDetailTab}`"
+                    :incomplete="activeCellDetail.isSourceTruncated"
+                    :unsafe-number="typeof activeCellDetail.value === 'number' && Number.isInteger(activeCellDetail.value) && !Number.isSafeInteger(activeCellDetail.value) && detailEditValue === activeCellDetail.rawValue"
+                  />
                   <DropdownMenu v-if="activeCellDetail?.isEditable">
                     <DropdownMenuTrigger as-child>
                       <Button variant="outline" size="sm" class="h-6 gap-1 text-xs" @mousedown.prevent>

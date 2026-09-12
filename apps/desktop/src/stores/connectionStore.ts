@@ -524,7 +524,8 @@ export const useConnectionStore = defineStore("connection", () => {
     targetDatabase?: string;
     targetSchema?: string;
   } | null>(null);
-  const schemaDiffSource = ref<{ connectionId: string; database: string; schema?: string } | null>(null);
+  const schemaDiffSource = ref<{ connectionId: string; database: string; schema?: string; selectedRoutines?: string[]; preferredResultTab?: "tables" | "routines" } | null>(null);
+
   const dataCompareSource = ref<{
     connectionId: string;
     database: string;
@@ -1692,6 +1693,11 @@ export const useConnectionStore = defineStore("connection", () => {
     parent.children = markRawLeafTreeNodes(children);
     loadedTreeNodeChildrenIds.value.add(parent.id);
     syncConfirmedEmptyTreeNodeId(parent);
+  }
+
+  function setLoadedTableMetadataChildren(parent: TreeNode, children: TreeNode[]) {
+    setChildren(parent, children);
+    parent.objectCount = parent.children!.length;
   }
 
   function removePinnedTreeNodes(nodes: readonly TreeNode[], canonicalize: PinnedTreeNodeIdentityCanonicalizer = (identity) => identity, legacyKeys: readonly string[] = []): boolean {
@@ -5000,7 +5006,21 @@ export const useConnectionStore = defineStore("connection", () => {
       await ensureConnected(connectionId);
       load = reclaimTreeNodeLoad(load, node);
       const isMeilisearch = getConfig(connectionId)?.db_type === "meilisearch";
-      const indices = await withMetadataLoadTimeout(connectionId, isMeilisearch ? api.meilisearchListIndexes(connectionId) : api.elasticsearchListIndices(connectionId), isMeilisearch ? "Meilisearch indexes" : "Elasticsearch indices");
+      const collections = isMeilisearch
+        ? sortSidebarNames(await withMetadataLoadTimeout(connectionId, api.meilisearchListIndexes(connectionId), "Meilisearch indexes")).map((name) => ({ name, aliases: [] as string[] }))
+        : [...(await withMetadataLoadTimeout(connectionId, api.documentListCollections(connectionId, "default"), "Elasticsearch indices"))].sort((left, right) => compareSidebarNames(left.name, right.name));
+      const indexNodes = collections.map((collection) => {
+        const aliases = collection.aliases?.filter((alias) => alias.trim());
+        return {
+          id: `${connectionId}:__collection:${collection.name}`,
+          label: collection.name,
+          type: "elasticsearch-index" as const,
+          connectionId,
+          database: "default",
+          isExpanded: false,
+          ...(aliases?.length ? { searchAliases: aliases } : {}),
+        };
+      });
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
       setChildren(
@@ -5008,14 +5028,7 @@ export const useConnectionStore = defineStore("connection", () => {
         withSavedSqlRoot(
           connectionId,
           [
-            ...sortSidebarNames(indices).map((index) => ({
-              id: `${connectionId}:__collection:${index}`,
-              label: index,
-              type: "elasticsearch-index" as const,
-              connectionId,
-              database: "default",
-              isExpanded: false,
-            })),
+            ...indexNodes,
             ...(isMeilisearch
               ? [
                   {
@@ -6409,7 +6422,7 @@ export const useConnectionStore = defineStore("connection", () => {
         const fields = await listMongoCompletionFields(connectionId, database, table);
         const targetNode = treeNodeLoadTarget(load);
         if (!targetNode) return;
-        setChildren(
+        setLoadedTableMetadataChildren(
           targetNode,
           fields.map((field) => {
             const column = {
@@ -6440,7 +6453,7 @@ export const useConnectionStore = defineStore("connection", () => {
       if (!targetNode) return;
       const connConfig = getConfig(connectionId);
       const isGaussdbM = effectiveDatabaseTypeForConnection(connConfig) === "gaussdb" && connConfig?.driver_profile?.toLowerCase() === "gaussdb-m";
-      setChildren(
+      setLoadedTableMetadataChildren(
         targetNode,
         columns.map((col) => ({
           id: `${parentId}:${col.name}`,
@@ -6475,7 +6488,7 @@ export const useConnectionStore = defineStore("connection", () => {
       if (!metadataCapabilities.indexes || isMongoView) {
         const targetNode = treeNodeLoadTarget(load);
         if (!targetNode) return;
-        setChildren(targetNode, []);
+        setLoadedTableMetadataChildren(targetNode, []);
         targetNode.isExpanded = true;
         return;
       }
@@ -6484,7 +6497,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
       const mongoCollectionKind = effectiveDbType === "mongodb" && targetNode.type === "group-indexes" ? mongoCollectionKindFromNode(targetNode) : undefined;
-      setChildren(
+      setLoadedTableMetadataChildren(
         targetNode,
         indexes.map((idx) => ({
           id: `${parentId}:${idx.name}`,
@@ -6517,7 +6530,7 @@ export const useConnectionStore = defineStore("connection", () => {
       if (!metadataCapabilities.foreignKeys) {
         const targetNode = treeNodeLoadTarget(load);
         if (!targetNode) return;
-        setChildren(targetNode, []);
+        setLoadedTableMetadataChildren(targetNode, []);
         targetNode.isExpanded = true;
         return;
       }
@@ -6529,7 +6542,7 @@ export const useConnectionStore = defineStore("connection", () => {
       indexCompletionForeignKeys(connectionId, database, table, schema, sqlCompletionForeignKeys(fkeys));
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
-      setChildren(
+      setLoadedTableMetadataChildren(
         targetNode,
         fkeys.map((fk) => ({
           id: `${parentId}:${fk.name}`,
@@ -6562,7 +6575,7 @@ export const useConnectionStore = defineStore("connection", () => {
       if (!metadataCapabilities.triggers) {
         const targetNode = treeNodeLoadTarget(load);
         if (!targetNode) return;
-        setChildren(targetNode, []);
+        setLoadedTableMetadataChildren(targetNode, []);
         targetNode.isExpanded = true;
         return;
       }
@@ -6571,7 +6584,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
       const isXugu = effectiveDatabaseTypeForConnection(getConfig(connectionId)) === "xugu";
-      setChildren(
+      setLoadedTableMetadataChildren(
         targetNode,
         triggers.map((tr) => {
           const xuguDetails = isXugu ? [tr.timing, tr.event, tr.level, tr.enabled === false ? i18n.global.t("objects.disabled") : null, tr.valid === false ? i18n.global.t("objects.invalid") : null].filter(Boolean).join(" · ") : `${tr.timing} ${tr.event}`;
@@ -6608,7 +6621,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const constraints = await api.listConstraints(connectionId, database, metadataQuerySchema(connectionId, database, schema), table, catalog);
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
-      setChildren(
+      setLoadedTableMetadataChildren(
         targetNode,
         constraints.map((constraint) => ({
           id: `${parentId}:${constraint.name}`,
@@ -6639,7 +6652,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const partitions = await api.listPartitions(connectionId, database, metadataQuerySchema(connectionId, database, schema), table, catalog);
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
-      setChildren(
+      setLoadedTableMetadataChildren(
         targetNode,
         partitions.map((partition) => ({
           id: `${parentId}:${partition.name}`,
@@ -6670,7 +6683,7 @@ export const useConnectionStore = defineStore("connection", () => {
       const partitions = await api.listSubpartitions(connectionId, database, metadataQuerySchema(connectionId, database, schema), table, catalog);
       const targetNode = treeNodeLoadTarget(load);
       if (!targetNode) return;
-      setChildren(
+      setLoadedTableMetadataChildren(
         targetNode,
         partitions.map((partition) => ({
           id: `${parentId}:${partition.name}`,

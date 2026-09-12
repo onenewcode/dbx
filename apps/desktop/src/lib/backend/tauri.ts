@@ -1,5 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { assertUpdateAllowsCommand } from "@/lib/app/updatePreparation";
+import { collectBrowserSupportInfo } from "@/lib/app/supportInfo";
 
 function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   assertUpdateAllowsCommand(command);
@@ -371,6 +372,10 @@ export interface AppSupportInfo {
   osName: string;
   osVersion?: string | null;
   arch: string;
+  userAgent?: string;
+  databaseTypes?: string[];
+  localDriverVersions?: Array<{ dbType: string; version: string }>;
+  aiProviders?: string[];
 }
 
 export interface QueryPagination {
@@ -2559,7 +2564,8 @@ export async function getAppVersion(): Promise<string> {
 }
 
 export async function getAppSupportInfo(): Promise<AppSupportInfo> {
-  return invoke<AppSupportInfo>("get_app_support_info");
+  const info = await invoke<AppSupportInfo>("get_app_support_info");
+  return { ...info, userAgent: collectBrowserSupportInfo() };
 }
 
 // --- Redis ---
@@ -2602,6 +2608,11 @@ export interface RedisHashItem {
 export interface RedisZsetItem {
   score: string;
   member: RedisBlob;
+}
+
+export interface RedisKeysExpiryResult {
+  applied: number;
+  missing_key_raws: string[];
 }
 
 export interface RedisStreamField {
@@ -2890,6 +2901,14 @@ export async function redisSetTtl(connectionId: string, db: number, keyRaw: stri
 
 export async function redisSetExpireAt(connectionId: string, db: number, keyRaw: string, expireAt: number): Promise<void> {
   return invoke("redis_set_expire_at", { connectionId, db, keyRaw, expireAt });
+}
+
+export async function redisSetKeysTtl(connectionId: string, db: number, keyRaws: string[], ttl: number): Promise<RedisKeysExpiryResult> {
+  return invoke("redis_set_keys_ttl", { connectionId, db, keyRaws, ttl });
+}
+
+export async function redisSetKeysExpireAt(connectionId: string, db: number, keyRaws: string[], expireAt: number): Promise<RedisKeysExpiryResult> {
+  return invoke("redis_set_keys_expire_at", { connectionId, db, keyRaws, expireAt });
 }
 
 export async function redisDeleteKeys(connectionId: string, db: number, keyRaws: string[]): Promise<number> {
@@ -3951,7 +3970,7 @@ export async function vectorRenameCollection(connectionId: string, database: str
 
 export async function elasticsearchListIndices(connectionId: string): Promise<string[]> {
   const collections = await documentListCollections(connectionId, "default");
-  return collections.map((c) => c.name);
+  return [...new Set(collections.flatMap((collection) => [collection.name, ...(collection.aliases ?? [])].filter((name) => name.trim())))];
 }
 
 /** Lists every Meilisearch index visible to the current connection credentials. */
@@ -4583,6 +4602,16 @@ export interface SqlFileRequest {
   database: string;
   filePath: string;
   continueOnError: boolean;
+  selectedTables?: SqlFileTable[];
+}
+
+export interface SqlFileTable {
+  database: string | null;
+  name: string;
+}
+
+export async function inspectSqlFileTables(filePath: string): Promise<SqlFileTable[]> {
+  return invoke("inspect_sql_file_tables", { filePath });
 }
 
 export interface SqlFilePreview {
@@ -5075,6 +5104,7 @@ export interface DatabaseExportRequest {
   outputCompression?: "none" | "gzip";
   snapshotSessionId?: string;
   batchSize: number;
+  splitMaxMb?: number;
 }
 
 export interface DatabaseBackupSnapshot {
@@ -5125,6 +5155,7 @@ export interface TableExportRequest {
   dateTimeFormat?: string;
   numericColumnRightAlign?: boolean;
   autoFilter?: boolean;
+  splitMaxMb?: number;
 }
 
 export interface TableCsvExportOptions {
