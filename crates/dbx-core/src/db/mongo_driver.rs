@@ -2574,7 +2574,7 @@ fn insert_write_errors(error: &mongodb::error::Error) -> Vec<MongoBulkWriteError
         ErrorKind::BulkWrite(failure) => failure
             .write_errors
             .iter()
-            .map(|(index, error)| write_error_entry(Some(*index as usize), error.code, &error.message))
+            .map(|(index, error)| write_error_entry(Some(*index), error.code, &error.message))
             .collect(),
         _ => Vec::new(),
     };

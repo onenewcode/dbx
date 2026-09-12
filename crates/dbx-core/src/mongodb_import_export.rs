@@ -1,3 +1,5 @@
+#![allow(clippy::result_large_err)]
+
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
@@ -341,7 +343,7 @@ pub fn format_from_path(path: &str) -> Result<MongoImportFormat, String> {
 }
 
 pub fn clamp_batch_size(batch_size: usize) -> Result<usize, MongoImportIssue> {
-    if batch_size < MIN_BATCH_SIZE || batch_size > MAX_BATCH_SIZE {
+    if !(MIN_BATCH_SIZE..=MAX_BATCH_SIZE).contains(&batch_size) {
         return Err(MongoImportIssue::new(
             "INVALID_BATCH_SIZE",
             format!("Batch size must be between {MIN_BATCH_SIZE} and {MAX_BATCH_SIZE}"),
@@ -597,7 +599,7 @@ fn convert_auto_cell(
             Ok(Bson::DateTime(date))
         }
         MongoImportInferredType::Object | MongoImportInferredType::Array => {
-            parse_json_bson(value).map_err(|error| conversion_error(error))
+            parse_json_bson(value).map_err(conversion_error)
         }
         MongoImportInferredType::String => Ok(Bson::String(value.to_string())),
     }
@@ -817,8 +819,7 @@ fn parse_csv_preview(
 ) -> Result<CsvPreviewData, MongoImportIssue> {
     let config = csv_config(path, options)?;
     let inferred = infer_csv_types(path, &config, options.encoding())?;
-    let (reader, encoding) =
-        open_transcoded_text_file(path, options.encoding()).map_err(|error| encoding_issue(error))?;
+    let (reader, encoding) = open_transcoded_text_file(path, options.encoding()).map_err(encoding_issue)?;
     let mut csv_reader = csv_reader(reader, config.delimiter);
     let mut record = csv::StringRecord::new();
     let mut headers = Vec::new();
@@ -899,15 +900,15 @@ fn json_document_from_value(
     Ok(parsed_document(row, document, with_extended_json))
 }
 
+type JsonPreviewOutput =
+    (Vec<ParsedMongoDocument>, Vec<MongoImportIssue>, Vec<MongoImportIssue>, u64, bool, TableImportTextEncoding);
+
 fn parse_json_preview(
     path: &str,
     options: &MongoImportParseOptions,
     preview_limit: usize,
     ndjson: bool,
-) -> Result<
-    (Vec<ParsedMongoDocument>, Vec<MongoImportIssue>, Vec<MongoImportIssue>, u64, bool, TableImportTextEncoding),
-    MongoImportIssue,
-> {
+) -> Result<JsonPreviewOutput, MongoImportIssue> {
     let (reader, encoding) = open_transcoded_text_file(path, options.encoding()).map_err(encoding_issue)?;
     let mut reader = BufReader::new(reader);
     let mut documents = Vec::new();
@@ -1286,7 +1287,7 @@ pub fn preview_mongodb_import_file(
             let columns = parsed
                 .columns
                 .into_iter()
-                .zip(parsed.inferred.into_iter())
+                .zip(parsed.inferred)
                 .map(|(name, inferred_type)| {
                     let sample_values = parsed
                         .documents
@@ -1376,7 +1377,7 @@ where
     let mut record = csv::StringRecord::new();
     let mut headers = Vec::new();
     let mut index = 0u64;
-    while csv_reader.read_record(&mut record).map_err(|error| csv_read_issue(error))? {
+    while csv_reader.read_record(&mut record).map_err(csv_read_issue)? {
         index += 1;
         if index == 1 && config.has_header {
             headers = unique_headers(&record_strings(&record))?;
@@ -1461,6 +1462,7 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn progress(
     import_id: &str,
     phase: MongoImportPhase,
@@ -1619,16 +1621,15 @@ where
             Ok(parsed) => {
                 rows.push(parsed.row);
                 documents.push(parsed.document);
-                if documents.len() >= batch_size {
-                    if tx
+                if documents.len() >= batch_size
+                    && tx
                         .blocking_send(ImportBatchEvent::Batch {
                             rows: std::mem::take(&mut rows),
                             documents: std::mem::take(&mut documents),
                         })
                         .is_err()
-                    {
-                        return Err(MongoImportIssue::new("CANCELLED", "Import cancelled"));
-                    }
+                {
+                    return Err(MongoImportIssue::new("CANCELLED", "Import cancelled"));
                 }
                 Ok(())
             }
@@ -2284,7 +2285,7 @@ where
             line.push('\n');
             bytes_written += write_export_line(&mut writer, &line)?;
             documents_read += 1;
-            if documents_read == 1 || documents_read % 500 == 0 {
+            if documents_read == 1 || documents_read.is_multiple_of(500) {
                 on_progress(export_progress(
                     &request.export_id,
                     MongoExportStatus::Running,
@@ -2373,7 +2374,7 @@ where
             let line = format_csv_document_line(&fields, &json);
             bytes_written += write_export_line(&mut writer, &line)?;
             documents_read += 1;
-            if documents_read % 500 == 0 {
+            if documents_read.is_multiple_of(500) {
                 on_progress(export_progress(
                     &request.export_id,
                     MongoExportStatus::Running,
@@ -2512,8 +2513,10 @@ mod tests {
 
         let mut gbk = b"name\n".to_vec();
         gbk.extend_from_slice(&[0xD6, 0xD0, 0xCE, 0xC4, b'\n']); // 中文 in GBK
-        let mut parse = MongoImportParseOptions::default();
-        parse.encoding = Some(TableImportTextEncoding::Gbk);
+        let parse = MongoImportParseOptions {
+            encoding: Some(TableImportTextEncoding::Gbk),
+            ..MongoImportParseOptions::default()
+        };
         let preview = preview_mongodb_import_bytes(&gbk, MongoImportFormat::Csv, &parse, 10).unwrap();
         assert_eq!(preview.rows[0]["name"], "中文");
     }
@@ -2525,8 +2528,10 @@ mod tests {
         for unit in text.encode_utf16() {
             bytes.extend_from_slice(&unit.to_le_bytes());
         }
-        let mut parse = MongoImportParseOptions::default();
-        parse.encoding = Some(TableImportTextEncoding::Utf16Le);
+        let parse = MongoImportParseOptions {
+            encoding: Some(TableImportTextEncoding::Utf16Le),
+            ..MongoImportParseOptions::default()
+        };
         let preview = preview_mongodb_import_bytes(&bytes, MongoImportFormat::Csv, &parse, 10).unwrap();
         assert_eq!(preview.rows[0]["name"], "Ada");
     }
@@ -2893,8 +2898,8 @@ mod tests {
         }
 
         // Booleans round-trip
-        assert_eq!(doc.get_bool("active").unwrap(), true);
-        assert_eq!(doc.get_bool("inactive").unwrap(), false);
+        assert!(doc.get_bool("active").unwrap());
+        assert!(!doc.get_bool("inactive").unwrap());
 
         // Nulls round-trip
         assert_eq!(doc.get("notes"), Some(&Bson::Null));
@@ -3005,8 +3010,10 @@ mod tests {
 
     #[test]
     fn invalid_encoding_is_actionable() {
-        let mut parse = MongoImportParseOptions::default();
-        parse.encoding = Some(TableImportTextEncoding::Utf8);
+        let parse = MongoImportParseOptions {
+            encoding: Some(TableImportTextEncoding::Utf8),
+            ..MongoImportParseOptions::default()
+        };
         let error = preview_mongodb_import_bytes(&[0xFF, 0xFE, b'a'], MongoImportFormat::Csv, &parse, 10).unwrap_err();
         assert_eq!(error.code, "ENCODING");
     }
@@ -3019,7 +3026,7 @@ mod tests {
             "nested": {"ok": true},
             "missing": null
         });
-        let fields = csv_fields_from_extended_documents(&[document.clone()]).unwrap();
+        let fields = csv_fields_from_extended_documents(std::slice::from_ref(&document)).unwrap();
         assert_eq!(fields, vec!["_id", "name", "nested.ok", "missing"]);
         let row = format_mongo_csv_row(&fields, &document);
         assert_eq!(row, "507f1f77bcf86cd799439011,Ada,true,");
@@ -3035,7 +3042,7 @@ mod tests {
             "nested": {"ok": true},
             "count": {"$numberInt": "42"}
         });
-        let fields = csv_fields_from_extended_documents(&[document.clone()]).unwrap();
+        let fields = csv_fields_from_extended_documents(std::slice::from_ref(&document)).unwrap();
         assert_eq!(fields, vec!["_id", "_dbx_issue_5792_all_types", "scenario", "text", "nested.ok", "count"]);
         let mut csv = fields.join(",");
         csv.push('\n');
