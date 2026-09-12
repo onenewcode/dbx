@@ -13,7 +13,7 @@ use crate::csv_export::{push_csv_field, CsvQuoteMode};
 use crate::db::agent_driver::AgentCapability;
 use crate::db::mongo_driver::{
     self, document_to_canonical_extended_json, for_each_find_document, insert_bson_documents,
-    json_object_to_document_extended_json, MongoBulkWriteError,
+    json_object_to_document_extended_json, MongoBulkWriteError, MongoInsertOutcome,
 };
 use crate::table_import::{open_transcoded_text_file, TableImportTextEncoding};
 
@@ -21,6 +21,9 @@ pub const DEFAULT_PREVIEW_LIMIT: usize = 50;
 pub const DEFAULT_BATCH_SIZE: usize = 500;
 pub const MIN_BATCH_SIZE: usize = 100;
 pub const MAX_BATCH_SIZE: usize = 5000;
+/// Rows sampled for CSV type inference, independent of the preview window so that the
+/// preview and the import always agree on column types.
+pub const TYPE_SAMPLE_ROWS: usize = 1000;
 
 const TYPE_STRING: u8 = 1 << 0;
 const TYPE_BOOLEAN: u8 = 1 << 1;
@@ -411,7 +414,8 @@ fn unique_headers(headers: &[String]) -> Result<Vec<String>, MongoImportIssue> {
             return Err(MongoImportIssue::new("EMPTY_HEADER", format!("CSV header at column {} is empty", index + 1))
                 .with_row(1));
         }
-        if !seen.insert(name.to_lowercase()) {
+        // Mongo field names are case-sensitive, so `Name` and `name` are two distinct columns.
+        if !seen.insert(name.clone()) {
             return Err(MongoImportIssue::new("DUPLICATE_HEADER", format!("Duplicate CSV header: {name}"))
                 .with_row(1)
                 .with_column(name));
@@ -654,24 +658,97 @@ fn document_from_csv_row(
     for (index, header) in headers.iter().enumerate() {
         let value = fields.get(index).and_then(|value| value.as_deref());
         let inferred = inferred.get(index).copied().unwrap_or(MongoImportInferredType::String);
-        insert_dotted_field(&mut document, header, convert_cell(value, header, row, inferred, config)?);
+        insert_field_path(&mut document, header, convert_cell(value, header, row, inferred, config)?);
     }
     Ok(parsed_document(row, document, with_extended_json))
 }
 
-fn insert_dotted_field(document: &mut Document, path: &str, value: Bson) {
-    if let Some((head, rest)) = path.split_once('.') {
-        match document.get_mut(head) {
-            Some(Bson::Document(child)) => insert_dotted_field(child, rest, value),
-            _ => {
-                let mut child = Document::new();
-                insert_dotted_field(&mut child, rest, value);
-                document.insert(head, Bson::Document(child));
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathSegment<'a> {
+    Key(&'a str),
+    Index(usize),
+}
+
+/// Splits a Compass CSV header into segments: `address.city`, `tags[0]`, `matrix[0][1]`.
+/// A part whose brackets are not a well-formed trailing index stays a literal key, so
+/// field names that merely contain brackets survive unchanged.
+fn parse_field_path(path: &str) -> Vec<PathSegment<'_>> {
+    let mut segments = Vec::new();
+    for part in path.split('.') {
+        match split_indexed_part(part) {
+            Some((name, indices)) => {
+                segments.push(PathSegment::Key(name));
+                segments.extend(indices.into_iter().map(PathSegment::Index));
             }
+            None => segments.push(PathSegment::Key(part)),
         }
+    }
+    segments
+}
+
+fn split_indexed_part(part: &str) -> Option<(&str, Vec<usize>)> {
+    let (name, mut rest) = part.split_at(part.find('[')?);
+    if name.is_empty() {
+        return None;
+    }
+    let mut indices = Vec::new();
+    while !rest.is_empty() {
+        let inner = rest.strip_prefix('[')?;
+        let close = inner.find(']')?;
+        indices.push(inner[..close].parse::<usize>().ok()?);
+        rest = &inner[close + 1..];
+    }
+    Some((name, indices))
+}
+
+fn insert_field_path(document: &mut Document, path: &str, value: Bson) {
+    let segments = parse_field_path(path);
+    let Some((PathSegment::Key(key), rest)) = segments.split_first() else {
+        return;
+    };
+    if rest.is_empty() {
+        document.insert(*key, value);
         return;
     }
-    document.insert(path, value);
+    if !document.contains_key(key) {
+        document.insert(*key, Bson::Null);
+    }
+    if let Some(slot) = document.get_mut(key) {
+        set_at_segments(slot, rest, value);
+    }
+}
+
+/// Grows `target` into the container each segment requires, replacing any value that
+/// conflicts with the shape the path asks for.
+fn set_at_segments(target: &mut Bson, segments: &[PathSegment<'_>], value: Bson) {
+    let Some((segment, rest)) = segments.split_first() else {
+        *target = value;
+        return;
+    };
+    match segment {
+        PathSegment::Key(key) => {
+            if !matches!(target, Bson::Document(_)) {
+                *target = Bson::Document(Document::new());
+            }
+            let Bson::Document(document) = target else { return };
+            if !document.contains_key(key) {
+                document.insert(*key, Bson::Null);
+            }
+            if let Some(slot) = document.get_mut(key) {
+                set_at_segments(slot, rest, value);
+            }
+        }
+        PathSegment::Index(index) => {
+            if !matches!(target, Bson::Array(_)) {
+                *target = Bson::Array(Vec::new());
+            }
+            let Bson::Array(array) = target else { return };
+            if array.len() <= *index {
+                array.resize(*index + 1, Bson::Null);
+            }
+            set_at_segments(&mut array[*index], rest, value);
+        }
+    }
 }
 
 fn parsed_document(row: u64, document: Document, with_extended_json: bool) -> ParsedMongoDocument {
@@ -680,23 +757,46 @@ fn parsed_document(row: u64, document: Document, with_extended_json: bool) -> Pa
     ParsedMongoDocument { row, document, extended_json }
 }
 
+/// Reads at most [`TYPE_SAMPLE_ROWS`] data rows to decide each column's type. Preview and
+/// execution both call this with the same bound, so the types shown in the wizard are the
+/// types the import actually writes.
 fn infer_csv_types(
-    rows: &[Vec<Option<String>>],
-    column_count: usize,
-    type_mode: MongoImportTypeMode,
-) -> Vec<MongoImportInferredType> {
-    if type_mode != MongoImportTypeMode::Auto {
-        return vec![MongoImportInferredType::String; column_count];
-    }
-    let mut masks = vec![None; column_count];
-    for row in rows {
-        for (index, cell) in row.iter().enumerate().take(column_count) {
-            if let Some(value) = cell.as_deref() {
-                masks[index] = Some(intersect_column_types(masks[index], classify_cell(value)));
+    path: &str,
+    config: &CsvParseConfig,
+    encoding: Option<TableImportTextEncoding>,
+) -> Result<Vec<MongoImportInferredType>, MongoImportIssue> {
+    let auto = config.type_mode == MongoImportTypeMode::Auto;
+    let sample_rows = if auto { TYPE_SAMPLE_ROWS } else { 1 };
+    let (reader, _) = open_transcoded_text_file(path, encoding).map_err(encoding_issue)?;
+    let mut csv_reader = csv_reader(reader, config.delimiter);
+    let mut record = csv::StringRecord::new();
+    let mut masks: Vec<Option<u8>> = Vec::new();
+    let mut header_seen = false;
+    let mut sampled = 0usize;
+    while sampled < sample_rows && csv_reader.read_record(&mut record).map_err(csv_read_issue)? {
+        if config.has_header && !header_seen {
+            header_seen = true;
+            masks = vec![None; unique_headers(&record_strings(&record))?.len()];
+            continue;
+        }
+        if masks.is_empty() {
+            masks = vec![None; record.len().max(1)];
+        }
+        for (index, value) in record.iter().enumerate().take(masks.len()) {
+            if let Some(text) = csv_cell_text(value, config) {
+                masks[index] = Some(intersect_column_types(masks[index], classify_cell(&text)));
             }
         }
+        sampled += 1;
     }
-    masks.into_iter().map(|mask| inferred_type_from_mask(mask.unwrap_or(TYPE_STRING))).collect()
+    if !auto {
+        return Ok(vec![MongoImportInferredType::String; masks.len()]);
+    }
+    Ok(masks.into_iter().map(|mask| inferred_type_from_mask(mask.unwrap_or(TYPE_STRING))).collect())
+}
+
+fn record_strings(record: &csv::StringRecord) -> Vec<String> {
+    record.iter().map(|value| value.to_string()).collect()
 }
 
 struct CsvPreviewData {
@@ -716,13 +816,13 @@ fn parse_csv_preview(
     preview_limit: usize,
 ) -> Result<CsvPreviewData, MongoImportIssue> {
     let config = csv_config(path, options)?;
+    let inferred = infer_csv_types(path, &config, options.encoding())?;
     let (reader, encoding) =
         open_transcoded_text_file(path, options.encoding()).map_err(|error| encoding_issue(error))?;
     let mut csv_reader = csv_reader(reader, config.delimiter);
     let mut record = csv::StringRecord::new();
     let mut headers = Vec::new();
-    let mut raw_rows = Vec::new();
-    let mut row_numbers = Vec::new();
+    let mut documents = Vec::new();
     let mut errors = Vec::new();
     let mut warnings = Vec::new();
     let mut index = 0u64;
@@ -730,29 +830,24 @@ fn parse_csv_preview(
     while csv_reader.read_record(&mut record).map_err(csv_read_issue)? {
         index += 1;
         if index == 1 && config.has_header {
-            headers = unique_headers(&record.iter().map(|value| value.to_string()).collect::<Vec<_>>())?;
+            headers = unique_headers(&record_strings(&record))?;
             continue;
         }
         if headers.is_empty() {
             headers = generated_field_names(record.len().max(1));
         }
-        if raw_rows.len() >= preview_limit {
+        if documents.len() + errors.len() >= preview_limit {
             estimated_rows_exact = false;
             break;
         }
-        raw_rows.push(record.iter().map(|value| csv_cell_text(value, &config)).collect());
-        row_numbers.push(index);
-    }
-    if headers.is_empty() {
-        return Err(MongoImportIssue::new("CSV_STRUCTURE", "CSV file has no columns"));
-    }
-    let inferred = infer_csv_types(&raw_rows, headers.len(), config.type_mode);
-    let mut documents = Vec::new();
-    for (fields, row) in raw_rows.into_iter().zip(row_numbers) {
-        match document_from_csv_row(row, &headers, &fields, &inferred, &config, true) {
+        let fields = record.iter().map(|value| csv_cell_text(value, &config)).collect::<Vec<_>>();
+        match document_from_csv_row(index, &headers, &fields, &inferred, &config, true) {
             Ok(document) => documents.push(document),
             Err(error) => errors.push(error),
         }
+    }
+    if headers.is_empty() {
+        return Err(MongoImportIssue::new("CSV_STRUCTURE", "CSV file has no columns"));
     }
     if !config.has_header {
         warnings.push(MongoImportIssue::new(
@@ -845,7 +940,7 @@ fn parse_json_preview(
             }
         }
     } else {
-        let mut values = JsonArrayIter::new(&mut reader)?;
+        let mut values = JsonArrayIter::new(&mut reader);
         for (index, value) in values.by_ref().enumerate() {
             let row = (index + 1) as u64;
             if documents.len() + errors.len() >= preview_limit {
@@ -892,15 +987,15 @@ struct JsonArrayIter<'a, R: BufRead> {
 }
 
 impl<'a, R: BufRead> JsonArrayIter<'a, R> {
-    fn new(reader: &'a mut R) -> Result<Self, MongoImportIssue> {
-        Ok(Self {
+    fn new(reader: &'a mut R) -> Self {
+        Self {
             reader,
             started: false,
             in_array: false,
             finished: false,
             single_object: false,
             finished_with_non_array: false,
-        })
+        }
     }
 }
 
@@ -1267,16 +1362,6 @@ pub fn preview_mongodb_import_bytes(
     result
 }
 
-fn emit_parsed<F>(
-    on_document: &mut F,
-    parsed: Result<ParsedMongoDocument, MongoImportIssue>,
-) -> Result<(), MongoImportIssue>
-where
-    F: FnMut(Result<ParsedMongoDocument, MongoImportIssue>) -> Result<(), MongoImportIssue>,
-{
-    on_document(parsed)
-}
-
 fn stream_csv_documents<R, F>(
     reader: R,
     config: &CsvParseConfig,
@@ -1290,59 +1375,20 @@ where
     let mut csv_reader = csv_reader(reader, config.delimiter);
     let mut record = csv::StringRecord::new();
     let mut headers = Vec::new();
-    let mut inferred_types = inferred.to_vec();
     let mut index = 0u64;
     while csv_reader.read_record(&mut record).map_err(|error| csv_read_issue(error))? {
         index += 1;
         if index == 1 && config.has_header {
-            headers = unique_headers(&record.iter().map(|value| value.to_string()).collect::<Vec<_>>())?;
-            if inferred_types.is_empty() {
-                inferred_types = vec![MongoImportInferredType::String; headers.len()];
-            }
+            headers = unique_headers(&record_strings(&record))?;
             continue;
         }
         if headers.is_empty() {
             headers = generated_field_names(record.len().max(1));
-            if inferred_types.is_empty() {
-                inferred_types = vec![MongoImportInferredType::String; headers.len()];
-            }
         }
         let fields = record.iter().map(|value| csv_cell_text(value, config)).collect::<Vec<_>>();
-        emit_parsed(&mut on_document, document_from_csv_row(index, &headers, &fields, &inferred_types, config, false))?;
+        on_document(document_from_csv_row(index, &headers, &fields, inferred, config, false))?;
     }
     Ok(())
-}
-
-fn infer_csv_file_types(
-    path: &str,
-    config: &CsvParseConfig,
-    encoding: Option<TableImportTextEncoding>,
-) -> Result<(Vec<String>, Vec<MongoImportInferredType>), MongoImportIssue> {
-    let (reader, _) = open_transcoded_text_file(path, encoding).map_err(encoding_issue)?;
-    let mut csv_reader = csv_reader(reader, config.delimiter);
-    let mut record = csv::StringRecord::new();
-    let mut headers = Vec::new();
-    let mut masks: Vec<Option<u8>> = Vec::new();
-    let mut index = 0u64;
-    while csv_reader.read_record(&mut record).map_err(|error| csv_read_issue(error))? {
-        index += 1;
-        if index == 1 && config.has_header {
-            headers = unique_headers(&record.iter().map(|value| value.to_string()).collect::<Vec<_>>())?;
-            masks = vec![None; headers.len()];
-            continue;
-        }
-        if headers.is_empty() {
-            headers = generated_field_names(record.len().max(1));
-            masks = vec![None; headers.len()];
-        }
-        for (column_index, value) in record.iter().enumerate().take(headers.len()) {
-            if let Some(text) = csv_cell_text(value, config) {
-                masks[column_index] = Some(intersect_column_types(masks[column_index], classify_cell(&text)));
-            }
-        }
-    }
-    let inferred = masks.into_iter().map(|mask| inferred_type_from_mask(mask.unwrap_or(TYPE_STRING))).collect();
-    Ok((headers, inferred))
 }
 
 fn stream_csv_file<F>(path: &str, options: &MongoImportParseOptions, on_document: F) -> Result<(), MongoImportIssue>
@@ -1350,13 +1396,9 @@ where
     F: FnMut(Result<ParsedMongoDocument, MongoImportIssue>) -> Result<(), MongoImportIssue>,
 {
     let config = csv_config(path, options)?;
-    if config.type_mode == MongoImportTypeMode::Auto {
-        let (_headers, inferred) = infer_csv_file_types(path, &config, options.encoding())?;
-        let (reader, _) = open_transcoded_text_file(path, options.encoding()).map_err(encoding_issue)?;
-        return stream_csv_documents(reader, &config, &inferred, on_document);
-    }
+    let inferred = infer_csv_types(path, &config, options.encoding())?;
     let (reader, _) = open_transcoded_text_file(path, options.encoding()).map_err(encoding_issue)?;
-    stream_csv_documents(reader, &config, &[], on_document)
+    stream_csv_documents(reader, &config, &inferred, on_document)
 }
 
 fn stream_json_file<F>(
@@ -1376,10 +1418,7 @@ where
             let line = match line {
                 Ok(line) => line,
                 Err(error) => {
-                    emit_parsed(
-                        &mut on_document,
-                        Err(MongoImportIssue::new("FILE_UNREADABLE", error.to_string()).with_row(row)),
-                    )?;
+                    on_document(Err(MongoImportIssue::new("FILE_UNREADABLE", error.to_string()).with_row(row)))?;
                     continue;
                 }
             };
@@ -1394,15 +1433,13 @@ where
                         .with_value(trimmed.to_string())
                 })
                 .and_then(|value| json_document_from_value(row, value, false));
-            emit_parsed(&mut on_document, parsed)?;
+            on_document(parsed)?;
         }
         return Ok(());
     }
-    let values = JsonArrayIter::new(&mut reader)?;
-    for (index, value) in values.enumerate() {
+    for (index, value) in JsonArrayIter::new(&mut reader).enumerate() {
         let row = (index + 1) as u64;
-        let parsed = value.and_then(|value| json_document_from_value(row, value, false));
-        emit_parsed(&mut on_document, parsed)?;
+        on_document(value.and_then(|value| json_document_from_value(row, value, false)))?;
     }
     Ok(())
 }
@@ -1459,7 +1496,7 @@ async fn insert_documents_batch(
     collection: &str,
     documents: Vec<Document>,
     require_bson_types: bool,
-) -> Result<u64, MongoImportIssue> {
+) -> Result<MongoInsertOutcome, MongoImportIssue> {
     let pool =
         state.pool_handle(connection_id).await.ok_or_else(|| MongoImportIssue::new("CONNECTION", "Not found"))?;
     match &pool {
@@ -1491,12 +1528,24 @@ async fn insert_documents_batch(
                 }))
                 .await
                 .map_err(|error| MongoImportIssue::new("PERMISSION", error).retryable())?;
-            result.get("affected_rows").and_then(serde_json::Value::as_u64).ok_or_else(|| {
+            let inserted = result.get("affected_rows").and_then(serde_json::Value::as_u64).ok_or_else(|| {
                 MongoImportIssue::new("CONNECTION", "MongoDB Legacy Agent returned an invalid insertMany result")
-            })
+            })?;
+            Ok(MongoInsertOutcome { inserted, errors: Vec::new() })
         }
         _ => Err(MongoImportIssue::new("CONNECTION", "Not a MongoDB connection")),
     }
+}
+
+/// Rewrites a write issue's batch-relative index into the source file row it came from, so the
+/// user can find the offending record.
+fn located_in_batch(mut issue: MongoImportIssue, rows: &[u64], batch: u64) -> MongoImportIssue {
+    issue.row = issue
+        .row
+        .and_then(|index| rows.get(index.saturating_sub(1) as usize).copied())
+        .or_else(|| rows.first().copied());
+    issue.batch = Some(batch);
+    issue
 }
 
 fn bulk_write_issue(error: MongoBulkWriteError) -> MongoImportIssue {
@@ -1670,19 +1719,39 @@ where
                 )
                 .await
                 {
-                    Ok(inserted) => {
-                        rows_inserted += inserted;
+                    Ok(outcome) => {
+                        rows_inserted += outcome.inserted;
+                        rows_failed += outcome.errors.len() as u64;
                         batches_committed += 1;
-                    }
-                    Err(mut error) => {
-                        if let Some(index) = error.row {
-                            if let Some(row) = rows.get(index.saturating_sub(1) as usize) {
-                                error.row = Some(*row);
-                            }
-                        } else if let Some(row) = rows.first() {
-                            error.row = Some(*row);
+                        let rejected = outcome
+                            .errors
+                            .into_iter()
+                            .map(|error| located_in_batch(bulk_write_issue(error), &rows, batches_committed))
+                            .collect::<Vec<_>>();
+                        // Documents the server refused individually: the rest of the batch is
+                        // already written, so honour skipErrorRows exactly like a parse error.
+                        if let Some(fatal) = rejected.first().filter(|_| !skip_error_rows).cloned() {
+                            let message = fatal.display_message();
+                            error_rows.extend(rejected);
+                            on_progress(progress(
+                                &request.import_id,
+                                MongoImportPhase::Done,
+                                MongoImportStatus::Error,
+                                rows_read,
+                                rows_inserted,
+                                rows_failed,
+                                batches_committed,
+                                None,
+                                error_rows,
+                                Some(message),
+                                started_at,
+                            ));
+                            return Err(fatal);
                         }
-                        error.batch = Some(batches_committed + 1);
+                        error_rows.extend(rejected);
+                    }
+                    Err(error) => {
+                        let error = located_in_batch(error, &rows, batches_committed + 1);
                         rows_failed += rows.len() as u64;
                         let message = error.display_message();
                         error_rows.push(error.clone());
@@ -1875,7 +1944,7 @@ fn atomic_rename(temp: &Path, target: &Path) -> Result<(), String> {
     }
 }
 
-fn write_csv_line(writer: &mut BufWriter<File>, line: &str) -> Result<u64, String> {
+fn write_export_line(writer: &mut BufWriter<File>, line: &str) -> Result<u64, String> {
     writer.write_all(line.as_bytes()).map_err(|error| error.to_string())?;
     Ok(line.len() as u64)
 }
@@ -1887,7 +1956,10 @@ fn unwrap_extended_json_csv_scalar(value: &serde_json::Value) -> Option<String> 
     }
     let (key, inner) = object.iter().next()?;
     match key.as_str() {
-        "$oid" | "$numberInt" | "$numberLong" | "$numberDouble" | "$numberDecimal" | "$uuid" | "$symbol" => {
+        // Only types a CSV cell can carry without losing its identity on reimport. `$uuid`,
+        // `$symbol`, `$binary` and friends stay as Extended JSON text so that
+        // `Bson::try_from(serde_json::Value)` rebuilds the original type.
+        "$oid" | "$numberInt" | "$numberLong" | "$numberDouble" | "$numberDecimal" => {
             inner.as_str().map(str::to_string)
         }
         "$date" => match inner {
@@ -1906,17 +1978,15 @@ fn unwrap_extended_json_csv_scalar(value: &serde_json::Value) -> Option<String> 
     }
 }
 
-fn csv_formula_escape(value: &str) -> String {
-    match value.as_bytes().first() {
-        Some(b'=' | b'+' | b'-' | b'@') => format!("'{value}"),
-        _ => value.to_string(),
-    }
-}
-
-fn json_at_dot_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
+/// Resolves an export header back to its value, understanding the same grammar the import
+/// side parses, so `tags[0]` and `address.city` both round-trip.
+fn json_at_field_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
     let mut current = value;
-    for part in path.split('.') {
-        current = current.get(part)?;
+    for segment in parse_field_path(path) {
+        current = match segment {
+            PathSegment::Key(key) => current.get(key)?,
+            PathSegment::Index(index) => current.get(index)?,
+        };
     }
     Some(current)
 }
@@ -1924,9 +1994,9 @@ fn json_at_dot_path<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a 
 fn push_csv_json_value(out: &mut String, value: Option<&serde_json::Value>) {
     match value {
         None | Some(serde_json::Value::Null) => {}
-        Some(serde_json::Value::String(value)) => {
-            push_csv_field(out, &csv_formula_escape(value), CsvQuoteMode::Necessary)
-        }
+        // Deliberately no spreadsheet formula guard: prefixing `'` to values starting with
+        // `= + - @` would make reimport see a different string than was exported.
+        Some(serde_json::Value::String(value)) => push_csv_field(out, value, CsvQuoteMode::Necessary),
         Some(serde_json::Value::Bool(value)) => out.push_str(if *value { "true" } else { "false" }),
         Some(serde_json::Value::Number(value)) => out.push_str(&value.to_string()),
         Some(other) => {
@@ -1945,7 +2015,7 @@ fn format_csv_document_line(fields: &[String], document: &serde_json::Value) -> 
         if index > 0 {
             line.push(',');
         }
-        push_csv_json_value(&mut line, json_at_dot_path(document, field));
+        push_csv_json_value(&mut line, json_at_field_path(document, field));
     }
     line.push('\n');
     line
@@ -1972,40 +2042,36 @@ fn collect_csv_fields(
     collect_csv_fields_at(document, "", fields, seen)
 }
 
+/// Expands a document into Compass-style headers: nested objects become `address.city`,
+/// arrays become `tags[0]`, and anything a single cell can hold becomes one leaf column.
+/// Extended JSON wrappers, empty objects and empty arrays are leaves so their type survives.
 fn collect_csv_fields_at(
     value: &serde_json::Value,
     path: &str,
     fields: &mut Vec<String>,
     seen: &mut HashSet<String>,
 ) -> Result<(), String> {
-    if unwrap_extended_json_csv_scalar(value).is_some() {
-        if !path.is_empty() {
-            push_csv_field_name(path, fields, seen)?;
+    if unwrap_extended_json_csv_scalar(value).is_none() {
+        match value {
+            serde_json::Value::Object(object) if !object.is_empty() => {
+                for (key, child) in object {
+                    let child_path = if path.is_empty() { key.clone() } else { format!("{path}.{key}") };
+                    collect_csv_fields_at(child, &child_path, fields, seen)?;
+                }
+                return Ok(());
+            }
+            // A top-level array is not a document, so only descend once we have a field name.
+            serde_json::Value::Array(items) if !items.is_empty() && !path.is_empty() => {
+                for (index, child) in items.iter().enumerate() {
+                    collect_csv_fields_at(child, &format!("{path}[{index}]"), fields, seen)?;
+                }
+                return Ok(());
+            }
+            _ => {}
         }
-        return Ok(());
     }
-    let Some(object) = value.as_object() else {
-        if !path.is_empty() {
-            push_csv_field_name(path, fields, seen)?;
-        }
-        return Ok(());
-    };
-    if object.is_empty() {
-        if !path.is_empty() {
-            push_csv_field_name(path, fields, seen)?;
-        }
-        return Ok(());
-    }
-    for (key, child) in object {
-        let child_path = if path.is_empty() { key.clone() } else { format!("{path}.{key}") };
-        if child.is_object()
-            && unwrap_extended_json_csv_scalar(child).is_none()
-            && child.as_object().is_some_and(|nested| !nested.is_empty())
-        {
-            collect_csv_fields_at(child, &child_path, fields, seen)?;
-        } else {
-            push_csv_field_name(&child_path, fields, seen)?;
-        }
+    if !path.is_empty() {
+        push_csv_field_name(path, fields, seen)?;
     }
     Ok(())
 }
@@ -2040,11 +2106,11 @@ fn write_csv_header_and_buffer(
             push_csv_field(&mut line, field, CsvQuoteMode::Necessary);
         }
         line.push('\n');
-        *bytes_written += write_csv_line(writer, &line)?;
+        *bytes_written += write_export_line(writer, &line)?;
     }
     for json in buffered.drain(..) {
         let line = format_csv_document_line(fields, &json);
-        *bytes_written += write_csv_line(writer, &line)?;
+        *bytes_written += write_export_line(writer, &line)?;
         *documents_read += 1;
     }
     Ok(())
@@ -2216,7 +2282,7 @@ where
             let json = document_to_canonical_extended_json(&document);
             let mut line = json.to_string();
             line.push('\n');
-            bytes_written += write_csv_line(&mut writer, &line)?;
+            bytes_written += write_export_line(&mut writer, &line)?;
             documents_read += 1;
             if documents_read == 1 || documents_read % 500 == 0 {
                 on_progress(export_progress(
@@ -2305,7 +2371,7 @@ where
             }
             let json = document_to_canonical_extended_json(&document);
             let line = format_csv_document_line(&fields, &json);
-            bytes_written += write_csv_line(&mut writer, &line)?;
+            bytes_written += write_export_line(&mut writer, &line)?;
             documents_read += 1;
             if documents_read % 500 == 0 {
                 on_progress(export_progress(
@@ -2713,10 +2779,159 @@ mod tests {
     }
 
     #[test]
+    fn csv_export_import_round_trip_preserves_all_bson_types() {
+        use bson::oid::ObjectId;
+        use bson::spec::BinarySubtype;
+        use bson::{Binary, DateTime, Decimal128, Regex, Timestamp};
+
+        let documents = vec![doc! {
+            "_id": ObjectId::parse_str("507f1f77bcf86cd799439011").unwrap(),
+            "name": "Alice",
+            "age": 30i32,
+            "bigNumber": 9223372036854775807i64,
+            "price": Decimal128::from_str("123.45").unwrap(),
+            "rating": 4.5f64,
+            "active": true,
+            "inactive": false,
+            "notes": Bson::Null,
+            "empty": "",
+            "createdAt": DateTime::from_millis(1609459200000),
+            "address": doc! { "city": "NYC", "zip": "10001" },
+            "tags": ["rust", "mongodb"],
+            "matrix": [["a", "b"], ["c", "d"]],
+            "nested": doc! { "deep": doc! { "value": 42i32 } },
+            "emptyArray": Bson::Array(vec![]),
+            "emptyObj": Bson::Document(Document::new()),
+            "binary": Bson::Binary(Binary { subtype: BinarySubtype::Generic, bytes: vec![1, 2, 3] }),
+            "regex": Bson::RegularExpression(Regex { pattern: "^test$".to_string(), options: "i".to_string() }),
+            "timestamp": Bson::Timestamp(Timestamp { time: 1234567890, increment: 1 }),
+            "phonePrefix": "+86",
+            "formula": "=SUM(A1:A10)",
+            "numericString": "12345",
+            "dateString": "2021-01-01T00:00:00Z",
+        }];
+
+        let mut csv_output = Vec::new();
+        export_csv(documents.clone(), &mut csv_output, doc! {}, None, None, true).unwrap();
+
+        let csv_text = String::from_utf8(csv_output.clone()).unwrap();
+        let mut csv_file = std::io::Cursor::new(csv_output);
+
+        let config = CsvParseConfig {
+            delimiter: b',',
+            has_header: true,
+            trim: false,
+            empty_as_null: true,
+            type_mode: MongoImportTypeMode::ExtendedJson,
+            recognize_object_id_hex: true,
+        };
+
+        let mut reimported = Vec::new();
+        stream_csv_documents(&mut csv_file, &config, &[], |parsed| {
+            reimported.push(parsed?.document);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(reimported.len(), 1);
+        let doc = &reimported[0];
+
+        // _id: ObjectId round-trips
+        assert_eq!(doc.get_object_id("_id").unwrap().to_string(), "507f1f77bcf86cd799439011");
+
+        // Plain strings round-trip
+        assert_eq!(doc.get_str("name").unwrap(), "Alice");
+        assert_eq!(doc.get_str("phonePrefix").unwrap(), "+86");
+        assert_eq!(doc.get_str("formula").unwrap(), "=SUM(A1:A10)");
+
+        // Numbers: Int32 stable, Int64/Double become Decimal128 (documented), Decimal128 stable
+        assert_eq!(doc.get_i32("age").unwrap(), 30);
+        match doc.get("bigNumber").unwrap() {
+            Bson::Decimal128(d) => assert_eq!(d.to_string(), "9223372036854775807"),
+            _ => panic!("bigNumber should be Decimal128 after round-trip"),
+        }
+        match doc.get("price").unwrap() {
+            Bson::Decimal128(d) => assert_eq!(d.to_string(), "123.45"),
+            _ => panic!("price should be Decimal128"),
+        }
+        match doc.get("rating").unwrap() {
+            Bson::Decimal128(d) => assert_eq!(d.to_string(), "4.5"),
+            _ => panic!("rating should be Decimal128 after round-trip"),
+        }
+
+        // Booleans round-trip
+        assert_eq!(doc.get_bool("active").unwrap(), true);
+        assert_eq!(doc.get_bool("inactive").unwrap(), false);
+
+        // Nulls round-trip
+        assert_eq!(doc.get("notes"), Some(&Bson::Null));
+        assert_eq!(doc.get("empty"), Some(&Bson::Null));
+
+        // DateTime round-trips via Extended JSON
+        match doc.get("createdAt").unwrap() {
+            Bson::DateTime(dt) => assert_eq!(dt.timestamp_millis(), 1609459200000),
+            _ => panic!("createdAt should be DateTime"),
+        }
+
+        // Nested objects via dotted headers
+        assert_eq!(doc.get_document("address").unwrap().get_str("city").unwrap(), "NYC");
+        assert_eq!(doc.get_document("address").unwrap().get_str("zip").unwrap(), "10001");
+        assert_eq!(doc.get_document("nested").unwrap().get_document("deep").unwrap().get_i32("value").unwrap(), 42);
+
+        // Arrays via indexed headers
+        let tags = doc.get_array("tags").unwrap();
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0].as_str().unwrap(), "rust");
+        assert_eq!(tags[1].as_str().unwrap(), "mongodb");
+
+        let matrix = doc.get_array("matrix").unwrap();
+        assert_eq!(matrix.len(), 2);
+        let row0 = matrix[0].as_array().unwrap();
+        assert_eq!(row0[0].as_str().unwrap(), "a");
+        assert_eq!(row0[1].as_str().unwrap(), "b");
+        let row1 = matrix[1].as_array().unwrap();
+        assert_eq!(row1[0].as_str().unwrap(), "c");
+        assert_eq!(row1[1].as_str().unwrap(), "d");
+
+        // Empty array/object round-trip as Extended JSON text
+        assert_eq!(doc.get_array("emptyArray").unwrap().len(), 0);
+        assert_eq!(doc.get_document("emptyObj").unwrap().len(), 0);
+
+        // Binary round-trips via Extended JSON
+        match doc.get("binary").unwrap() {
+            Bson::Binary(bin) => assert_eq!(bin.bytes, vec![1, 2, 3]),
+            _ => panic!("binary should round-trip"),
+        }
+
+        // Regex round-trips
+        match doc.get("regex").unwrap() {
+            Bson::RegularExpression(r) => {
+                assert_eq!(r.pattern, "^test$");
+                assert_eq!(r.options, "i");
+            }
+            _ => panic!("regex should round-trip"),
+        }
+
+        // Timestamp round-trips
+        match doc.get("timestamp").unwrap() {
+            Bson::Timestamp(ts) => {
+                assert_eq!(ts.time, 1234567890);
+                assert_eq!(ts.increment, 1);
+            }
+            _ => panic!("timestamp should round-trip"),
+        }
+
+        // Type-inference hazards: numeric strings and date-looking strings infer their way
+        // when typeMode=auto (documented limitation), but extendedJson keeps them as strings
+        assert_eq!(doc.get_str("numericString").unwrap(), "12345");
+        assert_eq!(doc.get_str("dateString").unwrap(), "2021-01-01T00:00:00Z");
+    }
+
+    #[test]
     fn json_array_stream_parses_without_loading_whole_vec_api() {
         let json = b"[{\"a\":1},{\"a\":2},{\"a\":3}]";
         let mut reader = BufReader::new(Cursor::new(&json[..]));
-        let values = JsonArrayIter::new(&mut reader).unwrap();
+        let values = JsonArrayIter::new(&mut reader);
         let docs: Vec<_> = values.map(|value| value.unwrap()).collect();
         assert_eq!(docs.len(), 3);
         assert_eq!(docs[2]["a"], 1 + 2);

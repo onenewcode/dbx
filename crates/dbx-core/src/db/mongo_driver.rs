@@ -2523,49 +2523,77 @@ pub struct MongoBulkWriteError {
     pub retryable: bool,
 }
 
+/// What actually happened to a submitted batch. A batch can partly succeed, so the count of
+/// inserted documents and the per-document rejections are reported together.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MongoInsertOutcome {
+    pub inserted: u64,
+    /// One entry per document the server rejected, `index` pointing into the submitted batch.
+    pub errors: Vec<MongoBulkWriteError>,
+}
+
 pub async fn insert_bson_documents(
     client: &Client,
     database: &str,
     collection: &str,
     documents: Vec<Document>,
-) -> Result<u64, MongoBulkWriteError> {
+) -> Result<MongoInsertOutcome, MongoBulkWriteError> {
     if documents.is_empty() {
-        return Ok(0);
+        return Ok(MongoInsertOutcome::default());
     }
+    let total = documents.len() as u64;
     let col = client.database(database).collection::<Document>(collection);
-    match col.insert_many(documents).await {
-        Ok(result) => Ok(result.inserted_ids.len() as u64),
-        Err(error) => Err(map_insert_many_error(error)),
+    // Unordered: one rejected document must not abandon the rest of the batch, and the server
+    // then reports every rejection instead of stopping at the first.
+    match col.insert_many(documents).ordered(false).await {
+        Ok(result) => Ok(MongoInsertOutcome { inserted: result.inserted_ids.len() as u64, errors: Vec::new() }),
+        Err(error) => {
+            let errors = insert_write_errors(&error);
+            if errors.is_empty() {
+                // No per-document detail means the whole batch failed (network, auth, …).
+                return Err(map_insert_many_error(error));
+            }
+            Ok(MongoInsertOutcome { inserted: total.saturating_sub(errors.len() as u64), errors })
+        }
+    }
+}
+
+/// Per-document rejections, sorted by batch index. Empty when the failure was not per-document.
+fn insert_write_errors(error: &mongodb::error::Error) -> Vec<MongoBulkWriteError> {
+    use mongodb::error::{ErrorKind, WriteFailure};
+    let mut errors = match error.kind.as_ref() {
+        ErrorKind::Write(WriteFailure::WriteError(write_error)) => {
+            vec![write_error_entry(None, write_error.code, &write_error.message)]
+        }
+        ErrorKind::InsertMany(failure) => failure
+            .write_errors
+            .iter()
+            .flatten()
+            .map(|error| write_error_entry(Some(error.index), error.code, &error.message))
+            .collect(),
+        ErrorKind::BulkWrite(failure) => failure
+            .write_errors
+            .iter()
+            .map(|(index, error)| write_error_entry(Some(*index as usize), error.code, &error.message))
+            .collect(),
+        _ => Vec::new(),
+    };
+    errors.sort_by_key(|error| error.index.unwrap_or(0));
+    errors
+}
+
+fn write_error_entry(index: Option<usize>, code: i32, message: &str) -> MongoBulkWriteError {
+    MongoBulkWriteError {
+        message: message.to_string(),
+        index,
+        code: Some(code),
+        retryable: is_retryable_mongo_write_code(code),
     }
 }
 
 fn map_insert_many_error(error: mongodb::error::Error) -> MongoBulkWriteError {
-    use mongodb::error::{ErrorKind, WriteFailure};
+    use mongodb::error::ErrorKind;
     match error.kind.as_ref() {
-        ErrorKind::Write(WriteFailure::WriteError(write_error)) => MongoBulkWriteError {
-            message: write_error.message.clone(),
-            index: None,
-            code: Some(write_error.code),
-            retryable: is_retryable_mongo_write_code(write_error.code),
-        },
-        ErrorKind::InsertMany(failure) => {
-            let first = failure.write_errors.as_ref().and_then(|errors| errors.iter().min_by_key(|error| error.index));
-            MongoBulkWriteError {
-                message: first.map(|error| error.message.clone()).unwrap_or_else(|| error.to_string()),
-                index: first.map(|error| error.index),
-                code: first.map(|error| error.code),
-                retryable: first.map(|error| is_retryable_mongo_write_code(error.code)).unwrap_or(true),
-            }
-        }
-        ErrorKind::BulkWrite(failure) => {
-            let first = failure.write_errors.iter().min_by_key(|(index, _)| *index);
-            MongoBulkWriteError {
-                message: first.map(|(_, error)| error.message.clone()).unwrap_or_else(|| error.to_string()),
-                index: first.map(|(index, _)| *index),
-                code: first.map(|(_, error)| error.code),
-                retryable: first.map(|(_, error)| is_retryable_mongo_write_code(error.code)).unwrap_or(true),
-            }
-        }
         ErrorKind::Io(_) | ErrorKind::ConnectionPoolCleared { .. } | ErrorKind::ServerSelection { .. } => {
             MongoBulkWriteError { message: error.to_string(), index: None, code: None, retryable: true }
         }

@@ -110,15 +110,16 @@ Collection documents have a dedicated CSV/JSON import and CSV/NDJSON export work
 3. Review encoding, delimiter, header, empty-value, and type settings against the preview.
 4. Confirm append-only insert. Duplicate `_id` values stop the import. Batches that already committed are not rolled back.
 
-CSV follows MongoDB Compass: a header row, nested fields as dotted paths (`address.city`), ObjectId as 24-character hex, dates as ISO-8601, and empty cells as null. Import infers column types the same way Compass does; `_id` hex is restored as ObjectId. JSON/NDJSON still use Extended JSON (`$oid`, `$date`). All strings keeps every cell as text.
+CSV follows MongoDB Compass: a header row, nested fields as dotted paths (`address.city`), array indices (`tags[0]`, `matrix[0][1]`), ObjectId as 24-character hex, dates as ISO-8601, and empty cells as null. Import samples the first 1000 rows to infer column types; `_id` hex is restored as ObjectId, and `recognizeObjectIdHex` extends this to other columns. JSON/NDJSON use Extended JSON (`$oid`, `$date`). All strings keeps every cell as text.
 
-First-release limits: append only (no truncate or upsert), no Excel/GridFS/BSON binary import, and no automatic retry of failed batches.
+Type fidelity: `Double` exports and reimports as `Decimal128` (lossless for decimal text). Non-`_id` ObjectId fields round-trip as String unless `recognizeObjectIdHex` is on. Small `Int64` may narrow to `Int32`; ISO-date-looking strings become `DateTime`. Extended JSON types (`$binary`, `$regularExpression`, `$timestamp`, `$minKey`, `$maxKey`, `$code`) round-trip through JSON-text cells. Empty array `[]` and empty object `{}` round-trip correctly.
+
+First-release limits: append only (no truncate or upsert), no per-field type override, CSV export discovers fields from the first 10000 documents (later fields are silently dropped; use NDJSON for variable schemas), no JSON-array export format, no Excel/GridFS/BSON binary import, and no automatic retry of failed batches.
 
 ### Export data
 
 - Right-click a collection and choose **Export data**, then CSV or NDJSON. This opens the save-file dialog immediately, the same as table export.
-- The export always continues through the complete query result. It does not stop at the current page.
-- CSV nested objects and arrays are Extended JSON strings. NDJSON writes one canonical Extended JSON document per line.
+- CSV writes nested objects as dotted columns (`address.city`) and arrays as indexed columns (`tags[0]`, `tags[1]`). NDJSON writes one canonical Extended JSON document per line.
 - Collections with more than 256 distinct fields should use NDJSON.
 
 Copy the current document, selected documents, or field values as plain JSON or Extended JSON from the grid when you only need the visible selection.
