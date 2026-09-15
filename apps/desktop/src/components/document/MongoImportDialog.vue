@@ -42,6 +42,7 @@ const hasHeader = ref(true);
 const trim = ref(false);
 const emptyAsNull = ref(true);
 const typeMode = ref<api.MongoImportTypeMode>("auto");
+const columnTypeOverrides = ref<Record<string, api.MongoImportInferredType>>({});
 const recognizeObjectIdHex = ref(false);
 const skipErrorRows = ref(false);
 const batchSize = ref(500);
@@ -66,8 +67,12 @@ const fileLabel = computed(() => sourceName.value || t("tableImport.noFileSelect
 const encodingOptions = TABLE_IMPORT_ENCODING_OPTIONS;
 const targetLabel = computed(() => `${props.database}.${props.collection}`);
 
-const parseOptions = computed(
-  (): api.MongoImportParseOptions => ({
+const columnTypeOptions: api.MongoImportInferredType[] = ["string", "boolean", "integer", "decimal", "date", "objectId", "object", "array", "mixed"];
+const showColumnTypeEditors = computed(() => format.value === "csv" && typeMode.value !== "extendedJson");
+
+const parseOptions = computed((): api.MongoImportParseOptions => {
+  const overrides = columnTypeOverrides.value;
+  return {
     encoding: encoding.value,
     delimiter: delimiter.value,
     hasHeader: hasHeader.value,
@@ -76,8 +81,9 @@ const parseOptions = computed(
     typeMode: typeMode.value,
     recognizeObjectIdHex: recognizeObjectIdHex.value,
     skipErrorRows: skipErrorRows.value,
-  }),
-);
+    columnTypes: Object.keys(overrides).length ? { ...overrides } : null,
+  };
+});
 
 function formatFromName(name: string): api.MongoImportFormat {
   const lower = name.toLowerCase();
@@ -99,6 +105,7 @@ function assignSource(source: string | File) {
   sourceName.value = importSourceDisplayName(source);
   format.value = formatFromName(sourceName.value);
   typeMode.value = format.value === "csv" ? "auto" : "extendedJson";
+  columnTypeOverrides.value = {};
   delimiter.value = importTextDelimiterForName(sourceName.value);
   wizardStep.value = "source";
   queuePreview();
@@ -159,7 +166,11 @@ async function loadPreview() {
   }
 }
 
-watch([format, encoding, delimiter, hasHeader, trim, emptyAsNull, typeMode, recognizeObjectIdHex, previewLimit], () => {
+watch([format, hasHeader, typeMode], () => {
+  if (Object.keys(columnTypeOverrides.value).length) columnTypeOverrides.value = {};
+});
+
+watch([format, encoding, delimiter, hasHeader, trim, emptyAsNull, typeMode, recognizeObjectIdHex, previewLimit, columnTypeOverrides], () => {
   if (selectedSource.value) queuePreview();
 });
 
@@ -178,6 +189,7 @@ function reset() {
   selectedSource.value = null;
   sourceName.value = "";
   previewError.value = "";
+  columnTypeOverrides.value = {};
   wizardStep.value = "source";
   running.value = false;
   cancelling.value = false;
@@ -274,6 +286,27 @@ function setTypeMode(value: unknown) {
   if (value === "string" || value === "auto" || value === "extendedJson") typeMode.value = value;
 }
 
+function isImportInferredType(value: unknown): value is api.MongoImportInferredType {
+  return columnTypeOptions.includes(value as api.MongoImportInferredType);
+}
+
+function columnType(column: api.MongoImportColumn): api.MongoImportInferredType {
+  return columnTypeOverrides.value[column.name] ?? column.inferredType;
+}
+
+function setColumnType(name: string, value: unknown) {
+  if (!isImportInferredType(value)) return;
+  const inferred = preview.value?.columns.find((column) => column.name === name)?.inferredType;
+  const next = { ...columnTypeOverrides.value };
+  if (value === inferred) delete next[name];
+  else next[name] = value;
+  columnTypeOverrides.value = next;
+}
+
+function onColumnTypeChange(name: string, event: Event) {
+  setColumnType(name, (event.target as HTMLSelectElement).value);
+}
+
 function requestClose() {
   if (running.value) {
     closeBlocked.value = true;
@@ -319,7 +352,7 @@ function requestClose() {
           <div class="grid grid-cols-3 gap-3 rounded-md border p-3">
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.sourceFormat") }}</Label>
-              <Select :model-value="format" @update:model-value="setFormat">
+              <Select :model-value="format" :aria-label="t('tableImport.sourceFormat')" @update:model-value="setFormat">
                 <SelectTrigger class="h-8 text-xs"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="csv">CSV</SelectItem>
@@ -339,11 +372,11 @@ function requestClose() {
             </div>
             <div v-if="format === 'csv'" class="space-y-1.5">
               <Label class="text-xs">{{ t("tableImport.delimiter") }}</Label>
-              <Input v-model="delimiter" class="h-8 text-xs font-mono" />
+              <Input v-model="delimiter" class="h-8 text-xs font-mono" :aria-label="t('tableImport.delimiter')" />
             </div>
             <div class="space-y-1.5">
               <Label class="text-xs">{{ t("mongo.import.typeMode") }}</Label>
-              <Select :model-value="typeMode" @update:model-value="setTypeMode">
+              <Select :model-value="typeMode" :aria-label="t('mongo.import.typeMode')" @update:model-value="setTypeMode">
                 <SelectTrigger class="h-8 text-xs"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="string">{{ t("mongo.import.typeString") }}</SelectItem>
@@ -365,7 +398,7 @@ function requestClose() {
           </div>
 
           <div class="grid grid-cols-2 gap-x-4 gap-y-2 rounded-md border p-3">
-            <label class="flex items-center gap-2 text-xs"><input v-model="hasHeader" type="checkbox" class="h-3.5 w-3.5 accent-primary" /> {{ t("tableImport.hasHeader") }}</label>
+            <label class="flex items-center gap-2 text-xs"><input v-model="hasHeader" type="checkbox" class="h-3.5 w-3.5 accent-primary" :aria-label="t('tableImport.hasHeader')" /> {{ t("tableImport.hasHeader") }}</label>
             <label class="flex items-center gap-2 text-xs"><input v-model="trim" type="checkbox" class="h-3.5 w-3.5 accent-primary" /> {{ t("tableImport.trimValues") }}</label>
             <label class="flex items-center gap-2 text-xs"><input v-model="emptyAsNull" type="checkbox" class="h-3.5 w-3.5 accent-primary" /> {{ t("mongo.import.emptyAsNull") }}</label>
             <label class="flex items-center gap-2 text-xs"><input v-model="recognizeObjectIdHex" type="checkbox" class="h-3.5 w-3.5 accent-primary" /> {{ t("mongo.import.recognizeObjectIdHex") }}</label>
@@ -384,9 +417,19 @@ function requestClose() {
                 <thead>
                   <tr>
                     <th class="border-b px-2 py-1 text-left">#</th>
-                    <th v-for="column in preview.columns" :key="column.name" class="border-b px-2 py-1 text-left">
-                      {{ column.name }}
-                      <span class="text-muted-foreground">({{ column.inferredType }})</span>
+                    <th v-for="column in preview.columns" :key="column.name" class="border-b px-2 py-1 text-left align-top">
+                      <div class="font-medium">{{ column.name }}</div>
+                      <select
+                        v-if="showColumnTypeEditors"
+                        class="mt-1 h-6 w-full min-w-[6.5rem] max-w-[8.5rem] rounded border bg-background px-1 text-[11px] font-normal"
+                        :value="columnType(column)"
+                        :aria-label="t('mongo.import.columnType', { name: column.name })"
+                        :disabled="running || loadingPreview"
+                        @change="onColumnTypeChange(column.name, $event)"
+                      >
+                        <option v-for="type in columnTypeOptions" :key="type" :value="type">{{ t(`mongo.import.inferredType.${type}`) }}</option>
+                      </select>
+                      <span v-else-if="format !== 'csv'" class="text-muted-foreground">({{ column.inferredType }})</span>
                     </th>
                   </tr>
                 </thead>
