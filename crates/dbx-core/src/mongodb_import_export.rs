@@ -569,6 +569,17 @@ fn convert_cell(
     if let Some(override_type) = config.column_types.get(column).copied() {
         return convert_auto_cell(value, column, row, override_type, config);
     }
+    // Without an explicit override, keep the legacy per-cell ObjectId behavior:
+    // any 24-hex cell converts (mixed columns included), and a non-hex cell in
+    // a uniform-hex column degrades to its own cell type instead of failing the
+    // row with TYPE_CONVERSION.
+    if (config.recognize_object_id_hex || (column == "_id" && config.type_mode != MongoImportTypeMode::String))
+        && is_object_id_hex(value)
+    {
+        return parse_object_id_cell(value, column, row);
+    }
+    let inferred =
+        if inferred == MongoImportInferredType::ObjectId { MongoImportInferredType::Mixed } else { inferred };
     match config.type_mode {
         MongoImportTypeMode::String => Ok(Bson::String(value.to_string())),
         MongoImportTypeMode::Auto => convert_auto_cell(value, column, row, inferred, config),
@@ -2697,12 +2708,32 @@ mod tests {
     }
 
     #[test]
-    fn mixed_id_column_stays_string_without_per_cell_object_id() {
+    fn mixed_id_column_converts_hex_cells_per_cell() {
         let csv = "_id\n507f1f77bcf86cd799439011\nnot-an-object-id\n";
         let preview = preview_csv(csv, MongoImportTypeMode::Auto);
         assert_eq!(preview.columns[0].inferred_type, MongoImportInferredType::String);
-        assert_eq!(preview.rows[0]["_id"], "507f1f77bcf86cd799439011");
+        assert_eq!(preview.rows[0]["_id"]["$oid"], "507f1f77bcf86cd799439011");
         assert_eq!(preview.rows[1]["_id"], "not-an-object-id");
+    }
+
+    #[test]
+    fn non_hex_cell_in_uniform_object_id_column_degrades_to_string() {
+        // The first TYPE_SAMPLE_ROWS rows make the column look uniformly hex;
+        // a non-hex value after the sample must keep importing as a string
+        // instead of failing the row with TYPE_CONVERSION.
+        let hex = "507f1f77bcf86cd799439011";
+        let mut csv = String::from("user_id\n");
+        for _ in 0..TYPE_SAMPLE_ROWS {
+            csv.push_str(hex);
+            csv.push('\n');
+        }
+        csv.push_str("not-an-object-id\n");
+        let mut parse = options(MongoImportTypeMode::Auto);
+        parse.recognize_object_id_hex = Some(true);
+        let executed = execute_source(csv.as_bytes(), "csv", MongoImportFormat::Csv, &parse);
+        assert_eq!(executed.len(), TYPE_SAMPLE_ROWS + 1);
+        assert_eq!(executed[0]["user_id"]["$oid"], hex);
+        assert_eq!(executed[TYPE_SAMPLE_ROWS]["user_id"], "not-an-object-id");
     }
 
     fn with_column_types(
