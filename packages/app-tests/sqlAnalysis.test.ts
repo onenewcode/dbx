@@ -377,6 +377,18 @@ test("keeps Oracle queries with a NUM column or alias editable when result label
   assert.equal(allEditableColumnsWriteable(byAlias, ["ID", "AMOUNT", "__dbx_row_num"], undefined, "oracle"), true);
 });
 
+test("tolerates trailing pagination labels for non-Oracle engines", () => {
+  const analysis = analyzeEditableQuery("select id, amount as num from users");
+  assert.ok(analysis);
+  assert.deepEqual(sourceColumnsForResult(analysis, ["id", "num", "__dbx_row_num"], undefined, "mysql"), ["id", "amount", undefined]);
+  assert.equal(allEditableColumnsWriteable(analysis, ["id", "num", "__dbx_row_num"], undefined, "mysql"), true);
+  assert.deepEqual(sourceColumnsForResult(analysis, ["id", "num", "dbx_rn"], undefined, "mysql"), ["id", "amount", undefined]);
+  assert.equal(allEditableColumnsWriteable(analysis, ["id", "num", "dbx_rn"], undefined, "mysql"), true);
+  assert.deepEqual(sourceColumnsForResult(analysis, ["id", "num", "ROWNUM"], undefined, "mysql"), ["id", "amount", undefined]);
+  assert.equal(allEditableColumnsWriteable(analysis, ["id", "num", "ROWNUM"], undefined, "mysql"), true);
+  assert.deepEqual(sourceColumnsForResult(analysis, ["id", "num", "rownum"], undefined, "mysql"), ["id", "amount", undefined]);
+});
+
 test("maps ClickHouse simple query results when identifier columns are returned", () => {
   const analysis = analyzeEditableQuery("SELECT id, name, score + 1 AS next_score FROM default.people");
 
