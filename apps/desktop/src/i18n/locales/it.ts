@@ -5258,6 +5258,8 @@ export default withEnglishFallback({
       start: "Importa",
       success: "Importati {count} documenti",
       stillRunning: "L'importazione è ancora in esecuzione. Usa Annulla per fermare i nuovi batch.",
+      legacyInsertUnsupported: "Questo driver MongoDB Legacy non può inserire documenti in blocco. Aggiorna o reinstalla il driver MongoDB Legacy.",
+      legacyCursorInvalid: "Il cursore di esportazione MongoDB Legacy non è più disponibile. Riprova l'esportazione.",
       rowsRead: "Righe lette",
       rowsInserted: "Righe inserite",
       rowsFailed: "Righe non riuscite",
@@ -5268,6 +5270,9 @@ export default withEnglishFallback({
         writing: "Scrittura",
         done: "Completato",
       },
+    },
+    insert: {
+      partialFailure: "Il driver MongoDB Legacy ha rifiutato {failed} di {total} documenti: {message}",
     },
   },
   meilisearch: {

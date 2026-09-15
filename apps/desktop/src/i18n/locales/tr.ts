@@ -5300,6 +5300,8 @@ export default withEnglishFallback({
       start: "İçe aktar",
       success: "{count} belge içe aktarıldı",
       stillRunning: "İçe aktarma hâlâ çalışıyor. Yeni toplu işleri durdurmak için İptal’i kullanın.",
+      legacyInsertUnsupported: "Bu MongoDB Legacy sürücüsü belgeleri toplu ekleyemez. MongoDB Legacy sürücüsünü yükseltin veya yeniden yükleyin.",
+      legacyCursorInvalid: "MongoDB Legacy dışa aktarma imleci artık kullanılamıyor. Dışa aktarmayı yeniden deneyin.",
       rowsRead: "Okunan satırlar",
       rowsInserted: "Eklenen satırlar",
       rowsFailed: "Başarısız satırlar",
@@ -5310,6 +5312,9 @@ export default withEnglishFallback({
         writing: "Yazılıyor",
         done: "Bitti",
       },
+    },
+    insert: {
+      partialFailure: "MongoDB Legacy sürücüsü {total} belgenin {failed} tanesini reddetti: {message}",
     },
   },
   meilisearch: {

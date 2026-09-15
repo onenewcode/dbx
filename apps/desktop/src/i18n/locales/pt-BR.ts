@@ -5260,6 +5260,8 @@ export default withEnglishFallback({
       start: "Importar",
       success: "{count} documentos importados",
       stillRunning: "A importação ainda está em execução. Use Cancelar para interromper novos lotes.",
+      legacyInsertUnsupported: "Este driver MongoDB Legacy não pode inserir documentos em lote. Atualize ou reinstale o driver MongoDB Legacy.",
+      legacyCursorInvalid: "O cursor de exportação do MongoDB Legacy não está mais disponível. Tente exportar novamente.",
       rowsRead: "Linhas lidas",
       rowsInserted: "Linhas inseridas",
       rowsFailed: "Linhas com falha",
@@ -5270,6 +5272,9 @@ export default withEnglishFallback({
         writing: "Gravando",
         done: "Concluído",
       },
+    },
+    insert: {
+      partialFailure: "O driver MongoDB Legacy rejeitou {failed} de {total} documentos: {message}",
     },
   },
   meilisearch: {

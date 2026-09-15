@@ -5558,6 +5558,8 @@ export default {
       start: "Import",
       success: "Imported {count} documents",
       stillRunning: "Import is still running. Use Cancel to stop new batches.",
+      legacyInsertUnsupported: "This MongoDB Legacy driver cannot insert documents in bulk. Upgrade or reinstall the MongoDB Legacy driver.",
+      legacyCursorInvalid: "The MongoDB Legacy export cursor is no longer available. Retry the export.",
       rowsRead: "Rows read",
       rowsInserted: "Rows inserted",
       rowsFailed: "Rows failed",
@@ -5568,6 +5570,9 @@ export default {
         writing: "Writing",
         done: "Done",
       },
+    },
+    insert: {
+      partialFailure: "The MongoDB Legacy driver rejected {failed} of {total} documents: {message}",
     },
   },
   meilisearch: {

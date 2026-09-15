@@ -5287,6 +5287,8 @@ export default withEnglishFallback({
       start: "インポート",
       success: "{count} 件のドキュメントをインポートしました",
       stillRunning: "インポートは実行中です。以降のバッチを止めるにはキャンセルしてください。",
+      legacyInsertUnsupported: "この MongoDB Legacy ドライバーは一括挿入に対応していません。ドライバーをアップグレードまたは再インストールしてください。",
+      legacyCursorInvalid: "MongoDB Legacy のエクスポートカーソルは利用できなくなりました。エクスポートを再試行してください。",
       rowsRead: "読み取り行数",
       rowsInserted: "挿入行数",
       rowsFailed: "失敗行数",
@@ -5297,6 +5299,9 @@ export default withEnglishFallback({
         writing: "書き込み中",
         done: "完了",
       },
+    },
+    insert: {
+      partialFailure: "MongoDB Legacy ドライバーは {total} 件中 {failed} 件のドキュメントを拒否しました: {message}",
     },
   },
   meilisearch: {
