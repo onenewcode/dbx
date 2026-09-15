@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import LightDropdown, { type LightDropdownItem } from "@/components/ui/LightDropdown.vue";
 import { AlertTriangle, ArrowLeft, ArrowRight, FileUp, Loader2, Square, Upload, X } from "@lucide/vue";
 import { useConnectionStore } from "@/stores/connectionStore";
 import { connectionIsEffectivelyReadOnly } from "@/lib/database/readOnlyWriteAccess";
@@ -68,6 +69,12 @@ const encodingOptions = TABLE_IMPORT_ENCODING_OPTIONS;
 const targetLabel = computed(() => `${props.database}.${props.collection}`);
 
 const columnTypeOptions: api.MongoImportInferredType[] = ["string", "boolean", "integer", "decimal", "date", "objectId", "object", "array", "mixed"];
+const columnTypeItems = computed<LightDropdownItem[]>(() =>
+  columnTypeOptions.map((value) => ({
+    value,
+    label: t(`mongo.import.inferredType.${value}`),
+  })),
+);
 const showColumnTypeEditors = computed(() => format.value === "csv" && typeMode.value !== "extendedJson");
 
 const parseOptions = computed((): api.MongoImportParseOptions => {
@@ -144,8 +151,11 @@ async function loadPreview() {
   const source = selectedSource.value;
   if (!source) return;
   const requestId = ++previewRequestId;
-  loadingPreview.value = true;
-  previewError.value = "";
+  const keepExistingPreview = !!preview.value;
+  if (!keepExistingPreview) {
+    loadingPreview.value = true;
+    previewError.value = "";
+  }
   try {
     const input = importPreviewInput(uploadedSource, source);
     const next = await api.previewMongodbImportFile(input.fileOrPath, {
@@ -156,6 +166,7 @@ async function loadPreview() {
     });
     if (requestId !== previewRequestId) return;
     preview.value = next;
+    previewError.value = "";
     uploadedSource = uploadedImportSourceFromPreview(next) ?? uploadedSource;
   } catch (error) {
     if (requestId !== previewRequestId) return;
@@ -303,10 +314,6 @@ function setColumnType(name: string, value: unknown) {
   columnTypeOverrides.value = next;
 }
 
-function onColumnTypeChange(name: string, event: Event) {
-  setColumnType(name, (event.target as HTMLSelectElement).value);
-}
-
 function requestClose() {
   if (running.value) {
     closeBlocked.value = true;
@@ -405,12 +412,12 @@ function requestClose() {
             <label class="flex items-center gap-2 text-xs"><input v-model="skipErrorRows" type="checkbox" class="h-3.5 w-3.5 accent-primary" /> {{ t("mongo.import.skipErrorRows") }}</label>
           </div>
 
-          <div v-if="loadingPreview" class="flex items-center gap-2 text-xs text-muted-foreground">
+          <div v-if="loadingPreview && !preview" class="flex items-center gap-2 text-xs text-muted-foreground">
             <Loader2 class="h-3.5 w-3.5 animate-spin" />
             {{ t("mongo.import.previewing") }}
           </div>
-          <div v-else-if="previewError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">{{ previewError }}</div>
-          <div v-else-if="preview" class="space-y-2">
+          <div v-if="previewError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">{{ previewError }}</div>
+          <div v-if="preview" class="space-y-2">
             <div class="text-xs text-muted-foreground">{{ t("mongo.import.estimatedRows", { count: preview.estimatedRows ?? 0 }) }}</div>
             <div class="max-h-56 overflow-auto rounded-md border">
               <table class="w-full text-xs">
@@ -419,16 +426,17 @@ function requestClose() {
                     <th class="border-b px-2 py-1 text-left">#</th>
                     <th v-for="column in preview.columns" :key="column.name" class="border-b px-2 py-1 text-left align-top">
                       <div class="font-medium">{{ column.name }}</div>
-                      <select
+                      <LightDropdown
                         v-if="showColumnTypeEditors"
-                        class="mt-1 h-6 w-full min-w-[6.5rem] max-w-[8.5rem] rounded border bg-background px-1 text-[11px] font-normal"
-                        :value="columnType(column)"
+                        :model-value="columnType(column)"
+                        :items="columnTypeItems"
                         :aria-label="t('mongo.import.columnType', { name: column.name })"
-                        :disabled="running || loadingPreview"
-                        @change="onColumnTypeChange(column.name, $event)"
-                      >
-                        <option v-for="type in columnTypeOptions" :key="type" :value="type">{{ t(`mongo.import.inferredType.${type}`) }}</option>
-                      </select>
+                        :disabled="running"
+                        trigger-class="mt-1 inline-flex h-6 w-full min-w-[6.5rem] max-w-[8.5rem] items-center justify-between gap-1 rounded-md border bg-background px-1.5 text-[11px] font-normal hover:bg-muted/30 disabled:cursor-not-allowed disabled:opacity-50"
+                        content-class="pointer-events-auto !z-[80] ring-1 ring-foreground/10"
+                        check-position="right"
+                        @update:model-value="(value) => setColumnType(column.name, value)"
+                      />
                       <span v-else-if="format !== 'csv'" class="text-muted-foreground">({{ column.inferredType }})</span>
                     </th>
                   </tr>

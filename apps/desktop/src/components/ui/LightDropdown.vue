@@ -180,7 +180,7 @@ onBeforeUnmount(close);
     <ChevronDown v-if="showChevron" class="h-3 w-3 opacity-50" />
   </button>
   <Teleport to="body">
-    <div v-if="open" ref="menuRef" class="fixed z-50 min-w-32 overflow-x-hidden overflow-y-auto rounded-md p-1 cn-menu-translucent text-popover-foreground" :class="contentClass" :style="menuStyle" role="menu">
+    <div v-if="open" ref="menuRef" class="pointer-events-auto fixed z-50 min-w-32 overflow-x-hidden overflow-y-auto rounded-md p-1 cn-menu-translucent text-popover-foreground" :class="contentClass" :style="menuStyle" role="menu" @pointerdown.prevent>
       <div v-if="label" :class="labelClass">{{ label }}</div>
       <div v-if="label" class="bg-border -mx-1 my-1 h-px" />
       <template v-for="item in items" :key="item.value">
@@ -194,6 +194,7 @@ onBeforeUnmount(close);
           :title="item.title"
           :style="{ paddingInlineStart: `${0.375 + (item.indentLevel ?? 0) * 0.75}rem` }"
           role="menuitem"
+          @pointerdown.prevent="selectItem(item)"
           @click="selectItem(item)"
         >
           <Check v-if="checkPosition === 'left'" class="h-3 w-3 shrink-0" :class="[isItemSelected(item) ? selectedCheckClass : 'opacity-0']" />

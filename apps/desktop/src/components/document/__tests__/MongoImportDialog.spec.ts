@@ -221,18 +221,31 @@ describe("MongoImportDialog", () => {
     return app;
   }
 
-  it("defaults csv column types to inference and lets the user override them", async () => {
-    const app = await mountWithFile("orders.csv", previewResult({ columns: [{ name: "id", inferredType: "integer" }], rows: [{ id: 1 }] }));
-    const select = document.querySelector("table select") as HTMLSelectElement | null;
-    expect(select).not.toBeNull();
-    expect(select?.value).toBe("integer");
-    expect(select?.getAttribute("aria-label")).toBe("mongo.import.columnType");
+  function columnTypeTrigger() {
+    return document.querySelector('button[aria-label="mongo.import.columnType"]') as HTMLButtonElement | null;
+  }
 
-    select!.value = "string";
-    select!.dispatchEvent(new Event("change"));
+  async function setColumnTypeValue(value: string) {
+    const trigger = columnTypeTrigger();
+    expect(trigger).not.toBeNull();
+    trigger!.click();
+    await nextTick();
+    const item = [...document.querySelectorAll('[role="menuitem"]')].find((element) => (element.textContent ?? "").includes(`inferredType.${value}`)) as HTMLButtonElement | undefined;
+    expect(item).toBeTruthy();
+    item!.click();
     await vi.advanceTimersByTimeAsync(200);
     await Promise.resolve();
     await nextTick();
+  }
+
+  it("defaults csv column types to inference and lets the user override them", async () => {
+    const app = await mountWithFile("orders.csv", previewResult({ columns: [{ name: "id", inferredType: "integer" }], rows: [{ id: 1 }] }));
+    const trigger = columnTypeTrigger();
+    expect(trigger).not.toBeNull();
+    expect(trigger?.textContent).toContain("inferredType.integer");
+    expect(trigger?.getAttribute("aria-label")).toBe("mongo.import.columnType");
+
+    await setColumnTypeValue("string");
 
     expect(api.previewMongodbImportFile.mock.calls.at(-1)?.[1]).toMatchObject({
       parseOptions: expect.objectContaining({ columnTypes: { id: "string" } }),
@@ -240,14 +253,47 @@ describe("MongoImportDialog", () => {
     app.unmount();
   });
 
-  it("clears column type overrides when the file changes", async () => {
-    const app = await mountWithFile("orders.csv", previewResult({ columns: [{ name: "id", inferredType: "integer" }] }));
-    const select = document.querySelector("table select") as HTMLSelectElement;
-    select.value = "string";
-    select.dispatchEvent(new Event("change"));
+  it("selects a column type on pointerdown so dialogs do not swallow the click", async () => {
+    const app = await mountWithFile("orders.csv", previewResult({ columns: [{ name: "id", inferredType: "integer" }], rows: [{ id: 1 }] }));
+    const trigger = columnTypeTrigger();
+    expect(trigger).not.toBeNull();
+    trigger!.click();
+    await nextTick();
+    const item = [...document.querySelectorAll('[role="menuitem"]')].find((element) => (element.textContent ?? "").includes("inferredType.boolean")) as HTMLButtonElement | undefined;
+    expect(item).toBeTruthy();
+    item!.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true, cancelable: true }));
     await vi.advanceTimersByTimeAsync(200);
     await Promise.resolve();
     await nextTick();
+    expect(api.previewMongodbImportFile.mock.calls.at(-1)?.[1]).toMatchObject({
+      parseOptions: expect.objectContaining({ columnTypes: { id: "boolean" } }),
+    });
+    app.unmount();
+  });
+
+  it("does not replace the preview table with a loading state when column types change", async () => {
+    const app = await mountWithFile("orders.csv", previewResult({ columns: [{ name: "id", inferredType: "integer" }], rows: [{ id: 1 }] }));
+    expect(columnTypeTrigger()).not.toBeNull();
+    api.previewMongodbImportFile.mockImplementation(() => new Promise(() => {}));
+
+    const trigger = columnTypeTrigger();
+    trigger!.click();
+    await nextTick();
+    const item = [...document.querySelectorAll('[role="menuitem"]')].find((element) => (element.textContent ?? "").includes("inferredType.string")) as HTMLButtonElement | undefined;
+    expect(item).toBeTruthy();
+    item!.click();
+    await vi.advanceTimersByTimeAsync(200);
+    await Promise.resolve();
+    await nextTick();
+
+    expect(columnTypeTrigger()).not.toBeNull();
+    expect(document.body.textContent).not.toContain("mongo.import.previewing");
+    app.unmount();
+  });
+
+  it("clears column type overrides when the file changes", async () => {
+    const app = await mountWithFile("orders.csv", previewResult({ columns: [{ name: "id", inferredType: "integer" }] }));
+    await setColumnTypeValue("string");
 
     const input = document.querySelector("input[type='file']") as HTMLInputElement;
     const file = new File(["id\n2"], "other.csv", { type: "text/csv" });
@@ -272,7 +318,7 @@ describe("MongoImportDialog", () => {
         columns: [{ name: "id", inferredType: "string" }],
       }),
     );
-    expect(document.querySelector("table select")).toBeNull();
+    expect(columnTypeTrigger()).toBeNull();
     expect(document.body.textContent).toContain("(string)");
     app.unmount();
   });
@@ -282,13 +328,7 @@ describe("MongoImportDialog", () => {
   }
 
   async function overrideIdToString() {
-    const select = document.querySelector("table select") as HTMLSelectElement;
-    expect(select).not.toBeNull();
-    select.value = "string";
-    select.dispatchEvent(new Event("change"));
-    await vi.advanceTimersByTimeAsync(200);
-    await Promise.resolve();
-    await nextTick();
+    await setColumnTypeValue("string");
   }
 
   async function setLabeledSelect(label: string, value: string) {
