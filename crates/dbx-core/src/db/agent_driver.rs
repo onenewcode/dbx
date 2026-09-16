@@ -1041,6 +1041,7 @@ pub enum AgentCapability {
     MongoCloneCollection,
     MongoRunCommand,
     MongoInsertDocuments,
+    MongoReplaceDocument,
     MongoFindCursor,
     MultiSession,
     StructuredErrorV1,
@@ -1124,7 +1125,7 @@ fn parse_agent_rpc_error_header(header: &str) -> (Option<i64>, String) {
 }
 
 impl AgentCapability {
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 26] = [
         Self::Connect,
         Self::TestConnection,
         Self::Metadata,
@@ -1147,6 +1148,7 @@ impl AgentCapability {
         Self::MongoCloneCollection,
         Self::MongoRunCommand,
         Self::MongoInsertDocuments,
+        Self::MongoReplaceDocument,
         Self::MongoFindCursor,
         Self::MultiSession,
         Self::StructuredErrorV1,
@@ -1176,6 +1178,7 @@ impl AgentCapability {
             Self::MongoCloneCollection => "mongo_clone_collection",
             Self::MongoRunCommand => "mongo_run_command",
             Self::MongoInsertDocuments => "mongo_insert_documents",
+            Self::MongoReplaceDocument => "mongo_replace_document",
             Self::MongoFindCursor => "mongo_find_cursor",
             Self::MultiSession => "multi_session",
             Self::StructuredErrorV1 => "structured_error_v1",
@@ -1379,6 +1382,7 @@ pub enum MongoAgentMethod {
     InsertDocuments,
     UpdateDocument,
     UpdateDocuments,
+    ReplaceDocument,
     DeleteDocument,
     DeleteDocuments,
     RunCommand,
@@ -1388,7 +1392,7 @@ pub enum MongoAgentMethod {
 }
 
 impl MongoAgentMethod {
-    pub const ALL: [Self; 25] = [
+    pub const ALL: [Self; 26] = [
         Self::ListDatabases,
         Self::ListCollections,
         Self::FindDocuments,
@@ -1408,6 +1412,7 @@ impl MongoAgentMethod {
         Self::InsertDocuments,
         Self::UpdateDocument,
         Self::UpdateDocuments,
+        Self::ReplaceDocument,
         Self::DeleteDocument,
         Self::DeleteDocuments,
         Self::RunCommand,
@@ -1437,6 +1442,7 @@ impl MongoAgentMethod {
             Self::InsertDocuments => "insert_documents",
             Self::UpdateDocument => "update_document",
             Self::UpdateDocuments => "update_documents",
+            Self::ReplaceDocument => "replace_document",
             Self::DeleteDocument => "delete_document",
             Self::DeleteDocuments => "delete_documents",
             Self::RunCommand => "run_command",
@@ -2836,6 +2842,13 @@ impl AgentDriverClient {
         self.call_mongo_method(MongoAgentMethod::UpdateDocuments, params).await
     }
 
+    pub async fn mongo_replace_document<T: DeserializeOwned + Send + 'static>(
+        &mut self,
+        params: Value,
+    ) -> Result<T, String> {
+        self.call_mongo_method(MongoAgentMethod::ReplaceDocument, params).await
+    }
+
     pub async fn mongo_delete_document<T: DeserializeOwned + Send + 'static>(
         &mut self,
         params: Value,
@@ -2991,6 +3004,7 @@ pub fn agent_supports_capability(handshake: Option<&AgentHandshake>, capability:
             | AgentCapability::MongoCloneCollection
             | AgentCapability::MongoRunCommand
             | AgentCapability::MongoInsertDocuments
+            | AgentCapability::MongoReplaceDocument
             | AgentCapability::MongoFindCursor
     ) {
         return handshake.map(|value| value.supports(capability)).unwrap_or(false);
@@ -5025,10 +5039,11 @@ for line in sys.stdin:
         assert_eq!(AgentCapability::MongoCloneCollection.as_str(), "mongo_clone_collection");
         assert_eq!(AgentCapability::MongoRunCommand.as_str(), "mongo_run_command");
         assert_eq!(AgentCapability::MongoInsertDocuments.as_str(), "mongo_insert_documents");
+        assert_eq!(AgentCapability::MongoReplaceDocument.as_str(), "mongo_replace_document");
         assert_eq!(AgentCapability::MongoFindCursor.as_str(), "mongo_find_cursor");
         assert_eq!(AgentCapability::MultiSession.as_str(), "multi_session");
         assert_eq!(AgentCapability::StructuredErrorV1.as_str(), "structured_error_v1");
-        assert_eq!(AgentCapability::ALL.len(), 25);
+        assert_eq!(AgentCapability::ALL.len(), 26);
     }
 
     #[test]
@@ -5090,6 +5105,7 @@ for line in sys.stdin:
         assert_eq!(MongoAgentMethod::InsertDocuments.as_str(), "insert_documents");
         assert_eq!(MongoAgentMethod::UpdateDocument.as_str(), "update_document");
         assert_eq!(MongoAgentMethod::UpdateDocuments.as_str(), "update_documents");
+        assert_eq!(MongoAgentMethod::ReplaceDocument.as_str(), "replace_document");
         assert_eq!(MongoAgentMethod::DeleteDocument.as_str(), "delete_document");
         assert_eq!(MongoAgentMethod::DeleteDocuments.as_str(), "delete_documents");
         assert_eq!(MongoAgentMethod::StartFindCursor.as_str(), "start_find_cursor");
