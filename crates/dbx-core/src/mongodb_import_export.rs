@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::connection::{task_client_session_id, AppState, PoolKind};
 use crate::csv_export::{push_csv_field, CsvQuoteMode};
-use crate::db::agent_driver::{AgentCapability, AgentDriverClient};
+use crate::db::agent_driver::{AgentCapability, PooledAgentClient};
 use crate::db::mongo_driver::{
     self, document_to_canonical_extended_json, for_each_find_document, insert_bson_documents,
     json_object_to_document_extended_json, MongoBulkWriteError, MongoDocumentResult, MongoInsertOutcome,
@@ -2358,16 +2358,13 @@ where
             )
             .await
         }
-        PoolKind::Agent(client) => {
-            let mut client = client.lock().await;
-            for_each_agent_export_document(&mut client, request, is_cancelled, on_document).await
-        }
+        PoolKind::Agent(client) => for_each_agent_export_document(&client, request, is_cancelled, on_document).await,
         _ => Err("Not a MongoDB connection".to_string()),
     }
 }
 
 async fn for_each_agent_export_document<C, F>(
-    client: &mut AgentDriverClient,
+    client: &PooledAgentClient,
     request: &MongoExportRequest,
     is_cancelled: &mut C,
     mut on_document: F,
@@ -2376,7 +2373,10 @@ where
     C: FnMut(&str) -> std::pin::Pin<Box<dyn std::future::Future<Output = bool> + Send>>,
     F: FnMut(serde_json::Value) -> Result<(), String>,
 {
-    if client.supports_capability(AgentCapability::MongoFindCursor) {
+    // The lock is taken per RPC, not for the whole export: a long export must not block every
+    // other operation that shares this pooled agent connection.
+    let supports_cursor = client.lock().await.supports_capability(AgentCapability::MongoFindCursor);
+    if supports_cursor {
         export_agent_find_cursor(client, request, is_cancelled, &mut on_document).await
     } else {
         export_agent_find_pages(client, request, is_cancelled, &mut on_document).await
@@ -2469,8 +2469,28 @@ fn agent_find_params(request: &MongoExportRequest, skip: u64, limit: u32) -> ser
     params
 }
 
+/// Cursor start request. `start_find_cursor` pages server-side, so it neither needs nor honors
+/// the offset paging's `skip`/`limit`; sending them would invite a silent split brain the day a
+/// caller-facing limit exists.
+fn agent_cursor_find_params(request: &MongoExportRequest) -> serde_json::Value {
+    let mut params = serde_json::json!({
+        "database": request.database,
+        "collection": request.collection,
+        "filter": request.filter,
+        "sort": request.sort,
+        "batch_size": DEFAULT_EXPORT_BATCH_SIZE,
+    });
+    if let Some(projection) = &request.projection {
+        params["projection"] = serde_json::json!(projection);
+    }
+    if let Some(collation) = &request.collation {
+        params["collation"] = serde_json::json!(collation);
+    }
+    params
+}
+
 async fn export_agent_find_cursor<C, F>(
-    client: &mut AgentDriverClient,
+    client: &PooledAgentClient,
     request: &MongoExportRequest,
     is_cancelled: &mut C,
     on_document: &mut F,
@@ -2482,27 +2502,31 @@ where
     if is_cancelled(&request.export_id).await {
         return Err("Export cancelled".to_string());
     }
-    let started: serde_json::Value =
-        match client.mongo_start_find_cursor(agent_find_params(request, 0, DEFAULT_EXPORT_BATCH_SIZE)).await {
+    let started: serde_json::Value = {
+        let mut guard = client.lock().await;
+        match guard.mongo_start_find_cursor(agent_cursor_find_params(request)).await {
             Ok(started) => started,
             Err(error) if crate::mongo_ops::is_unknown_agent_method_error(&error, "start_find_cursor") => {
                 return export_agent_find_pages(client, request, is_cancelled, on_document).await;
             }
             Err(error) => return Err(error),
-        };
+        }
+    };
     let cursor_id = started
         .get("cursor_id")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "MongoDB Legacy Agent returned an invalid find cursor".to_string())?
         .to_string();
     let result = fetch_agent_find_cursor(client, request, &cursor_id, is_cancelled, on_document).await;
-    let _: Result<serde_json::Value, String> =
-        client.mongo_close_find_cursor(serde_json::json!({ "cursor_id": cursor_id })).await;
+    let _: Result<serde_json::Value, String> = {
+        let mut guard = client.lock().await;
+        guard.mongo_close_find_cursor(serde_json::json!({ "cursor_id": cursor_id })).await
+    };
     result
 }
 
 async fn fetch_agent_find_cursor<C, F>(
-    client: &mut AgentDriverClient,
+    client: &PooledAgentClient,
     request: &MongoExportRequest,
     cursor_id: &str,
     is_cancelled: &mut C,
@@ -2516,12 +2540,15 @@ where
         if is_cancelled(&request.export_id).await {
             return Err("Export cancelled".to_string());
         }
-        let mut page: serde_json::Value = client
-            .mongo_fetch_find_cursor(serde_json::json!({
-                "cursor_id": cursor_id,
-                "limit": DEFAULT_EXPORT_BATCH_SIZE,
-            }))
-            .await?;
+        let mut page: serde_json::Value = {
+            let mut guard = client.lock().await;
+            guard
+                .mongo_fetch_find_cursor(serde_json::json!({
+                    "cursor_id": cursor_id,
+                    "limit": DEFAULT_EXPORT_BATCH_SIZE,
+                }))
+                .await?
+        };
         let documents = page
             .get_mut("documents")
             .and_then(serde_json::Value::as_array_mut)
@@ -2539,7 +2566,7 @@ where
 }
 
 async fn export_agent_find_pages<C, F>(
-    client: &mut AgentDriverClient,
+    client: &PooledAgentClient,
     request: &MongoExportRequest,
     is_cancelled: &mut C,
     on_document: &mut F,
@@ -2563,15 +2590,20 @@ where
             Some(base) => agent_keyset_find_params(request, base, last_id.as_ref()),
             None => agent_find_params(request, skip, DEFAULT_EXPORT_BATCH_SIZE),
         };
-        let mut page: MongoDocumentResult = match client.mongo_find_documents_extended_json(params).await {
-            Ok(page) => page,
-            Err(error) if crate::mongo_ops::is_unknown_agent_method_error(&error, "find_documents_extended_json") => {
-                return Err(
-                    "MongoDB Legacy Agent does not support type-preserving export; upgrade or reinstall the MongoDB Legacy driver"
-                        .to_string(),
-                );
+        let mut page: MongoDocumentResult = {
+            let mut guard = client.lock().await;
+            match guard.mongo_find_documents_extended_json(params).await {
+                Ok(page) => page,
+                Err(error)
+                    if crate::mongo_ops::is_unknown_agent_method_error(&error, "find_documents_extended_json") =>
+                {
+                    return Err(
+                        "MongoDB Legacy Agent does not support type-preserving export; upgrade or reinstall the MongoDB Legacy driver"
+                            .to_string(),
+                    );
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
         };
         // The shipped legacy agent answers this method with `documentQueryResult`, so
         // `extended_documents` is normally absent and `documents` (relaxed Extended JSON, which
