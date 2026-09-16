@@ -259,6 +259,29 @@ function semanticMutationTarget(model: SqlSemanticModel): SqlSemanticRowSource |
 }
 
 /**
+ * Words that introduce a relation a server is willing to alias. An INSERT target
+ * carries no alias at all, and a DELETE/UPDATE target only accepts one in the
+ * multi-table dialects that re-list it after the keyword, so a generated alias
+ * there is usually a syntax error (issue #9186: SQL Server rejects
+ * `DELETE FROM t AS a`). The cursor intent records no introducer, so read it
+ * from the token that opens the name being completed.
+ */
+const ALIASABLE_TABLE_INTRODUCERS = new Set(["from", "join", "using", "apply"]);
+
+function tableCompletionTargetIsAliasUnsafe(model: SqlSemanticModel): boolean {
+  if (model.cursorIntent.kind !== "table" && model.cursorIntent.kind !== "delete_target") return false;
+  const target = semanticMutationTarget(model);
+  if (!target || target.alias) return false;
+  const nameStart = model.cursorIntent.replacementRange.start;
+  let introducer: string | undefined;
+  for (const token of model.tokens) {
+    if (token.span.start > nameStart) break;
+    if (token.kind === "word" || token.kind === "quoted_identifier") introducer = token.normalized;
+  }
+  return !ALIASABLE_TABLE_INTRODUCERS.has(introducer ?? "");
+}
+
+/**
  * When the semantic scanner misses the trailing identifier that the legacy
  * scanner still reports (semantic prefix empty with a replacement range
  * collapsed at the cursor) while the merged context keeps a non-empty prefix
@@ -322,6 +345,7 @@ export function sqlCompletionContextFromSemantic(model: SqlSemanticModel, base: 
     insertSchema: model.cursorIntent.kind === "insert_column" ? mutationSchema : base.insertSchema,
     updateTarget: model.cursorIntent.kind === "update_column" && mutationTarget ? { table: mutationTarget.name, schema: mutationSchema } : base.updateTarget,
     deleteTarget: model.cursorIntent.kind === "delete_target" && mutationTarget ? { table: mutationTarget.name, schema: mutationSchema } : base.deleteTarget,
+    tableCompletionTargetAliasUnsafe: tableCompletionTargetIsAliasUnsafe(model),
     onStar: model.cursorIntent.kind === "star" || base.onStar,
     contextKind,
   };
