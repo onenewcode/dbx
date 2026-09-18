@@ -394,6 +394,105 @@ export function shouldAutoOpenMongoCompletion(text: string, cursor: number): boo
   return false;
 }
 
+/* ------------------------------------------------------------------ *
+ * Standalone document inputs
+ * ------------------------------------------------------------------ */
+
+/**
+ * Which bare document an input holds, and therefore how its keys read: the
+ * document browser's filter bar is a query document, its sort bar a key map.
+ */
+export type MongoDocumentQueryKind = "filter" | "sortKeys";
+
+/**
+ * Completion for an input holding one bare document rather than a shell
+ * command — the document browser's filter and sort bars.
+ *
+ * There is no `db.coll.find(…)` here to locate the cursor within, so the text is
+ * scanned as if it *were* that call's argument list: `{ na` lands in the query
+ * document's root object exactly as it would inside `find({ na`. Everything the
+ * shell path reaches by walking the `db.…` chain (collection names, helper
+ * methods, cursor methods) is unreachable by construction, which is what we
+ * want — none of it could be pasted into a filter bar.
+ */
+export function getMongoDocumentQueryCompletionContext(text: string, cursor: number, kind: MongoDocumentQueryKind): MongoCompletionContext {
+  const safeCursor = Math.max(0, Math.min(cursor, text.length));
+  const nothing: MongoCompletionContext = { mode: "none", prefix: "", from: safeCursor };
+  if (isInsideMongoComment(text, safeCursor)) return nothing;
+
+  // Scanning from 0 treats the input as the argument list itself. A `}` that
+  // closes more than the text opened returns null — the cursor has left the
+  // document, e.g. it trails a finished `{ a: 1 }`.
+  const scan = scanMongoCallArguments(text, 0, safeCursor);
+  if (!scan) return nothing;
+
+  const mode = kind === "filter" ? classifyFilter(scan, 0) : classifyKeyMap(scan, 0);
+  if (mode === "none") return nothing;
+
+  const { prefix, from } = readPropertyPrefix(text, safeCursor);
+  return { mode, prefix, from, replaceClosingQuote: closingQuoteAtCursor(prefix, text, safeCursor) };
+}
+
+/** Text to splice into a plain input for a chosen completion, and where to leave the selection. */
+export interface MongoPlainCompletionInsertion {
+  text: string;
+  /** Start of the selection within `text`, relative to its first character. */
+  selectionStart: number;
+  /** End of that selection; equal to the start when the placeholder was empty. */
+  selectionEnd: number;
+}
+
+/**
+ * Renders an item's `apply` string for a plain `<input>`/`<textarea>`.
+ *
+ * Most operator completions are authored as CodeMirror snippets (`$in: [${}]`,
+ * `$regex: "${pattern}"`), and CodeMirror expands the `${…}` markers itself.
+ * Nothing does that outside the editor, so strip the markers and hand back the
+ * span of the first placeholder: an empty one becomes the caret position, a
+ * named one is selected so its default can be typed straight over.
+ *
+ * Key completions carry their own `: ` because they are only offered in key
+ * position. Pass `followingText` — whatever the input holds after the replaced
+ * range — so re-picking the key of an existing `{ "name": 1 }` entry replaces
+ * the key instead of leaving `{ "other": : 1 }` behind.
+ */
+export function plainMongoCompletionInsertion(apply: string, followingText = ""): MongoPlainCompletionInsertion {
+  let text = "";
+  let selection: { start: number; end: number } | null = null;
+  let rest = apply;
+
+  for (;;) {
+    const match = /\$\{([^{}]*)\}/.exec(rest);
+    if (!match) break;
+    const placeholder = match[1] ?? "";
+    text += rest.slice(0, match.index);
+    if (!selection) selection = { start: text.length, end: text.length + placeholder.length };
+    text += placeholder;
+    rest = rest.slice(match.index + match[0].length);
+  }
+  text += rest;
+
+  // Only a plain key completion may fold its separator away. A snippet's colon
+  // introduces the placeholder that follows it (`$gt: ${}`), so it is never the
+  // same colon as one already in the text.
+  if (!selection && text.endsWith(": ") && /^\s*:/.test(followingText)) text = text.slice(0, -2);
+
+  return { text, selectionStart: Math.min(selection?.start ?? text.length, text.length), selectionEnd: Math.min(selection?.end ?? text.length, text.length) };
+}
+
+/**
+ * Whether typing the character before the cursor should pop the menu open on its
+ * own. Mirrors `shouldAutoOpenMongoCompletion` minus the `db.` chain, and
+ * confirms the position has something to say so a space or a closing brace does
+ * not reopen an empty menu.
+ */
+export function shouldAutoOpenMongoDocumentQueryCompletion(text: string, cursor: number, kind: MongoDocumentQueryKind): boolean {
+  const previousChar = text[cursor - 1];
+  if (!previousChar) return false;
+  if (!/[\w_$."'{,[:-]/.test(previousChar) && !/[{,[:]\s+$/.test(text.slice(0, cursor))) return false;
+  return getMongoDocumentQueryCompletionContext(text, cursor, kind).mode !== "none";
+}
+
 /**
  * How far the editor may keep re-filtering a result before it has to ask us
  * again. In the `db.…` chain every `.` moves the cursor to a different item
