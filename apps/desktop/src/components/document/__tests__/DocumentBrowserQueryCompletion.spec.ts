@@ -531,6 +531,37 @@ describe("DocumentBrowser MongoDB query bar completion lifecycle", () => {
     expect(filter!.value).toBe("{ createdAt: 1, _i");
   });
 
+  it("takes a suggestion clicked with the mouse", async () => {
+    await mountBrowser();
+    const [filter] = queryInputs();
+
+    await typeInto(filter!, "{discountC");
+    const option = document.body.querySelector<HTMLElement>('[role="option"]');
+
+    // The press must not blur the input: blur dismisses, which would unmount
+    // the option before its click could land.
+    const mousedown = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    option!.dispatchEvent(mousedown);
+    expect(mousedown.defaultPrevented).toBe(true);
+    option!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await flushUi();
+
+    expect(filter!.value).toBe("{discountCode: ");
+  });
+
+  it("keeps the list usable when its scrollbar is pressed", async () => {
+    await mountBrowser();
+    const [filter] = queryInputs();
+
+    await typeInto(filter!, "{");
+    const mousedown = new MouseEvent("mousedown", { bubbles: true, cancelable: true });
+    menu()!.dispatchEvent(mousedown);
+    await flushUi();
+
+    expect(mousedown.defaultPrevented).toBe(true);
+    expect(menuOpen()).toBe(true);
+  });
+
   it("closes when an arrow key moves the caret, and lets the key through", async () => {
     await mountBrowser();
     const [filter] = queryInputs();
