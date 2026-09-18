@@ -162,10 +162,18 @@ function queryInputs(): HTMLTextAreaElement[] {
   return [...root!.querySelectorAll<HTMLTextAreaElement>("textarea.document-query-input")];
 }
 
-async function typeInto(input: HTMLTextAreaElement, text: string, caret = text.length) {
+/** `inputType` matters: the bars only open a document around an *inserted* character. */
+async function typeInto(input: HTMLTextAreaElement, text: string, caret = text.length, inputType = "insertText") {
   input.value = text;
   input.setSelectionRange(caret, caret);
-  input.dispatchEvent(new Event("input", { bubbles: true }));
+  input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType }));
+  await flushUi();
+}
+
+/** Moves the caret the way a mouse click does — no edit, so no `input` event. */
+async function clickCaretTo(input: HTMLTextAreaElement, offset: number) {
+  input.setSelectionRange(offset, offset);
+  input.dispatchEvent(new Event("click", { bubbles: true }));
   await flushUi();
 }
 
@@ -486,6 +494,59 @@ describe("DocumentBrowser MongoDB query bar completion (issue #9427)", () => {
   });
 });
 
+describe("DocumentBrowser MongoDB query bar completion lifecycle", () => {
+  it("does not open a menu on a bar that lost focus while the fields were loading", async () => {
+    // The first keystroke in a collection waits on a real backend sample, and
+    // the target is only set once it resolves — so a blur before that has to
+    // cancel the refresh, not just close a menu that is not open yet.
+    let releaseFields!: (fields: Array<{ name: string; type: string }>) => void;
+    backend.listMongoCompletionFields.mockReturnValue(new Promise((resolve) => (releaseFields = resolve)));
+    await mountBrowser();
+    const [filter] = queryInputs();
+
+    await typeInto(filter!, "{");
+    expect(menuOpen()).toBe(false);
+
+    filter!.dispatchEvent(new Event("blur", { bubbles: true }));
+    await flushUi();
+    releaseFields([{ name: "discountCode", type: "string" }]);
+    await flushUi();
+
+    expect(menuOpen()).toBe(false);
+  });
+
+  it("closes rather than splices a stale suggestion when the caret is clicked elsewhere", async () => {
+    await mountBrowser();
+    const [filter] = queryInputs();
+
+    await typeInto(filter!, "{ createdAt: 1, _i");
+    expect(menuOpen()).toBe(true);
+
+    // Into the middle of `createdAt`, where the open suggestions mean nothing.
+    await clickCaretTo(filter!, 3);
+    expect(menuOpen()).toBe(false);
+
+    pressKey(filter!, "Tab");
+    await flushUi();
+    expect(filter!.value).toBe("{ createdAt: 1, _i");
+  });
+
+  it("closes when an arrow key moves the caret, and lets the key through", async () => {
+    await mountBrowser();
+    const [filter] = queryInputs();
+
+    await typeInto(filter!, "{ createdA");
+    expect(menuOpen()).toBe(true);
+
+    const event = pressKey(filter!, "ArrowLeft");
+    await flushUi();
+
+    expect(menuOpen()).toBe(false);
+    // The caret still has to move — only the menu was consumed.
+    expect(event.defaultPrevented).toBe(false);
+  });
+});
+
 /**
  * Typing straight into an empty bar, without opening the document first — the
  * way the issue's reporter did it, and the way anyone who has not noticed the
@@ -549,6 +610,17 @@ describe("DocumentBrowser MongoDB query bars opened by typing (issue #9427)", ()
     expect(filter!.value).toBe('{ createdAt: "2026-01-01" }');
   });
 
+  it("leaves a backspace that happens to land on one character alone", async () => {
+    await mountBrowser();
+    const [filter] = queryInputs();
+
+    await typeInto(filter!, "ab", 2);
+    // Deleting down to `a` leaves the same character and caret as typing it.
+    await typeInto(filter!, "a", 1, "deleteContentBackward");
+
+    expect(filter!.value).toBe("a");
+  });
+
   it("leaves a character typed mid-text alone", async () => {
     await mountBrowser();
     const [filter] = queryInputs();
@@ -557,6 +629,39 @@ describe("DocumentBrowser MongoDB query bars opened by typing (issue #9427)", ()
     await typeInto(filter!, "c", 0);
 
     expect(filter!.value).toBe("c");
+  });
+
+  it("quotes a nested field path so the completed filter still parses", async () => {
+    backend.documentFindDocuments.mockResolvedValue({
+      documents: [{ _id: "1", customer: { name: "Ada", address: { city: "Beijing" } } }],
+      raw_documents: [],
+      total: 1,
+      total_is_exact: true,
+    });
+    backend.listMongoCompletionFields.mockResolvedValue([]);
+    await mountBrowser();
+    const [filter] = queryInputs();
+
+    await typeInto(filter!, "{customer.n}", 11);
+    expect(menuOptions()).toEqual(["customer.name"]);
+
+    pressKey(filter!, "Tab");
+    await flushUi();
+
+    // `{ customer.name: 1 }` is a document in neither the shell nor JSON.
+    expect(filter!.value).toBe('{"customer.name": }');
+    expect(() => JSON.parse(filter!.value.replace(": }", ": 1}"))).not.toThrow();
+  });
+
+  it("still leaves a plain identifier key unquoted", async () => {
+    await mountBrowser();
+    const [filter] = queryInputs();
+
+    await typeInto(filter!, "d");
+    pressKey(filter!, "Tab");
+    await flushUi();
+
+    expect(filter!.value).toBe("{discountCode: }");
   });
 
   it("does not open documents in the other stores' bars", async () => {

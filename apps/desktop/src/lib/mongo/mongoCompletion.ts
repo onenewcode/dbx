@@ -1210,9 +1210,23 @@ function describeMongoValueType(value: unknown): string {
   return mongoExtendedJsonValueType(value) ?? (typeof value === "object" ? "object" : typeof value);
 }
 
+/**
+ * Keys that may be written bare. Anything else has to carry quotes: a nested
+ * path (`customer.name`) is the common case, but a hyphen or a leading digit
+ * does it too. `inferMongoCompletionFields` emits a path per nesting level, so
+ * a collection of nested documents offers mostly non-bare keys.
+ */
+const BARE_MONGO_KEY = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
+
+/**
+ * Renders a field name in key position. An unquoted prefix keeps the key bare
+ * only while the name allows it — `{ customer.name: 1 }` parses neither as a
+ * shell document nor as the JSON the document browser's query bars are read
+ * as, so a path is quoted even though the user typed no quote.
+ */
 function quoteMongoFieldName(field: string, prefix: string): string {
-  if (prefix.startsWith('"')) return `"${escapeDoubleQuoted(field)}"`;
   if (prefix.startsWith("'")) return `'${escapeSingleQuoted(field)}'`;
+  if (prefix.startsWith('"') || !BARE_MONGO_KEY.test(field)) return `"${escapeDoubleQuoted(field)}"`;
   return field;
 }
 

@@ -51,7 +51,13 @@ function isSelected(index: number): boolean {
     coordinates is what the grid's own condition suggestions do.
   -->
   <Teleport to="body">
-    <div :id="listboxId" role="listbox" :aria-label="label" class="fixed z-[90] max-h-64 overflow-y-auto overflow-x-hidden rounded-md border bg-popover py-1 text-popover-foreground shadow-md" :style="style">
+    <!--
+      The container takes the same `mousedown.prevent` as its options: the list
+      scrolls, and a press on its scrollbar or padding would otherwise blur the
+      input and unmount the menu mid-drag, leaving everything below the fold
+      reachable by keyboard only.
+    -->
+    <div :id="listboxId" role="listbox" :aria-label="label" class="fixed z-[90] max-h-64 overflow-y-auto overflow-x-hidden rounded-md border bg-popover py-1 text-popover-foreground shadow-md" :style="style" @mousedown.prevent>
       <button
         v-for="(item, index) in items"
         :id="`${listboxId}-option-${index}`"

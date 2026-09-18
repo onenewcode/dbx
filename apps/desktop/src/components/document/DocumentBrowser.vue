@@ -1223,9 +1223,15 @@ function documentQueryCompletionMatchesInput(): boolean {
  * Only a lone character that could start a key qualifies. A paste arrives whole
  * and usually brings its own braces, and a typed `{` is the user opening the
  * document themselves — which already suggests.
+ *
+ * The edit has to be an insertion. Backspacing `ab` down to `a` leaves exactly
+ * the same one character and caret as typing `a` into an empty bar, and writing
+ * braces around text the user is in the middle of deleting would hand them two
+ * more characters to delete.
  */
-function openDocumentQueryDocument(target: DocumentQueryCompletionTarget): boolean {
+function openDocumentQueryDocument(event: InputEvent, target: DocumentQueryCompletionTarget): boolean {
   if (!documentQueryCompletionEnabled.value) return false;
+  if (!event.inputType?.startsWith("insert")) return false;
   const text = documentQueryCompletionText(target);
   if (text.length !== 1 || !/[\w$"']/.test(text)) return false;
   if (documentQueryCompletionInputEl(target)?.selectionStart !== 1) return false;
@@ -1248,11 +1254,29 @@ function onDocumentQueryInput(event: Event, target: DocumentQueryCompletionTarge
   // IME opened. Vue re-dispatches `input` once it commits, which is when the
   // suggestions are worth computing.
   if ((event as InputEvent).isComposing) return;
-  if (openDocumentQueryDocument(target)) return;
+  if (openDocumentQueryDocument(event as InputEvent, target)) return;
   void refreshDocumentQueryCompletions(target);
 }
 
+/**
+ * Dismissing also cancels whatever refresh is in flight, which is the point:
+ * the target is only set once `documentQueryCompletionFields` has resolved, so
+ * a bar blurred during that first (uncached) backend round trip would otherwise
+ * open its menu afterwards, over a bar that no longer has focus. Nothing else
+ * would take it down — the menu is teleported to `body` and there is no
+ * outside-click handler.
+ */
 function onDocumentQueryBlur(target: DocumentQueryCompletionTarget) {
+  if (documentQueryCompletionTarget.value === null || documentQueryCompletionTarget.value === target) dismissDocumentQueryCompletions();
+}
+
+/**
+ * The suggestions describe the position the caret was in when they were built,
+ * so a caret moved without an edit leaves them describing somewhere else:
+ * accepting one then splices a stale item at a freshly computed offset and
+ * garbles the text. Moving the caret closes the menu instead.
+ */
+function onDocumentQueryCaretMove(target: DocumentQueryCompletionTarget) {
   if (documentQueryCompletionTarget.value === target) dismissDocumentQueryCompletions();
 }
 
@@ -1268,6 +1292,13 @@ function onDocumentQueryKeydown(event: KeyboardEvent, target: DocumentQueryCompl
     if (event.key === "Escape" && documentQueryCompletionOpen.value) {
       event.preventDefault();
       dismissDocumentQueryCompletions();
+      return;
+    }
+    // These move the caret rather than the selection, so they leave the open
+    // suggestions describing a position the caret has left. The key still does
+    // its normal job — only the menu goes.
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight" || event.key === "Home" || event.key === "End") {
+      onDocumentQueryCaretMove(target);
       return;
     }
     if (event.key === "ArrowDown" && moveDocumentQueryCompletionSelection(1)) {
@@ -3114,6 +3145,7 @@ defineExpose({ focusSearch });
               :aria-activedescendant="documentQueryCompletionTarget === 'filter' ? documentQueryCompletionActiveDescendant : undefined"
               :aria-expanded="documentQueryCompletionEnabled ? documentQueryCompletionTarget === 'filter' : undefined"
               @blur="onDocumentQueryBlur('filter')"
+              @click="onDocumentQueryCaretMove('filter')"
               @input="onDocumentQueryInput($event, 'filter')"
               @keydown="onDocumentQueryKeydown($event, 'filter')"
             />
@@ -3167,6 +3199,7 @@ defineExpose({ focusSearch });
               :aria-activedescendant="documentQueryCompletionTarget === 'sort' ? documentQueryCompletionActiveDescendant : undefined"
               :aria-expanded="documentQueryCompletionEnabled ? documentQueryCompletionTarget === 'sort' : undefined"
               @blur="onDocumentQueryBlur('sort')"
+              @click="onDocumentQueryCaretMove('sort')"
               @input="onDocumentQueryInput($event, 'sort')"
               @keydown="onDocumentQueryKeydown($event, 'sort')"
             />
