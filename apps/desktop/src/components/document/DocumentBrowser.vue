@@ -1209,12 +1209,46 @@ function documentQueryCompletionMatchesInput(): boolean {
   return completion.text.slice(completion.from, completion.to) === completion.insertion.text;
 }
 
+/**
+ * Opens the document around the first character typed into an empty bar, so
+ * `d` becomes `{d}` with the caret left between the braces.
+ *
+ * The bars hold a bare document and a field name only reads as a key once its
+ * braces exist, so typing straight into an empty bar used to land in a position
+ * that classifies as nothing and suggested nothing — the very case #9427
+ * reports. Nothing is lost by writing the braces: an unbraced bar never parses
+ * as a filter either, so that text was a dead query, not a shorter spelling of
+ * one.
+ *
+ * Only a lone character that could start a key qualifies. A paste arrives whole
+ * and usually brings its own braces, and a typed `{` is the user opening the
+ * document themselves — which already suggests.
+ */
+function openDocumentQueryDocument(target: DocumentQueryCompletionTarget): boolean {
+  if (!documentQueryCompletionEnabled.value) return false;
+  const text = documentQueryCompletionText(target);
+  if (text.length !== 1 || !/[\w$"']/.test(text)) return false;
+  if (documentQueryCompletionInputEl(target)?.selectionStart !== 1) return false;
+
+  if (target === "filter") filterInput.value = `{${text}}`;
+  else sortInput.value = `{${text}}`;
+
+  // Rewriting the model moves the caret to the end, past the `}` we just added,
+  // where there is nothing to complete. Put it back inside before asking.
+  void nextTick(() => {
+    documentQueryCompletionInputEl(target)?.setSelectionRange(2, 2);
+    void refreshDocumentQueryCompletions(target);
+  });
+  return true;
+}
+
 function onDocumentQueryInput(event: Event, target: DocumentQueryCompletionTarget) {
   // `v-model` holds off on the model until the composition is confirmed, so a
   // mid-composition refresh would suggest against the text as it was before the
   // IME opened. Vue re-dispatches `input` once it commits, which is when the
   // suggestions are worth computing.
   if ((event as InputEvent).isComposing) return;
+  if (openDocumentQueryDocument(target)) return;
   void refreshDocumentQueryCompletions(target);
 }
 

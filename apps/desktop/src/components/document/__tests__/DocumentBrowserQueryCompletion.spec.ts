@@ -485,3 +485,87 @@ describe("DocumentBrowser MongoDB query bar completion (issue #9427)", () => {
     expect(backend.listMongoCompletionFields).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Typing straight into an empty bar, without opening the document first — the
+ * way the issue's reporter did it, and the way anyone who has not noticed the
+ * `{}` placeholder will.
+ */
+describe("DocumentBrowser MongoDB query bars opened by typing (issue #9427)", () => {
+  it("opens the filter document around the first character and suggests from it", async () => {
+    await mountBrowser();
+    const [filter] = queryInputs();
+
+    await typeInto(filter!, "c");
+
+    expect(filter!.value).toBe("{c}");
+    // Between the braces, in key position — not after the `}` the rewrite added.
+    expect(filter!.selectionStart).toBe(2);
+    expect(menuOpen()).toBe(true);
+    expect(menuOptions()).toEqual(expect.arrayContaining(["createdAt", "customerShippingAddress"]));
+  });
+
+  it("opens the sort document the same way", async () => {
+    await mountBrowser();
+    const [, sort] = queryInputs();
+
+    await typeInto(sort!, "c");
+
+    expect(sort!.value).toBe("{c}");
+    expect(sort!.selectionStart).toBe(2);
+    expect(menuOpen()).toBe(true);
+    // The sort bar is a plain key map, so it offers no query operators.
+    expect(menuOptions()).toEqual(expect.arrayContaining(["createdAt", "customerShippingAddress"]));
+    expect(menuOptions().filter((option) => option.startsWith("$"))).toEqual([]);
+  });
+
+  it("completes a field typed without braces and leaves the caret in value position", async () => {
+    await mountBrowser();
+    const [filter] = queryInputs();
+
+    await typeInto(filter!, "d");
+    pressKey(filter!, "Tab");
+    await flushUi();
+
+    expect(filter!.value).toBe("{discountCode: }");
+    expect(filter!.selectionStart).toBe(15);
+  });
+
+  it("writes no braces of its own when the user opens the document", async () => {
+    await mountBrowser();
+    const [filter] = queryInputs();
+
+    await typeInto(filter!, "{");
+
+    expect(filter!.value).toBe("{");
+  });
+
+  it("leaves a pasted document alone", async () => {
+    await mountBrowser();
+    const [filter] = queryInputs();
+
+    await typeInto(filter!, '{ createdAt: "2026-01-01" }');
+
+    expect(filter!.value).toBe('{ createdAt: "2026-01-01" }');
+  });
+
+  it("leaves a character typed mid-text alone", async () => {
+    await mountBrowser();
+    const [filter] = queryInputs();
+
+    // One character long, but the caret is before it: this is an edit, not a start.
+    await typeInto(filter!, "c", 0);
+
+    expect(filter!.value).toBe("c");
+  });
+
+  it("does not open documents in the other stores' bars", async () => {
+    await mountBrowser("elasticsearch");
+    const [filter] = queryInputs();
+
+    await typeInto(filter!, "c");
+
+    expect(filter!.value).toBe("c");
+    expect(menuOpen()).toBe(false);
+  });
+});
