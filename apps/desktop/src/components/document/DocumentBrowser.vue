@@ -92,6 +92,7 @@ import {
   inferMongoCompletionFields,
   mongoCompletionNeedsFields,
   plainMongoCompletionInsertion,
+  readMongoPropertyPrefix,
   shouldAutoOpenMongoDocumentQueryCompletion,
   type MongoCompletionField,
   type MongoCompletionItem,
@@ -1233,8 +1234,9 @@ function openDocumentQueryDocument(event: InputEvent, target: DocumentQueryCompl
   if (!documentQueryCompletionEnabled.value) return false;
   if (!event.inputType?.startsWith("insert")) return false;
   const text = documentQueryCompletionText(target);
-  if (text.length !== 1 || !/[\w$"']/.test(text)) return false;
-  if (documentQueryCompletionInputEl(target)?.selectionStart !== 1) return false;
+  const prefix = readMongoPropertyPrefix(text, text.length);
+  if ([...text].length !== 1 || !/^[$_"'\p{L}\p{N}]$/u.test(text) || prefix.from !== 0 || prefix.prefix !== text) return false;
+  if (documentQueryCompletionInputEl(target)?.selectionStart !== text.length) return false;
 
   if (target === "filter") filterInput.value = `{${text}}`;
   else sortInput.value = `{${text}}`;
@@ -1242,7 +1244,7 @@ function openDocumentQueryDocument(event: InputEvent, target: DocumentQueryCompl
   // Rewriting the model moves the caret to the end, past the `}` we just added,
   // where there is nothing to complete. Put it back inside before asking.
   void nextTick(() => {
-    documentQueryCompletionInputEl(target)?.setSelectionRange(2, 2);
+    documentQueryCompletionInputEl(target)?.setSelectionRange(text.length + 1, text.length + 1);
     void refreshDocumentQueryCompletions(target);
   });
   return true;

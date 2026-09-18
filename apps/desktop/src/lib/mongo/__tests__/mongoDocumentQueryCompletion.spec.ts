@@ -6,6 +6,8 @@ const FIELDS: MongoCompletionField[] = [
   { name: "customerShippingAddress", type: "string" },
   { name: "customer.name", type: "string" },
   { name: "createdAt", type: "date" },
+  { name: "中文字段", type: "string" },
+  { name: "客户 名", type: "string" },
 ];
 
 function contextAt(text: string, kind: "filter" | "sortKeys" = "filter", cursor = text.length) {
@@ -25,6 +27,13 @@ describe("getMongoDocumentQueryCompletionContext", () => {
   it("narrows fields by the typed prefix and reports where to splice it", () => {
     expect(contextAt("{ customerS")).toMatchObject({ mode: "filterField", prefix: "customerS", from: 2 });
     expect(labelsAt("{ customerS")).toEqual(["customerShippingAddress"]);
+  });
+
+  it("keeps Unicode and quoted spaces in the field prefix and splice range", () => {
+    expect(contextAt("{ 中")).toMatchObject({ mode: "filterField", prefix: "中", from: 2 });
+    expect(labelsAt("{ 中")).toEqual(["中文字段"]);
+    expect(contextAt('{ "客户 名')).toMatchObject({ mode: "filterField", prefix: '"客户 名', from: 2 });
+    expect(labelsAt('{ "客户 名')).toEqual(["客户 名"]);
   });
 
   it("matches fields case-insensitively inside a quoted key", () => {
@@ -125,7 +134,7 @@ describe("plainMongoCompletionInsertion", () => {
 
 describe("shouldAutoOpenMongoDocumentQueryCompletion", () => {
   it("opens on the characters that start a key, an operator, or a value", () => {
-    for (const text of ["{", "{ ", "{ cre", '{ "cre', "{ $", "{ _id: 1,", "{ createdAt: {", "{ createdAt: "]) {
+    for (const text of ["{", "{ ", "{ cre", '{ "cre', "{ 中", '{ "客户 名', "{ $", "{ _id: 1,", "{ createdAt: {", "{ createdAt: "]) {
       expect(shouldAutoOpenMongoDocumentQueryCompletion(text, text.length, "filter"), text).toBe(true);
     }
   });

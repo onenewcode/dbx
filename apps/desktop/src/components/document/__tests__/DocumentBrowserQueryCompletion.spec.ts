@@ -227,6 +227,8 @@ beforeEach(() => {
   backend.listMongoCompletionFields.mockResolvedValue([
     { name: "customerShippingAddress", type: "string" },
     { name: "discountCode", type: "string" },
+    { name: "中文字段", type: "string" },
+    { name: "客户 名", type: "string" },
   ]);
 
   root = document.createElement("div");
@@ -274,6 +276,47 @@ describe("DocumentBrowser MongoDB query bar completion (issue #9427)", () => {
     await typeInto(filter!, "{ customerS");
 
     expect(menuOptions()).toEqual(["customerShippingAddress"]);
+  });
+
+  it("keeps completion open after an IME commits a Unicode first character", async () => {
+    await mountBrowser();
+    const [filter] = queryInputs();
+
+    filter!.dispatchEvent(new CompositionEvent("compositionstart", { bubbles: true }));
+    filter!.value = "中";
+    filter!.setSelectionRange(1, 1);
+    filter!.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertCompositionText", isComposing: true }));
+    await flushUi();
+    expect(menuOpen()).toBe(false);
+
+    filter!.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true }));
+    await typeInto(filter!, "中", 1, "insertCompositionText");
+
+    expect(filter!.value).toBe("{中}");
+    expect(menuOptions()).toEqual(["中文字段"]);
+
+    pressKey(filter!, "Tab");
+    await flushUi();
+
+    expect(filter!.value).toBe('{"中文字段": }');
+
+    await typeInto(filter!, '{"中文字段": 1 }');
+    pressKey(filter!, "Enter");
+    await flushUi();
+    expect(backend.documentFindDocuments.mock.calls.at(-1)?.[5]).toBe('{"中文字段":1}');
+  });
+
+  it("replaces a quoted field prefix containing spaces", async () => {
+    await mountBrowser();
+    const [filter] = queryInputs();
+
+    await typeInto(filter!, '{ "客户 名');
+    expect(menuOptions()).toEqual(["客户 名"]);
+
+    pressKey(filter!, "Tab");
+    await flushUi();
+
+    expect(filter!.value).toBe('{ "客户 名": ');
   });
 
   it("completes the highlighted field on Tab and leaves the caret in value position", async () => {

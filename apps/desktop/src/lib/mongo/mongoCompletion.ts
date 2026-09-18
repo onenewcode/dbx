@@ -242,7 +242,7 @@ export function getMongoCompletionContext(text: string, cursor: number): MongoCo
   const safeCursor = Math.max(0, Math.min(cursor, text.length));
   const beforeCursor = text.slice(0, safeCursor);
   const collection = extractActiveCollection(text, safeCursor);
-  const { prefix, from } = readPropertyPrefix(text, safeCursor);
+  const { prefix, from } = readMongoPropertyPrefix(text, safeCursor);
   const replaceClosingQuote = closingQuoteAtCursor(prefix, text, safeCursor);
   const at = (mode: MongoCompletionMode, stage?: string): MongoCompletionContext => ({ mode, prefix, from, replaceClosingQuote, collection, stage });
 
@@ -429,7 +429,7 @@ export function getMongoDocumentQueryCompletionContext(text: string, cursor: num
   const mode = kind === "filter" ? classifyFilter(scan, 0) : classifyKeyMap(scan, 0);
   if (mode === "none") return nothing;
 
-  const { prefix, from } = readPropertyPrefix(text, safeCursor);
+  const { prefix, from } = readMongoPropertyPrefix(text, safeCursor);
   return { mode, prefix, from, replaceClosingQuote: closingQuoteAtCursor(prefix, text, safeCursor) };
 }
 
@@ -489,8 +489,9 @@ export function plainMongoCompletionInsertion(apply: string, followingText = "")
 export function shouldAutoOpenMongoDocumentQueryCompletion(text: string, cursor: number, kind: MongoDocumentQueryKind): boolean {
   const previousChar = text[cursor - 1];
   if (!previousChar) return false;
-  if (!/[\w_$."'{,[:-]/.test(previousChar) && !/[{,[:]\s+$/.test(text.slice(0, cursor))) return false;
-  return getMongoDocumentQueryCompletionContext(text, cursor, kind).mode !== "none";
+  const context = getMongoDocumentQueryCompletionContext(text, cursor, kind);
+  if (context.mode === "none") return false;
+  return context.prefix.length > 0 || /[{[,:]\s*$/.test(text.slice(0, cursor));
 }
 
 /**
@@ -1004,11 +1005,47 @@ function finalizeQuotedMongoCompletionItems(context: MongoCompletionContext, ite
  * Text helpers
  * ------------------------------------------------------------------ */
 
-function readPropertyPrefix(text: string, cursor: number): { prefix: string; from: number } {
-  let from = cursor;
-  while (from > 0 && /[\w_$.-]/.test(text[from - 1] ?? "")) from--;
-  if (text[from - 1] === '"' || text[from - 1] === "'") from--;
-  return { prefix: text.slice(from, cursor), from };
+const MONGO_PROPERTY_PREFIX_CHARACTER = /[$.\p{ID_Continue}-]/u;
+
+export function readMongoPropertyPrefix(text: string, cursor: number): { prefix: string; from: number } {
+  const safeCursor = Math.max(0, Math.min(cursor, text.length));
+  const quoteStart = findOpenMongoQuoteStart(text, safeCursor);
+  if (quoteStart !== null) return { prefix: text.slice(quoteStart, safeCursor), from: quoteStart };
+
+  let from = safeCursor;
+  while (from > 0) {
+    let candidateFrom = from - 1;
+    const trailingUnit = text.charCodeAt(candidateFrom);
+    if (trailingUnit >= 0xdc00 && trailingUnit <= 0xdfff && candidateFrom > 0) {
+      const leadingUnit = text.charCodeAt(candidateFrom - 1);
+      if (leadingUnit >= 0xd800 && leadingUnit <= 0xdbff) candidateFrom--;
+    }
+    const candidate = text.slice(candidateFrom, from);
+    if (!MONGO_PROPERTY_PREFIX_CHARACTER.test(candidate)) break;
+    from = candidateFrom;
+  }
+  return { prefix: text.slice(from, safeCursor), from };
+}
+
+function findOpenMongoQuoteStart(text: string, cursor: number): number | null {
+  for (let index = 0; index < cursor; index++) {
+    const char = text[index];
+    if ((char === "/" && (text[index + 1] === "/" || text[index + 1] === "*")) || (char === "-" && text[index + 1] === "-")) {
+      const skipped = skipMongoStringOrComment(text, index, cursor);
+      if (skipped >= cursor) return null;
+      index = skipped - 1;
+      continue;
+    }
+    if (char !== '"' && char !== "'") continue;
+
+    const quoteStart = index;
+    for (index++; index < cursor; index++) {
+      if (text[index] === "\\") index++;
+      else if (text[index] === char) break;
+    }
+    if (index >= cursor) return quoteStart;
+  }
+  return null;
 }
 
 function closingQuoteAtCursor(prefix: string, text: string, cursor: number): '"' | "'" | undefined {
