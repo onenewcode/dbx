@@ -13,6 +13,8 @@ const MCP_INSTALL_COMMAND: &str = "npm install -g @dbx-app/mcp-server@latest";
 const MCP_PNPM_UPDATE_COMMAND: &str = "pnpm update -g @dbx-app/mcp-server";
 const MCP_UNINSTALL_COMMAND: &str = "npm uninstall -g @dbx-app/mcp-server";
 const MCP_PNPM_UNINSTALL_COMMAND: &str = "pnpm remove -g @dbx-app/mcp-server";
+const MCP_BUN_UPDATE_COMMAND: &str = "bun add -g @dbx-app/mcp-server@latest";
+const MCP_BUN_UNINSTALL_COMMAND: &str = "bun remove -g @dbx-app/mcp-server";
 const MCP_MIN_NODE_VERSION: NodeVersion = NodeVersion { major: 18, minor: 18, patch: 0 };
 const MCP_MIN_NODE_VERSION_REQUIREMENT: &str = ">=18.18.0";
 const SHELL_COMMAND_MARKER: &str = "__DBX_MCP_COMMAND_OUTPUT_START__";
@@ -68,6 +70,8 @@ enum McpPackageManager {
     Npm,
     Pnpm { command_path: PathBuf, pnpm_home: PathBuf, global_dir: PathBuf },
     PnpmUnavailable { pnpm_home: PathBuf, global_dir: PathBuf },
+    Bun { command_path: PathBuf, bun_install: PathBuf },
+    BunUnavailable { bun_install: PathBuf },
     Unmanaged { launcher_dir: PathBuf },
 }
 
@@ -163,6 +167,7 @@ impl NodeRuntime {
     fn update_command(&self) -> &'static str {
         match self.mcp_installation.as_ref().map(|installation| &installation.package_manager) {
             Some(McpPackageManager::Pnpm { .. } | McpPackageManager::PnpmUnavailable { .. }) => MCP_PNPM_UPDATE_COMMAND,
+            Some(McpPackageManager::Bun { .. } | McpPackageManager::BunUnavailable { .. }) => MCP_BUN_UPDATE_COMMAND,
             _ => MCP_INSTALL_COMMAND,
         }
     }
@@ -172,6 +177,7 @@ impl NodeRuntime {
             Some(McpPackageManager::Pnpm { .. } | McpPackageManager::PnpmUnavailable { .. }) => {
                 MCP_PNPM_UNINSTALL_COMMAND
             }
+            Some(McpPackageManager::Bun { .. } | McpPackageManager::BunUnavailable { .. }) => MCP_BUN_UNINSTALL_COMMAND,
             _ => MCP_UNINSTALL_COMMAND,
         }
     }
@@ -190,7 +196,7 @@ impl NodeRuntime {
                         global_dir,
                     ],
                     &self.node_launcher_path,
-                    pnpm_home,
+                    ("PNPM_HOME", pnpm_home),
                 )
             }
             Some(McpPackageManager::PnpmUnavailable { pnpm_home, global_dir }) => Err(format!(
@@ -198,6 +204,17 @@ impl NodeRuntime {
                 MCP_PACKAGE_NAME,
                 global_dir.display(),
                 pnpm_home.display()
+            )),
+            Some(McpPackageManager::Bun { command_path, bun_install }) => run_package_manager_command(
+                command_path,
+                &[OsString::from("add"), OsString::from("-g"), OsString::from(format!("{MCP_PACKAGE_NAME}@latest"))],
+                &self.node_launcher_path,
+                ("BUN_INSTALL", bun_install),
+            ),
+            Some(McpPackageManager::BunUnavailable { bun_install }) => Err(format!(
+                "Cannot safely update {} because no bun executable was found in {}.",
+                MCP_PACKAGE_NAME,
+                bun_install.join("bin").display()
             )),
             Some(McpPackageManager::Unmanaged { launcher_dir }) => Err(format!(
                 "Cannot safely update {} because the package manager for the launcher in {} could not be verified.",
@@ -226,7 +243,7 @@ impl NodeRuntime {
                         global_dir,
                     ],
                     &self.node_launcher_path,
-                    pnpm_home,
+                    ("PNPM_HOME", pnpm_home),
                 )
             }
             McpPackageManager::PnpmUnavailable { pnpm_home, global_dir } => Err(format!(
@@ -234,6 +251,17 @@ impl NodeRuntime {
                 MCP_PACKAGE_NAME,
                 global_dir.display(),
                 pnpm_home.display()
+            )),
+            McpPackageManager::Bun { command_path, bun_install } => run_package_manager_command(
+                command_path,
+                &[OsString::from("remove"), OsString::from("-g"), OsString::from(MCP_PACKAGE_NAME)],
+                &self.node_launcher_path,
+                ("BUN_INSTALL", bun_install),
+            ),
+            McpPackageManager::BunUnavailable { bun_install } => Err(format!(
+                "Cannot safely uninstall {} because no bun executable was found in {}.",
+                MCP_PACKAGE_NAME,
+                bun_install.join("bin").display()
             )),
             McpPackageManager::Unmanaged { launcher_dir } => Err(format!(
                 "Cannot safely uninstall {} because the package manager for the launcher in {} could not be verified.",
@@ -287,6 +315,20 @@ pub async fn check_mcp_server_status(app: AppHandle) -> Result<McpServerStatus, 
                 MCP_PACKAGE_NAME,
                 global_dir.display(),
                 pnpm_home.display()
+            ))
+        }
+        (
+            Some(_),
+            Some(McpInstallation {
+                package_manager: McpPackageManager::BunUnavailable { bun_install },
+                ..
+            }),
+        ) => {
+            Some(format!(
+                "{} is installed in {}, but automatic update and uninstall are disabled because bun was not found in {}.",
+                MCP_PACKAGE_NAME,
+                bun_global_root(bun_install).display(),
+                bun_install.join("bin").display()
             ))
         }
         (
@@ -863,7 +905,7 @@ fn run_package_manager_command(
     command_path: &Path,
     args: &[OsString],
     node_launcher_path: &Path,
-    pnpm_home: &Path,
+    home_env: (&str, &Path),
 ) -> Result<CommandOutput, String> {
     let mut command = dbx_core::process::new_std_command(command_path);
     command.args(args);
@@ -877,7 +919,7 @@ fn run_package_manager_command(
     if let Ok(path) = env::join_paths(paths) {
         command.env("PATH", path);
     }
-    command.env("PNPM_HOME", pnpm_home);
+    command.env(home_env.0, home_env.1);
     command_output_from_process(command)
 }
 
@@ -968,6 +1010,10 @@ fn mcp_package_from_command_dir(dir: &Path) -> Option<LocatedMcpPackage> {
 }
 
 fn mcp_package_from_command_path(command_path: &Path) -> Option<LocatedMcpPackage> {
+    mcp_package_from_launcher_target(command_path).or_else(|| bun_global_package_near(command_path))
+}
+
+fn mcp_package_from_launcher_target(command_path: &Path) -> Option<LocatedMcpPackage> {
     let bin_path = canonical_runtime_path(command_path)?;
     let script_path = node_script_from_launcher(&bin_path)?;
     let (package_root, package) = mcp_package_from_script(&script_path)?;
@@ -982,6 +1028,7 @@ fn mcp_package_from_command_path(command_path: &Path) -> Option<LocatedMcpPackag
                 })
                 .unwrap_or(McpPackageManager::PnpmUnavailable { pnpm_home: launcher_dir.clone(), global_dir })
         })
+        .or_else(|| bun_package_manager(&package_root))
         .unwrap_or(McpPackageManager::Unmanaged { launcher_dir });
     Some(LocatedMcpPackage { package_root, package, bin_path: Some(bin_path), package_manager })
 }
@@ -1023,6 +1070,63 @@ fn pnpm_command_near(dir: &Path) -> Option<PathBuf> {
     [Some(dir), dir.parent()].into_iter().flatten().find_map(|candidate_dir| {
         command_file_names("pnpm").into_iter().map(|name| candidate_dir.join(name)).find(|path| path.is_file())
     })
+}
+
+fn bun_global_root(bun_install: &Path) -> PathBuf {
+    bun_install.join("install").join("global")
+}
+
+fn bun_global_dir(package_root: &Path) -> Option<PathBuf> {
+    // bun keeps global packages flat under <BUN_INSTALL>/install/global/node_modules.
+    let node_modules = package_root.parent()?.parent()?;
+    let global_dir = node_modules.parent()?;
+    if !node_modules.file_name().is_some_and(|name| name.eq_ignore_ascii_case("node_modules"))
+        || !global_dir.file_name().is_some_and(|name| name.eq_ignore_ascii_case("global"))
+        || !global_dir.parent()?.file_name().is_some_and(|name| name.eq_ignore_ascii_case("install"))
+    {
+        return None;
+    }
+    let manifest = std::fs::read_to_string(global_dir.join("package.json")).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&manifest).ok()?;
+    manifest
+        .get("dependencies")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|dependencies| dependencies.get(MCP_PACKAGE_NAME))
+        .and_then(serde_json::Value::as_str)
+        .filter(|requirement| !requirement.trim().is_empty())
+        .map(|_| global_dir.to_path_buf())
+}
+
+fn bun_package_manager(package_root: &Path) -> Option<McpPackageManager> {
+    let global_dir = bun_global_dir(package_root)?;
+    let bun_install = global_dir.parent()?.parent()?.to_path_buf();
+    Some(match find_command_in_dir("bun", &bun_install.join("bin")) {
+        Some(command_path) => McpPackageManager::Bun { command_path, bun_install },
+        None => McpPackageManager::BunUnavailable { bun_install },
+    })
+}
+
+fn bun_global_package_near(command_path: &Path) -> Option<LocatedMcpPackage> {
+    // bun writes opaque binary launchers on Windows that cannot be traced back to their
+    // script; recover the package from bun's global install layout instead.
+    let canonical = canonical_runtime_path(command_path);
+    let located = [Some(command_path), canonical.as_deref()]
+        .into_iter()
+        .flatten()
+        .filter_map(Path::parent)
+        .filter(|bin_dir| bin_dir.file_name().is_some_and(|name| name.eq_ignore_ascii_case("bin")))
+        .find_map(|bin_dir| {
+            let package_root = bun_global_root(bin_dir.parent()?).join("node_modules").join(MCP_PACKAGE_NAME);
+            let package_manager = bun_package_manager(&package_root)?;
+            let package = mcp_package(&package_root)?;
+            Some(LocatedMcpPackage {
+                package_root: canonical_runtime_path(&package_root)?,
+                package,
+                bin_path: Some(command_path.to_path_buf()),
+                package_manager,
+            })
+        });
+    located
 }
 
 fn discover_path_mcp_package() -> Option<LocatedMcpPackage> {
@@ -1082,23 +1186,25 @@ fn mcp_native_binary_path_for(
     binary_name: &str,
 ) -> Option<PathBuf> {
     let package_root = canonical_runtime_path(package_root)?;
-    let (boundary, allow_hoisted) = match package_manager {
+    let (boundary, hoisted_root) = match package_manager {
         McpPackageManager::Npm => {
             let npm_root = canonical_runtime_path(npm_root)?;
             if package_root != canonical_runtime_path(&npm_root.join(MCP_PACKAGE_NAME))? {
                 return None;
             }
-            (npm_root, true)
+            (npm_root.clone(), Some(npm_root))
         }
         McpPackageManager::Pnpm { global_dir, .. } | McpPackageManager::PnpmUnavailable { global_dir, .. } => {
-            (canonical_runtime_path(global_dir)?, false)
+            (canonical_runtime_path(global_dir)?, None)
         }
-        McpPackageManager::Unmanaged { .. } => (package_root.clone(), false),
+        McpPackageManager::Bun { bun_install, .. } | McpPackageManager::BunUnavailable { bun_install } => {
+            let flat_root = canonical_runtime_path(&bun_global_root(bun_install).join("node_modules"))?;
+            (flat_root.clone(), Some(flat_root))
+        }
+        McpPackageManager::Unmanaged { .. } => (package_root.clone(), None),
     };
     let mut candidates = vec![package_root.join("node_modules").join(package_name)];
-    if allow_hoisted {
-        candidates.push(npm_root.join(package_name));
-    }
+    candidates.extend(hoisted_root.map(|root| root.join(package_name)));
     candidates.into_iter().find_map(|native_package_root| {
         let native_package_root = canonical_runtime_path(&native_package_root)?;
         if !native_package_root.starts_with(&boundary) {
@@ -1465,11 +1571,14 @@ mod tests {
         }
     }
 
-    fn pnpm_fixture(launcher_name: &str, launcher: &str) -> PnpmFixture {
-        use std::time::{SystemTime, UNIX_EPOCH};
+    fn fixture_root(name: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        std::env::temp_dir().join(format!("{name}-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed)))
+    }
 
-        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        let root = std::env::temp_dir().join(format!("dbx-pnpm-10-27-fixture-{}-{nonce}", std::process::id()));
+    fn pnpm_fixture(launcher_name: &str, launcher: &str) -> PnpmFixture {
+        let root = fixture_root("dbx-pnpm-10-27-fixture");
         let pnpm_home = root.join("pnpm-home");
         let launcher_path = pnpm_home.join(launcher_name);
         let pnpm_path = pnpm_home.join(if cfg!(windows) { "pnpm.cmd" } else { "pnpm" });
@@ -1496,6 +1605,49 @@ mod tests {
         .unwrap();
 
         PnpmFixture { root, pnpm_home, launcher_path, pnpm_path, package_root, script_path, global_dir }
+    }
+
+    struct BunFixture {
+        root: PathBuf,
+        bun_install: PathBuf,
+        launcher_path: PathBuf,
+        bun_path: PathBuf,
+        package_root: PathBuf,
+        script_path: PathBuf,
+        flat_root: PathBuf,
+    }
+
+    impl Drop for BunFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn bun_fixture(launcher_name: &str) -> BunFixture {
+        let root = fixture_root("dbx-bun-fixture");
+        let bun_install = root.join("bun-home");
+        let launcher_path = bun_install.join("bin").join(launcher_name);
+        let bun_path = bun_install.join("bin").join(if cfg!(windows) { "bun.exe" } else { "bun" });
+        let flat_root = bun_install.join("install").join("global").join("node_modules");
+        let package_root = flat_root.join(MCP_PACKAGE_NAME);
+        let script_path = package_root.join("bin").join("dbx-mcp-server.js");
+
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(bun_install.join("bin")).unwrap();
+        std::fs::write(&script_path, "// @dbx-app/mcp-server fixture\n").unwrap();
+        std::fs::write(&bun_path, "bun fixture\n").unwrap();
+        std::fs::write(
+            bun_install.join("install").join("global").join("package.json"),
+            r#"{"dependencies":{"@dbx-app/mcp-server":"^0.4.93"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            package_root.join("package.json"),
+            r#"{"name":"@dbx-app/mcp-server","version":"0.4.93","bin":{"dbx-mcp-server":"bin/dbx-mcp-server.js"},"engines":{"node":">=18.18.0"}}"#,
+        )
+        .unwrap();
+
+        BunFixture { root, bun_install, launcher_path, bun_path, package_root, script_path, flat_root }
     }
 
     fn runtime_for_installation(installation: McpInstallation, npm_root: PathBuf) -> NodeRuntime {
@@ -1722,7 +1874,7 @@ mod tests {
                 ref command_path,
                 ref pnpm_home,
                 ref global_dir,
-            } if command_path == &fixture.pnpm_path
+            } if command_path == &canonical_runtime_path(&fixture.pnpm_path).unwrap()
                 && pnpm_home == &canonical_runtime_path(&fixture.pnpm_home).unwrap()
                 && global_dir == &canonical_runtime_path(&fixture.global_dir).unwrap()
         ));
@@ -1991,6 +2143,205 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn bun_global_symlink_launcher_resolves_package_and_ownership() {
+        use std::os::unix::fs::symlink;
+
+        let fixture = bun_fixture("dbx-mcp-server");
+        symlink("../install/global/node_modules/@dbx-app/mcp-server/bin/dbx-mcp-server.js", &fixture.launcher_path)
+            .unwrap();
+
+        let located = mcp_package_from_command_path(&fixture.launcher_path).unwrap();
+
+        assert_eq!(located.package_root, canonical_runtime_path(&fixture.package_root).unwrap());
+        assert_eq!(located.package.version, "0.4.93");
+        assert!(matches!(
+            located.package_manager,
+            McpPackageManager::Bun { ref command_path, ref bun_install }
+                if command_path == &canonical_runtime_path(&fixture.bun_path).unwrap()
+                    && bun_install == &canonical_runtime_path(&fixture.bun_install).unwrap()
+        ));
+    }
+
+    #[test]
+    fn bun_binary_launcher_recovers_package_from_global_layout() {
+        let fixture = bun_fixture("dbx-mcp-server.exe");
+        std::fs::write(&fixture.launcher_path, "MZ opaque bun shim\n").unwrap();
+
+        let located = mcp_package_from_command_path(&fixture.launcher_path).unwrap();
+
+        assert_eq!(located.package_root, canonical_runtime_path(&fixture.package_root).unwrap());
+        assert_eq!(located.bin_path, Some(fixture.launcher_path.clone()));
+        assert!(matches!(located.package_manager, McpPackageManager::Bun { .. }));
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn bun_installation_drives_status_launch_update_and_uninstall() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let fixture = bun_fixture("dbx-mcp-server");
+        symlink("../install/global/node_modules/@dbx-app/mcp-server/bin/dbx-mcp-server.js", &fixture.launcher_path)
+            .unwrap();
+        let bun_log_path = fixture.root.join("bun.log");
+        std::fs::write(
+            &fixture.bun_path,
+            format!(
+                "#!/bin/sh\nprintf 'ARGS=%s\\nBUN_INSTALL=%s\\nPATH=%s\\n' \"$*\" \"$BUN_INSTALL\" \"$PATH\" > {}\n",
+                shell_quote(bun_log_path.to_string_lossy().as_ref())
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&fixture.bun_path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&fixture.bun_path, permissions).unwrap();
+        let node_path = fixture.root.join("selected-node-runtime").join("bin").join("node");
+        let npm_root = fixture.root.join("selected-node-runtime").join("lib").join("node_modules");
+        std::fs::create_dir_all(node_path.parent().unwrap()).unwrap();
+        std::fs::write(&node_path, "selected Node runtime\n").unwrap();
+
+        let located = mcp_package_from_command_path(&fixture.launcher_path).unwrap();
+        let node_path = canonical_runtime_path(&node_path).unwrap();
+        let installation = bind_mcp_installation(located, &node_path, "v24.16.0", &npm_root).unwrap();
+        let runtime = runtime_for_installation(installation, npm_root);
+
+        assert!(runtime.has_mcp_package());
+        let installation = runtime.mcp_installation.as_ref().unwrap();
+        assert_eq!(installation.package_version, "0.4.93");
+        assert_eq!(installation.script_path, canonical_runtime_path(&fixture.script_path).unwrap());
+        assert_eq!(installation.native_bin_path, None);
+        assert_eq!(runtime.update_command(), super::MCP_BUN_UPDATE_COMMAND);
+        assert_eq!(runtime.uninstall_command(), super::MCP_BUN_UNINSTALL_COMMAND);
+        assert!(matches!(
+            installation.package_manager,
+            McpPackageManager::Bun { ref command_path, ref bun_install }
+                if command_path == &canonical_runtime_path(&fixture.bun_path).unwrap()
+                    && bun_install == &canonical_runtime_path(&fixture.bun_install).unwrap()
+        ));
+        let command = mcp_command_for_runtime(&runtime).unwrap();
+        assert_eq!(command.0, node_path.to_string_lossy().to_string());
+        assert_eq!(
+            command.1,
+            vec![canonical_runtime_path(&fixture.script_path).unwrap().to_string_lossy().to_string()]
+        );
+
+        let update_output = runtime.install_or_update().unwrap();
+        assert!(update_output.success);
+        let bun_log = std::fs::read_to_string(&bun_log_path).unwrap();
+        assert!(bun_log.contains("ARGS=add -g @dbx-app/mcp-server@latest"));
+        assert!(bun_log
+            .contains(&format!("BUN_INSTALL={}", canonical_runtime_path(&fixture.bun_install).unwrap().display())));
+        assert!(bun_log.contains(&format!(
+            "PATH={}",
+            canonical_runtime_path(&fixture.bun_install).unwrap().join("bin").display()
+        )));
+        assert!(bun_log.contains(node_path.parent().unwrap().to_string_lossy().as_ref()));
+        assert!(!bun_log.contains("--registry"));
+
+        let uninstall_output = runtime.uninstall().unwrap();
+        assert!(uninstall_output.success);
+        let bun_log = std::fs::read_to_string(&bun_log_path).unwrap();
+        assert!(bun_log.contains("ARGS=remove -g @dbx-app/mcp-server"));
+        assert!(bun_log
+            .contains(&format!("BUN_INSTALL={}", canonical_runtime_path(&fixture.bun_install).unwrap().display())));
+    }
+
+    #[test]
+    fn bun_install_without_verified_bun_disables_update_and_uninstall() {
+        let fixture = bun_fixture("dbx-mcp-server.exe");
+        std::fs::write(&fixture.launcher_path, "MZ opaque bun shim\n").unwrap();
+        std::fs::remove_file(&fixture.bun_path).unwrap();
+        let located = mcp_package_from_command_path(&fixture.launcher_path).unwrap();
+        let installation = bind_mcp_installation(
+            located,
+            PathBuf::from("/selected-runtime/node").as_path(),
+            "v24.16.0",
+            &fixture.root.join("unrelated-npm-root"),
+        )
+        .unwrap();
+        let runtime = runtime_for_installation(installation, fixture.root.join("unrelated-npm-root"));
+
+        assert!(matches!(
+            runtime.mcp_installation.as_ref().map(|installation| &installation.package_manager),
+            Some(McpPackageManager::BunUnavailable { .. })
+        ));
+        assert!(runtime.install_or_update().err().unwrap().contains("Cannot safely update"));
+        assert!(runtime.uninstall().err().unwrap().contains("Cannot safely uninstall"));
+    }
+
+    #[test]
+    fn bun_native_binary_resolves_from_flat_global_root() {
+        let fixture = bun_fixture("dbx-mcp-server.exe");
+        std::fs::write(&fixture.launcher_path, "MZ opaque bun shim\n").unwrap();
+        let npm_root = fixture.root.join("unrelated-npm-root");
+        let (native_package_name, native_binary_name) = super::mcp_native_package().unwrap();
+        let native_root = fixture.flat_root.join(native_package_name);
+        let native_binary = native_root.join("bin").join(native_binary_name);
+        std::fs::create_dir_all(native_binary.parent().unwrap()).unwrap();
+        std::fs::write(&native_binary, "native binary").unwrap();
+        std::fs::write(
+            native_root.join("package.json"),
+            format!(r#"{{"name":"{native_package_name}","version":"0.4.93"}}"#),
+        )
+        .unwrap();
+
+        let located = mcp_package_from_command_path(&fixture.launcher_path).unwrap();
+        let installation =
+            bind_mcp_installation(located, PathBuf::from("/selected-runtime/node").as_path(), "v24.16.0", &npm_root)
+                .unwrap();
+
+        assert_eq!(installation.native_bin_path, canonical_runtime_path(&native_binary));
+
+        std::fs::write(
+            native_root.join("package.json"),
+            format!(r#"{{"name":"{native_package_name}","version":"0.4.92"}}"#),
+        )
+        .unwrap();
+        let located = mcp_package_from_command_path(&fixture.launcher_path).unwrap();
+        let installation =
+            bind_mcp_installation(located, PathBuf::from("/selected-runtime/node").as_path(), "v24.16.0", &npm_root)
+                .unwrap();
+
+        assert_eq!(installation.native_bin_path, None);
+    }
+
+    #[test]
+    fn local_bun_project_shim_is_not_treated_as_a_global_installation() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let root = std::env::temp_dir().join(format!("dbx-bun-local-fixture-{}-{nonce}", std::process::id()));
+        let node_modules = root.join("project").join("node_modules");
+        let launcher_dir = node_modules.join(".bin");
+        let launcher_path = launcher_dir.join("dbx-mcp-server");
+        let package_root = node_modules.join(MCP_PACKAGE_NAME);
+        let script_path = package_root.join("bin").join("dbx-mcp-server.js");
+        std::fs::create_dir_all(script_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(&launcher_dir).unwrap();
+        std::fs::write(&script_path, "// local MCP fixture\n").unwrap();
+        std::fs::write(
+            package_root.join("package.json"),
+            r#"{"name":"@dbx-app/mcp-server","version":"0.4.93","bin":{"dbx-mcp-server":"bin/dbx-mcp-server.js"},"engines":{"node":">=18.18.0"}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            &launcher_path,
+            "#!/bin/sh\nbasedir=$(dirname \"$0\")\nexec node \"$basedir/../@dbx-app/mcp-server/bin/dbx-mcp-server.js\" \"$@\"\n",
+        )
+        .unwrap();
+
+        let located = mcp_package_from_command_path(&launcher_path).unwrap();
+
+        assert!(matches!(
+            located.package_manager,
+            McpPackageManager::Unmanaged { launcher_dir: ref detected_launcher_dir }
+                if detected_launcher_dir == &canonical_runtime_path(&launcher_dir).unwrap()
+        ));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+
     #[test]
     fn mcp_command_rejects_script_outside_installation_package_root() {
         let installed = runtime("/runtime/node-24", Some("/outside/@dbx-app/mcp-server/dist/index.js"));
@@ -2084,7 +2435,7 @@ mod tests {
                 ref command_path,
                 ref pnpm_home,
                 ref global_dir,
-            } if command_path == &fixture.pnpm_path
+            } if command_path == &canonical_runtime_path(&fixture.pnpm_path).unwrap()
                 && pnpm_home == &canonical_runtime_path(&fixture.pnpm_home).unwrap()
                 && global_dir == &canonical_runtime_path(&fixture.global_dir).unwrap()
         ));
@@ -2252,9 +2603,11 @@ mod tests {
         let calls = std::fs::read_to_string(log_path).unwrap();
         assert!(calls.contains("npm root -g"));
         assert!(calls.contains("npm prefix -g"));
-        assert!(calls
-            .lines()
-            .any(|line| line == format!("{} install -g @dbx-app/mcp-server@latest", npm_cli_path.display())));
+        assert!(calls.lines().any(|line| line
+            == format!(
+                "{} install -g @dbx-app/mcp-server@latest",
+                canonical_runtime_path(&npm_cli_path).unwrap().display()
+            )));
         assert!(!calls.contains("--registry"));
         assert!(calls.contains(&format!("PATH={}", canonical_runtime_path(&dir).unwrap().display())));
 
@@ -2323,7 +2676,7 @@ mod tests {
         assert_eq!(probed.uninstall_command(), super::MCP_PNPM_UNINSTALL_COMMAND);
         assert!(matches!(
             installation.package_manager,
-            McpPackageManager::Pnpm { ref command_path, .. } if command_path == &fixture.pnpm_path
+            McpPackageManager::Pnpm { ref command_path, .. } if command_path == &canonical_runtime_path(&fixture.pnpm_path).unwrap()
         ));
         let update_output = probed.install_or_update().unwrap();
         assert!(update_output.success);
@@ -2331,8 +2684,10 @@ mod tests {
         assert!(pnpm_log.contains("ARGS=update -g @dbx-app/mcp-server --global-dir"));
         assert!(pnpm_log.contains(fixture.global_dir.to_string_lossy().as_ref()));
         assert!(!pnpm_log.contains("--registry"));
-        assert!(pnpm_log.contains(&format!("PNPM_HOME={}", fixture.pnpm_home.display())));
-        assert!(pnpm_log.contains(&format!("PATH={}", fixture.pnpm_home.display())));
+        assert!(
+            pnpm_log.contains(&format!("PNPM_HOME={}", canonical_runtime_path(&fixture.pnpm_home).unwrap().display()))
+        );
+        assert!(pnpm_log.contains(&format!("PATH={}", canonical_runtime_path(&fixture.pnpm_home).unwrap().display())));
         assert!(pnpm_log.contains(bin_dir.to_string_lossy().as_ref()));
 
         let uninstall_output = probed.uninstall().unwrap();
@@ -2340,8 +2695,10 @@ mod tests {
         let pnpm_log = std::fs::read_to_string(&pnpm_log_path).unwrap();
         assert!(pnpm_log.contains("ARGS=remove -g @dbx-app/mcp-server --global-dir"));
         assert!(pnpm_log.contains(fixture.global_dir.to_string_lossy().as_ref()));
-        assert!(pnpm_log.contains(&format!("PNPM_HOME={}", fixture.pnpm_home.display())));
-        assert!(pnpm_log.contains(&format!("PATH={}", fixture.pnpm_home.display())));
+        assert!(
+            pnpm_log.contains(&format!("PNPM_HOME={}", canonical_runtime_path(&fixture.pnpm_home).unwrap().display()))
+        );
+        assert!(pnpm_log.contains(&format!("PATH={}", canonical_runtime_path(&fixture.pnpm_home).unwrap().display())));
     }
 
     #[cfg(windows)]
