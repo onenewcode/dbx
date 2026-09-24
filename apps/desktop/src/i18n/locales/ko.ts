@@ -3,6 +3,7 @@ import { mongodbDatabaseDumpKo as mongoDump } from "./mongodbDatabaseDump";
 import { meilisearchManagementKo } from "./meilisearchManagement";
 import { redisGroupingKo as redisGrouping } from "./redisGrouping";
 import docs from "./docs/ko";
+import { dataDictionaryKo as dataDictionary } from "./dataDictionaryMessages";
 import { consulKoMessages } from "./consulKo";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 
@@ -167,6 +168,7 @@ export default withEnglishFallback({
     name: "DBX",
   },
   docs,
+  dataDictionary,
   pluginPlatform: {
     openResultView: "{label}(으)로 열기",
     centerTitle: "플러그인 센터",

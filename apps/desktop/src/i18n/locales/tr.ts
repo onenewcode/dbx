@@ -1,5 +1,6 @@
 import { withEnglishFallback } from "./fallback";
 import docs from "./docs/tr";
+import { dataDictionaryTr as dataDictionary } from "./dataDictionaryMessages";
 import { consulTrMessages } from "./consulTr";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 import { meilisearchManagementTr } from "./meilisearchManagement";
@@ -165,6 +166,7 @@ export default withEnglishFallback({
     name: "DBX",
   },
   docs,
+  dataDictionary,
   auth: {
     rateLimited: "Lütfen {seconds} sn sonra tekrar deneyin",
     setupTitle: "Erişim parolası oluştur",

@@ -1,5 +1,6 @@
 import { redisGroupingEn as redisGrouping } from "./redisGrouping";
 import docs from "./docs/en";
+import { dataDictionaryEn as dataDictionary } from "./dataDictionaryMessages";
 import { consulUiMessages } from "./consulUi";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 import { meilisearchManagementEn } from "./meilisearchManagement";
@@ -165,6 +166,7 @@ export default {
     name: "DBX",
   },
   docs,
+  dataDictionary,
   pluginPlatform: {
     openResultView: "Open with {label}",
     centerTitle: "Plugin Center",

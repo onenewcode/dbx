@@ -24,6 +24,7 @@ import {
   Eraser,
   Eye,
   FileCode,
+  FileSpreadsheet,
   Info,
   GripVertical,
   KeyRound,
@@ -75,7 +76,7 @@ import * as api from "@/lib/backend/api";
 import type { ColumnInfo, ConnectionConfig, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectBrowserViewMode, ObjectBrowserViewport, ObjectInfo, ObjectSourceKind, ObjectStatistics, PgTablePartitioning, TableInfoTab, TreeNode, TriggerInfo } from "@/types/database";
 import { sortTablesByFkDependency, type TableWithFk } from "@/lib/table/tableDependencySort";
 import { isSchemaAware, supportsTableVacuum, supportsTransfer } from "@/lib/database/databaseCapabilities";
-import { supportsAiAssistantContext, supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
+import { supportsAiAssistantContext, supportsDataDictionary, supportsSchemaDiagram, supportsTableImport, supportsTableStructureEditing, supportsTableTruncate } from "@/lib/database/databaseFeatureSupport";
 import { codeMirrorSqlDialect, connectionObjectTreeNodeSchema, connectionTableSqlSchema, connectionUsesDatabaseObjectTreeMode, effectiveDatabaseTypeForConnection, objectListSchemaForConnection, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { getTableMetadataCapabilities, type TableMetadataCapabilities } from "@/lib/table/tableMetadataCapabilities";
 import { findTableStatistics } from "@/lib/dataGrid/tableInfoOverview";
@@ -409,6 +410,7 @@ const objectCounts = computed(() => countObjectBrowserRowsByFilter(rows.value));
 const objectSearchSummary = computed(() => summarizeObjectBrowserSearch(rows.value, search.value));
 const canOpenStructureEditor = computed(() => supportsTableStructureEditing(tableStructureDatabaseType.value));
 const canOpenDiagram = computed(() => !!props.database && supportsSchemaDiagram(effectiveDatabaseType.value));
+const canOpenDataDictionary = computed(() => !!props.database && supportsDataDictionary(effectiveDatabaseType.value));
 const canOpenTableImport = computed(() => !!props.database && supportsTableImport(effectiveDatabaseType.value));
 const supportsTruncateTable = computed(() => supportsTableTruncate(effectiveDatabaseType.value));
 const supportsVacuumTable = computed(() => !connectionIsEffectivelyReadOnly(props.connection) && supportsTableVacuum(effectiveDatabaseType.value));
@@ -1974,6 +1976,15 @@ function openDataCompare(row: ObjectBrowserRow) {
   };
 }
 
+function openDataDictionary(row: ObjectBrowserRow) {
+  connectionStore.dataDictionarySource = {
+    connectionId: props.connection.id,
+    database: props.database,
+    schema: row.schema || selectedSchema.value,
+    tableNames: [row.name],
+  };
+}
+
 function openDatabaseExport(row: ObjectBrowserRow) {
   connectionStore.databaseExportSource = {
     connectionId: props.connection.id,
@@ -3429,6 +3440,7 @@ function getTableMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     exportDataSubmenu(item),
     { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
     { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
+    ...(canOpenDataDictionary.value ? [{ label: t("dataDictionary.title"), action: () => openDataDictionary(item), icon: FileSpreadsheet }] : []),
     { label: "", separator: true },
     { label: t("contextMenu.duplicateStructure"), action: () => requestDuplicateStructure(item), icon: CopyPlus },
     ...tableClipboardMenuItems(item),
@@ -3457,6 +3469,7 @@ function getViewMenuItems(item: ObjectBrowserRow): ContextMenuItem[] {
     exportDataSubmenu(item),
     { label: t("contextMenu.exportDatabase"), action: () => openDatabaseExport(item), icon: Upload },
     { label: t("contextMenu.exportStructure"), action: () => exportStructure(item), icon: FileCode },
+    ...(canOpenDataDictionary.value ? [{ label: t("dataDictionary.title"), action: () => openDataDictionary(item), icon: FileSpreadsheet }] : []),
     { label: "", separator: true },
     {
       label: t("contextMenu.dropView"),
