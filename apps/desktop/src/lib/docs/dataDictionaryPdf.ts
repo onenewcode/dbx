@@ -8,7 +8,6 @@ const ORANGE = "0.91 0.44 0.08";
 const BROWN = "0.35 0.18 0.06";
 const PEACH = "0.99 0.88 0.74";
 const GRID = "0.90 0.50 0.18";
-const PAPER_WHITE = "1 1 1";
 const CHECK = "\u0001";
 
 const PAPER: Record<DictionaryLayout["paper"], { width: number; height: number }> = {
@@ -54,7 +53,7 @@ export function buildDataDictionaryPdf(tables: DictionaryTable[], labels: DataDi
   const margin = clamp(layout.marginCm, 0.5, 4) * CM;
   const includeIntro = layout.includeIntroduction && layout.introduction.trim() !== "";
   const intro = includeIntro ? flowLines(layout.introduction.split(/\n+/), page, margin, layout.bodySize, introHeading(labels)) : [];
-  const body = flowObjects(tables, labels, layout, page, margin, intro.length);
+  const body = flowObjects(tables, labels, layout, page, margin);
   const notes = warnings.length ? flowLines(warnings, page, margin, layout.bodySize) : [];
   const toc = layout.includeToc ? renderToc(tocFor(labels, tables, body.placed, intro.length), labels, page, margin, layout.bodySize) : [];
   const cover = layout.includeCover ? [coverPage(layout, page, margin)] : [];
@@ -243,7 +242,7 @@ function flowLines(lines: string[], page: { width: number; height: number }, mar
   return pages;
 }
 
-function flowObjects(tables: DictionaryTable[], labels: DataDictionaryLabels, layout: DictionaryLayout, page: { width: number; height: number }, margin: number, introPages: number): { pages: Page[]; placed: PlacedObject[] } {
+function flowObjects(tables: DictionaryTable[], labels: DataDictionaryLabels, layout: DictionaryLayout, page: { width: number; height: number }, margin: number): { pages: Page[]; placed: PlacedObject[] } {
   const pages: Page[] = [];
   const placed: PlacedObject[] = [];
   const cursor = { commands: [] as string[], y: 0, bookmark: undefined as string | undefined };
@@ -280,11 +279,11 @@ function flowObjects(tables: DictionaryTable[], labels: DataDictionaryLabels, la
     cursor.y -= layout.bodySize + 6;
     cursor.y = drawTable(cursor, columnRows(table, labels), margin, page.width - margin * 2, layout.bodySize, bottom, nextPage, ensure, [0.55, 1.6, 1.3, 0.9, 1.8]);
     if (layout.includeIndexesAndForeignKeys && table.indexes.length > 0) {
-      cursor.y = quietLabel(cursor, labels.indexesHeading, margin, layout.bodySize, bottom, ensure);
+      cursor.y = quietLabel(cursor, labels.indexesHeading, margin, layout.bodySize, ensure);
       cursor.y = drawTable(cursor, indexRows(table, labels), margin, page.width - margin * 2, layout.bodySize, bottom, nextPage, ensure, [1.8, 1.3, 0.7, 0.7, 0.9, 1.6]);
     }
     if (layout.includeIndexesAndForeignKeys && table.foreignKeys.length > 0) {
-      cursor.y = quietLabel(cursor, labels.foreignKeysHeading, margin, layout.bodySize, bottom, ensure);
+      cursor.y = quietLabel(cursor, labels.foreignKeysHeading, margin, layout.bodySize, ensure);
       cursor.y = drawTable(cursor, foreignKeyRows(table, labels), margin, page.width - margin * 2, layout.bodySize, bottom, nextPage, ensure, [1.7, 1.2, 1.1, 1.2, 1, 0.9, 1]);
     }
     cursor.y -= 16;
@@ -293,7 +292,7 @@ function flowObjects(tables: DictionaryTable[], labels: DataDictionaryLabels, la
   return { pages, placed };
 }
 
-function quietLabel(cursor: { commands: string[]; y: number }, title: string, x: number, size: number, bottom: number, ensure: (height: number) => void): number {
+function quietLabel(cursor: { commands: string[]; y: number }, title: string, x: number, size: number, ensure: (height: number) => void): number {
   ensure(size + 28);
   const y = cursor.y - 20;
   cursor.commands.push(fill(x, y - 1, 18, 2, ORANGE));
