@@ -57,7 +57,9 @@ export function buildDataDictionaryPdf(tables: DictionaryTable[], labels: DataDi
   const notes = warnings.length ? flowLines(warnings, page, margin, layout.bodySize) : [];
   const toc = layout.includeToc ? renderToc(tocFor(labels, tables, body.placed, intro.length), labels, page, margin, layout.bodySize) : [];
   const cover = layout.includeCover ? [coverPage(layout, page, margin)] : [];
-  const frontCount = cover.length + toc.length + intro.length;
+  // Page numbers start at the introduction so TOC entries (numbered from the
+  // introduction) match the printed footers; cover and contents stay unnumbered.
+  const frontCount = cover.length + toc.length;
   const pages = [...cover, ...toc, ...intro, ...body.pages, ...notes];
   if (pages.length === 0) pages.push({ commands: [] });
   stampChrome(pages, layout, page, margin, frontCount);

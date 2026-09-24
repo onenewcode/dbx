@@ -206,6 +206,31 @@ describe("buildDataDictionaryPdf", () => {
     expect(landscape).toContain("/MediaBox [0 0 841.89 595.28]");
   });
 
+  it("numbers pages from the introduction so TOC entries match the printed footers", () => {
+    const orders = table({ name: "orders" });
+    const layout = applyTemplate("standard", {
+      title: "shop",
+      introduction: Array.from({ length: 160 }, (_, index) => `INTRO-LINE-${index}`).join("\n"),
+      detailedIntroduction: "detail",
+      leftFooter: "shop",
+    });
+    const streams = pdfText(buildDataDictionaryPdf([orders], labels, layout))
+      .split("endstream")
+      .filter((chunk) => chunk.includes("BT"));
+    const introStreams = streams.filter((chunk) => chunk.includes("INTRO-LINE-"));
+    expect(introStreams.length).toBeGreaterThanOrEqual(2);
+    const lastIntroIndex = streams.lastIndexOf(introStreams[introStreams.length - 1]!);
+    const bodyStream = streams.slice(lastIntroIndex + 1).find((chunk) => chunk.includes("orders"));
+    expect(bodyStream).toBeDefined();
+    const tocStream = streams.find((chunk) => chunk.includes("Contents"));
+    expect(tocStream).toBeDefined();
+    const introPages = introStreams.length;
+    expect(introStreams[0]).toContain("(1) Tj");
+    expect(introStreams[introPages - 1]).toContain(`(${introPages}) Tj`);
+    expect(bodyStream).toContain(`(${introPages + 1}) Tj`);
+    expect(tocStream).toContain(`(${introPages + 1}) Tj`);
+  });
+
   it("does not abort or name an unselected skipped table when the snapshot warned about it", () => {
     const users = table({ name: "users", schema: "public" });
     const orders = table({ name: "orders", schema: "public" });
