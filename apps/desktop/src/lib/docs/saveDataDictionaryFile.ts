@@ -1,29 +1,37 @@
 import { isTauriRuntime } from "@/lib/backend/tauriRuntime";
 
-const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+export class DictionaryFileExistsError extends Error {
+  constructor() {
+    super("exists");
+    this.name = "DictionaryFileExistsError";
+  }
+}
 
-export async function saveDataDictionaryFile(fileName: string, format: "xlsx" | "markdown", content: Uint8Array | string): Promise<boolean> {
+/**
+ * Suggested name is only the save dialog's defaultPath. The write uses the path
+ * `save()` just returned. Tauri's dialog grant covers that exact path, not a
+ * typed path or a timestamp appended after the dialog closes.
+ */
+export async function saveDataDictionaryFile(suggestedName: string, content: Uint8Array, options: { overwrite: boolean }): Promise<string | null> {
   if (isTauriRuntime()) {
     const [{ save }, fs] = await Promise.all([import("@tauri-apps/plugin-dialog"), import("@tauri-apps/plugin-fs")]);
-    const path = await save({
-      defaultPath: fileName,
-      filters: format === "xlsx" ? [{ name: "Excel", extensions: ["xlsx"] }] : [{ name: "Markdown", extensions: ["md"] }],
+    const granted = await save({
+      defaultPath: suggestedName,
+      filters: [{ name: "PDF", extensions: ["pdf"] }],
     });
-    if (!path) return false;
-    if (typeof content === "string") {
-      await fs.writeTextFile(path, content);
-    } else {
-      await fs.writeFile(path, content);
-    }
-    return true;
+    if (!granted) return null;
+    if (!options.overwrite && (await fs.exists(granted))) throw new DictionaryFileExistsError();
+    await fs.writeFile(granted, content);
+    return granted;
   }
 
-  const blob = typeof content === "string" ? new Blob([content], { type: "text/markdown" }) : new Blob([content.slice().buffer], { type: XLSX_MIME });
+  const downloadName = suggestedName.split(/[/\\]/).pop() || suggestedName;
+  const blob = new Blob([content.buffer.slice(content.byteOffset, content.byteOffset + content.byteLength) as ArrayBuffer], { type: "application/pdf" });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = fileName;
+  anchor.download = downloadName;
   anchor.click();
   URL.revokeObjectURL(url);
-  return true;
+  return downloadName;
 }

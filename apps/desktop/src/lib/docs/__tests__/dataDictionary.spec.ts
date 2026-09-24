@@ -1,20 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { ColumnInfo, DocTable, SchemaSnapshot } from "@/docs/types";
-import { buildXlsxWorkbookMulti } from "@/lib/export/xlsxExport";
-import { buildDataDictionary, dataDictionaryDefaultFileName, DATA_DICTIONARY_SHEET_NAME_LIMIT, type DataDictionaryLabels } from "@/lib/docs/dataDictionary";
+import type { ColumnInfo } from "@/docs/types";
+import { applyTemplate, dataDictionaryFileName, dictionaryCatalogNames, exportBlockedBySkippedTables, moveOrderedKey, objectKey, orderDictionaryTables, resolveDictionaryExportPath, toggleOrderedKey, warningsForSelection, type DictionaryLayout, type DictionaryTable } from "@/lib/docs/dataDictionary";
+import { buildDataDictionaryPdf, pdfUtf16Hex } from "@/lib/docs/dataDictionaryPdf";
 
-const labels: DataDictionaryLabels = {
-  sheetTables: "Tables",
-  sheetColumns: "Columns",
-  sheetIndexes: "Indexes",
-  sheetForeignKeys: "Foreign Keys",
-  schema: "Schema",
-  table: "Table",
-  kind: "Kind",
-  tableComment: "Table comment",
-  estimatedRows: "Estimated rows",
-  columnCount: "Column count",
-  ordinal: "#",
+const labels = {
   column: "Column",
   type: "Type",
   length: "Length",
@@ -37,11 +26,12 @@ const labels: DataDictionaryLabels = {
   onDelete: "ON DELETE",
   yes: "Yes",
   no: "No",
+  indexesHeading: "Indexes",
+  foreignKeysHeading: "Foreign keys",
+  contentsHeading: "Contents",
   kindTable: "Table",
   kindView: "View",
   kindMaterializedView: "Materialized view",
-  indexesHeading: "Indexes",
-  foreignKeysHeading: "Foreign keys",
 };
 
 function column(partial: Partial<ColumnInfo> & Pick<ColumnInfo, "name" | "data_type">): ColumnInfo {
@@ -58,11 +48,12 @@ function column(partial: Partial<ColumnInfo> & Pick<ColumnInfo, "name" | "data_t
   };
 }
 
-function docTable(partial: Partial<DocTable> & Pick<DocTable, "name">): DocTable {
+function table(partial: Partial<DictionaryTable> & Pick<DictionaryTable, "name">): DictionaryTable {
   return {
+    database: "shop",
     schema: "public",
     kind: "TABLE",
-    columns: [],
+    columns: [column({ name: "id", data_type: "integer", is_primary_key: true, is_nullable: false })],
     indexes: [],
     foreignKeys: [],
     groupId: null,
@@ -76,134 +67,189 @@ function docTable(partial: Partial<DocTable> & Pick<DocTable, "name">): DocTable
   };
 }
 
-function snapshot(tables: DocTable[]): SchemaSnapshot {
-  return {
-    formatVersion: 1,
-    project: { name: "shop", databaseType: "postgres", database: "shop", schemas: ["public"], generatedAt: "2026-09-24T00:00:00Z", note: null },
-    tables,
-    relationships: [],
-    groups: [],
-    enums: [],
-    warnings: [],
-  };
-}
-
-describe("buildDataDictionary", () => {
-  it("writes an empty dictionary with headers and no data rows", () => {
-    const document = buildDataDictionary(snapshot([]), labels, { includeViews: true, includeIndexesAndForeignKeys: true });
-
-    expect(document.sheets).toHaveLength(4);
-    expect(document.sheets.every((sheet) => sheet.rows.length === 0)).toBe(true);
-    expect(document.sheets.every((sheet) => sheet.autoFilter)).toBe(true);
-    expect(document.markdown).toBe("# shop\n");
-  });
-
-  it("fills table and column rows, and spells out length and precision", () => {
-    const document = buildDataDictionary(
-      snapshot([
-        docTable({
-          name: "orders",
-          note: "Customer orders",
-          estimatedRows: 12,
-          columns: [
-            column({ name: "id", data_type: "integer", is_nullable: false, is_primary_key: true }),
-            column({ name: "code", data_type: "varchar", character_maximum_length: 32 }),
-            column({ name: "amount", data_type: "numeric", numeric_precision: 10, numeric_scale: 2 }),
-            column({ name: "kind", data_type: "varchar(8)", character_maximum_length: 8 }),
-          ],
-        }),
-      ]),
-      labels,
-      { includeViews: true, includeIndexesAndForeignKeys: true },
-    );
-
-    expect(document.sheets[0]?.rows[0]).toEqual(["public", "orders", "Table", "Customer orders", 12, 4]);
-    expect(document.sheets[1]?.rows[1]).toEqual(["public", "orders", 2, "code", "varchar(32)", 32, null, null, "No", "Yes", "No", "", "", ""]);
-    expect(document.sheets[1]?.rows[2]?.[4]).toBe("numeric(10,2)");
-    expect(document.sheets[1]?.rows[3]?.[4]).toBe("varchar(8)");
-  });
-
-  it("prefers a local column note over the database comment", () => {
-    const document = buildDataDictionary(
-      snapshot([
-        docTable({
-          name: "orders",
-          columns: [column({ name: "status", data_type: "text", comment: "from database" })],
-          columnNotes: { status: { note: "local note", source: "LOCAL", shadowed: "from database" } },
-        }),
-      ]),
-      labels,
-      { includeViews: true, includeIndexesAndForeignKeys: false },
-    );
-
-    expect(document.sheets[1]?.rows[0]?.[13]).toBe("local note");
-    expect(document.markdown).toContain("local note");
-    expect(document.markdown).not.toContain("from database");
-  });
-
-  it("drops views and the indexes and foreign keys that belong only to them", () => {
-    const document = buildDataDictionary(
-      snapshot([
-        docTable({ name: "orders", indexes: [{ name: "orders_pkey", columns: ["id"], is_unique: true, is_primary: true, filter: null, index_type: "btree", included_columns: null, comment: null }] }),
-        docTable({
-          name: "active_orders",
-          kind: "VIEW",
-          indexes: [{ name: "view_idx", columns: ["id"], is_unique: false, is_primary: false, filter: null, index_type: null, included_columns: null, comment: null }],
-          foreignKeys: [{ name: "view_fk", column: "id", ref_table: "orders", ref_column: "id" }],
-        }),
-      ]),
-      labels,
-      { includeViews: false, includeIndexesAndForeignKeys: true },
-    );
-
-    expect(document.sheets[0]?.rows.map((row) => row[1])).toEqual(["orders"]);
-    expect(document.sheets[2]?.rows.map((row) => row[2])).toEqual(["orders_pkey"]);
-    expect(document.sheets[3]?.rows).toEqual([]);
-  });
-
-  it("omits index and foreign-key sheets when that section is off", () => {
-    const document = buildDataDictionary(snapshot([docTable({ name: "orders", indexes: [{ name: "orders_pkey", columns: ["id"], is_unique: true, is_primary: true, filter: null, index_type: null, included_columns: null, comment: null }] })]), labels, {
-      includeViews: true,
-      includeIndexesAndForeignKeys: false,
-    });
-
-    expect(document.sheets.map((sheet) => sheet.sheetName)).toEqual(["Tables", "Columns"]);
-    expect(document.markdown).not.toContain("### Indexes");
-  });
-
-  it("escapes markdown table cells and keeps sheet names within the Excel limit", () => {
-    const longLabels = { ...labels, sheetTables: "Tables / with: illegal * characters and a very long trailing name" };
-    const document = buildDataDictionary(
-      snapshot([
-        docTable({
-          name: "odd|name",
-          note: "line1\nline2",
-          columns: [column({ name: "a|b", data_type: "text", comment: "x|y" })],
-        }),
-      ]),
-      longLabels,
-      { includeViews: true, includeIndexesAndForeignKeys: true },
-    );
-
-    expect(document.sheets[0]?.sheetName.length).toBeLessThanOrEqual(DATA_DICTIONARY_SHEET_NAME_LIMIT);
-    expect(document.sheets[0]?.sheetName).not.toMatch(/[\\/?*[\]:]/);
-    expect(document.markdown).toContain("a\\|b");
-    expect(document.markdown).toContain("line1<br>line2");
-    expect(document.markdown).toContain("## public.odd\\|name");
-  });
-
-  it("builds a workbook whose bytes are an xlsx zip", () => {
-    const document = buildDataDictionary(snapshot([docTable({ name: "orders", columns: [column({ name: "id", data_type: "integer" })] })]), labels, { includeViews: true, includeIndexesAndForeignKeys: true });
-    const bytes = buildXlsxWorkbookMulti(document.sheets);
-
-    expect(String.fromCharCode(bytes[0] ?? 0, bytes[1] ?? 0)).toBe("PK");
+describe("dictionaryCatalogNames", () => {
+  it("hides internal schemas unless that schema was explicitly opened", () => {
+    const listed = ["shop", "information_schema", "performance_schema", "mysql", "sys", "public"];
+    expect(dictionaryCatalogNames(listed, "mysql")).toEqual(["shop", "public"]);
+    expect(dictionaryCatalogNames(listed, "mysql", "information_schema")).toEqual(["shop", "information_schema", "public"]);
+    expect(dictionaryCatalogNames(["public", "pg_catalog", "information_schema"], "postgres")).toEqual(["public"]);
   });
 });
 
-describe("dataDictionaryDefaultFileName", () => {
-  it("uses the database, and the schema when one is selected", () => {
-    expect(dataDictionaryDefaultFileName("shop", undefined, "xlsx")).toBe("shop-data-dictionary.xlsx");
-    expect(dataDictionaryDefaultFileName("shop", "public", "markdown")).toBe("shop-public-data-dictionary.md");
-    expect(dataDictionaryDefaultFileName("a/b", undefined, "xlsx")).toBe("a_b-data-dictionary.xlsx");
+describe("dictionary selection", () => {
+  it("checks, unchecks, and reorders objects", () => {
+    const orders = objectKey({ database: "shop", schema: "public", name: "orders" });
+    const users = objectKey({ database: "shop", schema: "public", name: "users" });
+    expect(toggleOrderedKey([], orders, true)).toEqual([orders]);
+    expect(toggleOrderedKey([orders, users], orders, false)).toEqual([users]);
+    expect(moveOrderedKey([orders, users], users, -1)).toEqual([users, orders]);
+  });
+
+  it("exports tables in the selected order", () => {
+    const orders = table({ name: "orders" });
+    const users = table({ name: "users" });
+    const ordered = orderDictionaryTables([orders, users], [objectKey(users), objectKey(orders)]);
+    expect(ordered.map((item) => item.name)).toEqual(["users", "orders"]);
+  });
+});
+
+describe("dataDictionaryFileName", () => {
+  it("appends a timestamp when requested, including on a path that was already chosen", () => {
+    const now = new Date("2026-09-24T14:05:06");
+    expect(dataDictionaryFileName("shop", false, now)).toBe("shop-data-dictionary.pdf");
+    expect(dataDictionaryFileName("a/b", true, now)).toBe("a_b-data-dictionary_20260924140506.pdf");
+    expect(resolveDictionaryExportPath("/tmp/shop.pdf", "shop-data-dictionary.pdf", true, now)).toBe("/tmp/shop_20260924140506.pdf");
+    expect(resolveDictionaryExportPath("", "shop-data-dictionary.pdf", true, now)).toBe("shop-data-dictionary_20260924140506.pdf");
+    expect(resolveDictionaryExportPath("/tmp/shop_20260924140506.pdf", "ignored.pdf", true, now)).toBe("/tmp/shop_20260924140506.pdf");
+  });
+});
+
+describe("exportBlockedBySkippedTables", () => {
+  it("stops export only when continue-on-error is off and a selected table was skipped", () => {
+    const warnings = [{ kind: "tableSkipped", table: "secret", reason: "denied" }, { kind: "tableSkipped", table: "public.secret", reason: "denied" }, { kind: "commentsUnsupported" }];
+    const selected = [{ schema: "public", name: "users" }];
+    const relevant = warningsForSelection(warnings, selected);
+    expect(exportBlockedBySkippedTables(relevant, false)).toBe(false);
+    expect(exportBlockedBySkippedTables(relevant, true)).toBe(false);
+    expect(relevant.some((warning) => warning.table?.includes("secret"))).toBe(false);
+    expect(exportBlockedBySkippedTables(warningsForSelection([{ kind: "tableSkipped", table: "public.users", reason: "denied" }], selected), false)).toBe(true);
+  });
+
+  it("keeps the collector's empty-schema skip and drops schema-wide skips for other schemas", () => {
+    const selected = [{ schema: "", name: "orders" }];
+    const kept = warningsForSelection([{ kind: "tableSkipped", table: ".orders", reason: "denied" }], selected);
+    const otherSchema = warningsForSelection([{ kind: "tableSkipped", table: "analytics.*", reason: "denied" }], selected);
+    const ownSchema = warningsForSelection([{ kind: "tableSkipped", table: ".*", reason: "denied" }], selected);
+
+    expect(exportBlockedBySkippedTables(kept, false)).toBe(true);
+    expect(kept.map((warning) => warning.table)).toEqual([".orders"]);
+    expect(exportBlockedBySkippedTables(otherSchema, false)).toBe(false);
+    expect(otherSchema).toEqual([]);
+    expect(ownSchema.map((warning) => warning.table)).toEqual([".*"]);
+  });
+});
+
+describe("applyTemplate", () => {
+  it("changes paper and sections with the template", () => {
+    const standard = applyTemplate("standard", { title: "shop", introduction: "intro", detailedIntroduction: "detail", leftFooter: "shop" });
+    const compact = applyTemplate("compact", { title: "shop", introduction: "intro", detailedIntroduction: "detail", leftFooter: "shop" });
+    expect(standard.includeCover).toBe(true);
+    expect(standard.includeIndexesAndForeignKeys).toBe(true);
+    expect(compact.includeCover).toBe(false);
+    expect(compact.includeIndexesAndForeignKeys).toBe(false);
+    expect(compact.orientation).toBe("landscape");
+  });
+});
+
+function pdfText(bytes: Uint8Array): string {
+  return new TextDecoder().decode(bytes);
+}
+
+function textAt(pdf: string, text: string): number {
+  const cjk = [...text].filter((char) => (char.codePointAt(0) ?? 0) >= 128).join("");
+  if (cjk && [...text].every((char) => (char.codePointAt(0) ?? 0) >= 128)) return pdf.indexOf(pdfUtf16Hex(cjk));
+  const literal = pdf.indexOf(`(${text.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)")})`);
+  if (literal >= 0) return literal;
+  const raw = pdf.indexOf(text);
+  return raw >= 0 && pdf[raw - 1] !== "/" ? raw : -1;
+}
+
+describe("buildDataDictionaryPdf", () => {
+  it("writes a PDF whose text includes only the chosen tables in order and omits indexes when that choice is off", () => {
+    const users = table({ name: "users" });
+    const orders = table({
+      name: "orders",
+      note: "订单",
+      indexes: [{ name: "orders_pkey", columns: ["id"], is_unique: true, is_primary: true, filter: null, index_type: "btree", included_columns: null, comment: null }],
+    });
+    const guests = table({ name: "guests" });
+    const chosen = orderDictionaryTables([users, orders, guests], [objectKey(orders), objectKey(users)]);
+    const layout = applyTemplate("compact", { title: "shop", introduction: "intro", detailedIntroduction: "detail", leftFooter: "shop" });
+    const pdf = pdfText(buildDataDictionaryPdf(chosen, labels, layout));
+
+    expect(pdf.startsWith("%PDF-1.4")).toBe(true);
+    const ordersAt = textAt(pdf, "orders");
+    const usersAt = textAt(pdf, "users");
+    expect(ordersAt).toBeGreaterThan(-1);
+    expect(usersAt).toBeGreaterThan(ordersAt);
+    expect(textAt(pdf, "订单")).toBeGreaterThan(-1);
+    expect(textAt(pdf, "orders_pkey")).toBe(-1);
+    expect(textAt(pdf, "guests")).toBe(-1);
+  });
+
+  it("changes the file when cover, contents, introduction, indexes, or paper changes", () => {
+    const orders = table({
+      name: "orders",
+      indexes: [{ name: "orders_pkey", columns: ["id"], is_unique: true, is_primary: true, filter: null, index_type: "btree", included_columns: null, comment: null }],
+    });
+    const base: DictionaryLayout = {
+      ...applyTemplate("standard", { title: "shop", introduction: "INTRO-ONLY-TEXT", detailedIntroduction: "detail", leftFooter: "shop" }),
+      subtitle: "SUBTITLE-ONLY",
+      includeIndexesAndForeignKeys: true,
+    };
+    const withChoices = pdfText(buildDataDictionaryPdf([orders], labels, base));
+    const withoutCover = pdfText(buildDataDictionaryPdf([orders], labels, { ...base, includeCover: false }));
+    const withoutContents = pdfText(buildDataDictionaryPdf([orders], labels, { ...base, includeToc: false }));
+    const withoutIntro = pdfText(buildDataDictionaryPdf([orders], labels, { ...base, includeIntroduction: false }));
+    const withoutIndexes = pdfText(buildDataDictionaryPdf([orders], labels, { ...base, includeIndexesAndForeignKeys: false }));
+    const landscape = pdfText(buildDataDictionaryPdf([orders], labels, { ...base, orientation: "landscape" }));
+
+    expect(textAt(withChoices, "SUBTITLE-ONLY")).toBeGreaterThan(-1);
+    expect(textAt(withoutCover, "SUBTITLE-ONLY")).toBe(-1);
+    expect(textAt(withChoices, labels.contentsHeading)).toBeGreaterThan(-1);
+    expect(textAt(withoutContents, labels.contentsHeading)).toBe(-1);
+    expect(textAt(withChoices, "INTRO-ONLY-TEXT")).toBeGreaterThan(-1);
+    expect(textAt(withoutIntro, "INTRO-ONLY-TEXT")).toBe(-1);
+    expect(textAt(withChoices, "orders_pkey")).toBeGreaterThan(-1);
+    expect(textAt(withoutIndexes, "orders_pkey")).toBe(-1);
+    expect(withChoices).toContain("/MediaBox [0 0 595.28 841.89]");
+    expect(landscape).toContain("/MediaBox [0 0 841.89 595.28]");
+  });
+
+  it("does not abort or name an unselected skipped table when the snapshot warned about it", () => {
+    const users = table({ name: "users", schema: "public" });
+    const orders = table({ name: "orders", schema: "public" });
+    const selected = orderDictionaryTables([users, orders], [objectKey(users)]);
+    const warnings = warningsForSelection(
+      [
+        { kind: "tableSkipped", table: "secret", reason: "denied" },
+        { kind: "tableSkipped", table: "public.secret", reason: "denied" },
+      ],
+      selected,
+    );
+    expect(exportBlockedBySkippedTables(warnings, false)).toBe(false);
+    const pdf = pdfText(
+      buildDataDictionaryPdf(
+        selected,
+        labels,
+        applyTemplate("compact", { title: "shop", introduction: "intro", detailedIntroduction: "detail", leftFooter: "shop" }),
+        warnings.map((warning) => `${warning.table}: ${warning.reason}`),
+      ),
+    );
+    expect(textAt(pdf, "users")).toBeGreaterThan(-1);
+    expect(textAt(pdf, "secret")).toBe(-1);
+    expect(textAt(pdf, "orders")).toBe(-1);
+  });
+
+  it("names a selected empty-schema skip in the PDF and omits another schema's skip", () => {
+    const orders = table({ name: "orders", schema: "" });
+    const selected = [{ schema: "", name: "orders" }];
+    const warnings = warningsForSelection(
+      [
+        { kind: "tableSkipped", table: ".orders", reason: "denied" },
+        { kind: "tableSkipped", table: "analytics.*", reason: "denied" },
+      ],
+      selected,
+    );
+    const pdf = pdfText(
+      buildDataDictionaryPdf(
+        [orders],
+        labels,
+        applyTemplate("compact", { title: "shop", introduction: "intro", detailedIntroduction: "detail", leftFooter: "shop" }),
+        warnings.map((warning) => `${warning.table}: ${warning.reason}`),
+      ),
+    );
+    expect(textAt(pdf, ".orders")).toBeGreaterThan(-1);
+    expect(textAt(pdf, "analytics.*")).toBe(-1);
   });
 });

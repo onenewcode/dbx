@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
-import { Download, FileSpreadsheet, Network } from "@lucide/vue";
+import { Download, FileText, Network } from "@lucide/vue";
 import DataDictionaryDialog from "@/components/docs/DataDictionaryDialog.vue";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -221,7 +221,7 @@ watch(
             {{ t("docs.openDiagram") }}
           </Button>
           <Button v-if="snapshot" variant="outline" size="sm" @click="showDataDictionary = true">
-            <FileSpreadsheet class="w-4 h-4" />
+            <FileText class="w-4 h-4" />
             {{ t("dataDictionary.title") }}
           </Button>
           <Button v-if="snapshot" variant="outline" size="sm" :disabled="exporting" @click="exportHtml()">

@@ -1,20 +1,12 @@
-import type { XlsxCellValue, XlsxWorksheetData } from "@/lib/export/xlsxExport";
-import type { ColumnInfo, DocTable, SchemaSnapshot } from "@/docs/types";
+import type { ColumnInfo, DocTable, TableKind } from "@/docs/types";
+import type { DatabaseType } from "@/types/database";
+import { isSystemDatabaseName, isSystemSchemaName } from "@/lib/database/visibleDatabases";
 
-export const DATA_DICTIONARY_SHEET_NAME_LIMIT = 31;
+export type DictionaryPaper = "A4" | "A3" | "Letter" | "Legal";
+export type DictionaryOrientation = "portrait" | "landscape";
+export type DictionaryTemplateId = "standard" | "detailed" | "compact" | "catalog" | "reference";
 
 export interface DataDictionaryLabels {
-  sheetTables: string;
-  sheetColumns: string;
-  sheetIndexes: string;
-  sheetForeignKeys: string;
-  schema: string;
-  table: string;
-  kind: string;
-  tableComment: string;
-  estimatedRows: string;
-  columnCount: string;
-  ordinal: string;
   column: string;
   type: string;
   length: string;
@@ -37,204 +29,197 @@ export interface DataDictionaryLabels {
   onDelete: string;
   yes: string;
   no: string;
+  indexesHeading: string;
+  foreignKeysHeading: string;
+  contentsHeading: string;
   kindTable: string;
   kindView: string;
   kindMaterializedView: string;
-  indexesHeading: string;
-  foreignKeysHeading: string;
 }
 
-export interface DataDictionaryOptions {
-  includeViews: boolean;
+export interface DictionaryLayout {
+  includeCover: boolean;
+  header: string;
+  title: string;
+  subtitle: string;
+  remarks: string;
+  coverFooter: string;
+  includeToc: boolean;
+  includeBreadcrumbs: boolean;
+  includeLeftFooter: boolean;
+  leftFooter: string;
+  includePageNumber: boolean;
+  includeIntroduction: boolean;
+  introduction: string;
+  paper: DictionaryPaper;
+  orientation: DictionaryOrientation;
+  marginCm: number;
+  headingSize: number;
+  bodySize: number;
   includeIndexesAndForeignKeys: boolean;
 }
 
-export interface DataDictionaryDocument {
-  sheets: XlsxWorksheetData[];
-  markdown: string;
+export interface DictionaryObjectRef {
+  database: string;
+  schema: string;
+  name: string;
+  kind: TableKind;
 }
 
-export function dataDictionaryDefaultFileName(database: string, schema: string | undefined, format: "xlsx" | "markdown"): string {
-  const safe = (value: string) => value.replace(/[\\/:*?"<>|]/g, "_").trim() || "database";
-  const base = schema ? `${safe(database)}-${safe(schema)}` : safe(database);
-  return `${base}-data-dictionary.${format === "xlsx" ? "xlsx" : "md"}`;
+export interface DictionaryProfile {
+  version: 1;
+  databases: string[];
+  schemas: Array<{ database: string; name: string }>;
+  objects: Array<{ database: string; schema: string; name: string }>;
+  layout: DictionaryLayout;
+  appendTimestamp: boolean;
+  overwrite: boolean;
+  continueOnError: boolean;
+  fileName: string;
 }
 
-export function sheetNameForDictionary(value: string): string {
-  const cleaned = [...value]
-    .map((char) => ("[]:*?/\\".includes(char) ? " " : char))
-    .join("")
-    .trim();
-  const name = cleaned || "Sheet";
-  return [...name].slice(0, DATA_DICTIONARY_SHEET_NAME_LIMIT).join("");
+export interface DictionaryTable extends DocTable {
+  database: string;
 }
 
-export function buildDataDictionary(snapshot: SchemaSnapshot, labels: DataDictionaryLabels, options: DataDictionaryOptions): DataDictionaryDocument {
-  const tables = snapshot.tables.filter((table) => options.includeViews || table.kind === "TABLE");
-  const sheets: XlsxWorksheetData[] = [tablesSheet(tables, labels), columnsSheet(tables, labels)];
-  if (options.includeIndexesAndForeignKeys) {
-    sheets.push(indexesSheet(tables, labels), foreignKeysSheet(tables, labels));
-  }
-  return { sheets, markdown: markdownDocument(snapshot.project.name, tables, labels, options.includeIndexesAndForeignKeys) };
+const TEMPLATES: Record<DictionaryTemplateId, Omit<DictionaryLayout, "header" | "title" | "subtitle" | "remarks" | "coverFooter" | "leftFooter" | "introduction">> = {
+  standard: { includeCover: true, includeToc: true, includeBreadcrumbs: true, includeLeftFooter: true, includePageNumber: true, includeIntroduction: true, paper: "A4", orientation: "portrait", marginCm: 1.5, headingSize: 16, bodySize: 9, includeIndexesAndForeignKeys: true },
+  detailed: { includeCover: true, includeToc: true, includeBreadcrumbs: true, includeLeftFooter: true, includePageNumber: true, includeIntroduction: true, paper: "A4", orientation: "landscape", marginCm: 1.5, headingSize: 18, bodySize: 9, includeIndexesAndForeignKeys: true },
+  compact: { includeCover: false, includeToc: false, includeBreadcrumbs: true, includeLeftFooter: false, includePageNumber: true, includeIntroduction: false, paper: "A4", orientation: "landscape", marginCm: 1, headingSize: 14, bodySize: 8, includeIndexesAndForeignKeys: false },
+  catalog: { includeCover: true, includeToc: true, includeBreadcrumbs: false, includeLeftFooter: true, includePageNumber: true, includeIntroduction: false, paper: "A4", orientation: "portrait", marginCm: 1.5, headingSize: 16, bodySize: 9, includeIndexesAndForeignKeys: false },
+  reference: { includeCover: false, includeToc: true, includeBreadcrumbs: true, includeLeftFooter: true, includePageNumber: true, includeIntroduction: false, paper: "A3", orientation: "landscape", marginCm: 1.2, headingSize: 14, bodySize: 8, includeIndexesAndForeignKeys: true },
+};
+
+const INTERNAL_DICTIONARY_NAMES = new Set(["information_schema", "performance_schema", "mysql", "sys", "pg_catalog", "pg_toast"]);
+
+export function isInternalDictionaryName(databaseType: DatabaseType | undefined, name: string): boolean {
+  const normalized = name.trim().toLowerCase();
+  if (!normalized) return false;
+  if (INTERNAL_DICTIONARY_NAMES.has(normalized) || normalized.startsWith("pg_toast") || normalized.startsWith("pg_temp_")) return true;
+  return isSystemDatabaseName(databaseType, name) || isSystemSchemaName(databaseType, name);
 }
 
-function tablesSheet(tables: DocTable[], labels: DataDictionaryLabels): XlsxWorksheetData {
+export function dictionaryCatalogNames(names: string[], databaseType: DatabaseType | undefined, pinned?: string): string[] {
+  return names.filter((name) => name === pinned || !isInternalDictionaryName(databaseType, name));
+}
+
+export function objectKey(ref: { database: string; schema: string; name: string }): string {
+  return `${ref.database}\u0000${ref.schema}\u0000${ref.name}`;
+}
+
+export function tableKindFrom(tableType: string): TableKind {
+  const normalized = tableType.trim().toUpperCase().replaceAll("_", " ");
+  if (normalized.includes("MATERIALIZED")) return "MATERIALIZED_VIEW";
+  if (normalized.includes("VIEW")) return "VIEW";
+  return "TABLE";
+}
+
+export function applyTemplate(id: DictionaryTemplateId, context: { title: string; introduction: string; detailedIntroduction: string; leftFooter: string }): DictionaryLayout {
+  const preset = TEMPLATES[id];
   return {
-    sheetName: sheetNameForDictionary(labels.sheetTables),
-    autoFilter: true,
-    columns: [labels.schema, labels.table, labels.kind, labels.tableComment, labels.estimatedRows, labels.columnCount],
-    rows: tables.map((table) => [table.schema ?? "", table.name, kindLabel(table, labels), table.note ?? "", table.estimatedRows, table.columns.length]),
+    ...preset,
+    header: context.title,
+    title: context.title,
+    subtitle: "",
+    remarks: "",
+    coverFooter: "",
+    leftFooter: context.leftFooter,
+    introduction: id === "detailed" ? context.detailedIntroduction : context.introduction,
   };
 }
 
-function columnsSheet(tables: DocTable[], labels: DataDictionaryLabels): XlsxWorksheetData {
-  const rows: XlsxCellValue[][] = [];
-  for (const table of tables) {
-    table.columns.forEach((column, index) => {
-      rows.push([
-        table.schema ?? "",
-        table.name,
-        index + 1,
-        column.name,
-        typeLabel(column),
-        column.character_maximum_length,
-        column.numeric_precision,
-        column.numeric_scale,
-        yesNo(column.is_primary_key, labels),
-        yesNo(column.is_nullable, labels),
-        yesNo(columnIsUnique(column), labels),
-        column.column_default ?? "",
-        column.extra ?? "",
-        columnComment(table, column),
-      ]);
-    });
-  }
-  return {
-    sheetName: sheetNameForDictionary(labels.sheetColumns),
-    autoFilter: true,
-    columns: [labels.schema, labels.table, labels.ordinal, labels.column, labels.type, labels.length, labels.precision, labels.scale, labels.primaryKey, labels.nullable, labels.unique, labels.defaultValue, labels.extra, labels.comment],
-    rows,
-  };
+export function toggleOrderedKey(order: string[], key: string, checked: boolean): string[] {
+  const without = order.filter((item) => item !== key);
+  return checked ? [...without, key] : without;
 }
 
-function indexesSheet(tables: DocTable[], labels: DataDictionaryLabels): XlsxWorksheetData {
-  const rows: XlsxCellValue[][] = [];
-  for (const table of tables) {
-    for (const index of table.indexes) {
-      rows.push([table.schema ?? "", table.name, index.name, index.columns.join(", "), yesNo(index.is_unique, labels), yesNo(index.is_primary, labels), index.index_type ?? "", index.comment ?? ""]);
-    }
-  }
-  return {
-    sheetName: sheetNameForDictionary(labels.sheetIndexes),
-    autoFilter: true,
-    columns: [labels.schema, labels.table, labels.indexName, labels.indexColumns, labels.unique, labels.primaryKey, labels.indexType, labels.comment],
-    rows,
-  };
+export function moveOrderedKey(order: string[], key: string, direction: -1 | 1): string[] {
+  const index = order.indexOf(key);
+  const next = index + direction;
+  if (index < 0 || next < 0 || next >= order.length) return order;
+  const copy = order.slice();
+  const [item] = copy.splice(index, 1);
+  copy.splice(next, 0, item!);
+  return copy;
 }
 
-function foreignKeysSheet(tables: DocTable[], labels: DataDictionaryLabels): XlsxWorksheetData {
-  const rows: XlsxCellValue[][] = [];
-  for (const table of tables) {
-    for (const key of table.foreignKeys) {
-      rows.push([table.schema ?? "", table.name, key.name, key.column, key.ref_schema ?? "", key.ref_table, key.ref_column, key.on_update ?? "", key.on_delete ?? ""]);
-    }
-  }
-  return {
-    sheetName: sheetNameForDictionary(labels.sheetForeignKeys),
-    autoFilter: true,
-    columns: [labels.schema, labels.table, labels.constraintName, labels.column, labels.refSchema, labels.refTable, labels.refColumn, labels.onUpdate, labels.onDelete],
-    rows,
-  };
+export function orderDictionaryTables(tables: DictionaryTable[], keys: string[]): DictionaryTable[] {
+  const byKey = new Map(tables.map((table) => [objectKey({ database: table.database, schema: table.schema ?? "", name: table.name }), table]));
+  return keys.flatMap((key) => {
+    const table = byKey.get(key);
+    return table ? [table] : [];
+  });
 }
 
-function markdownDocument(projectName: string, tables: DocTable[], labels: DataDictionaryLabels, includeIndexesAndForeignKeys: boolean): string {
-  const parts = [`# ${markdownCell(projectName) || "data-dictionary"}`];
-  for (const table of tables) {
-    const lines = [`## ${markdownCell(qualifiedName(table))}`];
-    if (table.note) lines.push("", markdownCell(table.note));
-    lines.push(
-      "",
-      markdownTable(
-        [labels.column, labels.type, labels.length, labels.precision, labels.scale, labels.primaryKey, labels.nullable, labels.unique, labels.defaultValue, labels.extra, labels.comment],
-        table.columns.map((column) => [
-          column.name,
-          typeLabel(column),
-          column.character_maximum_length,
-          column.numeric_precision,
-          column.numeric_scale,
-          yesNo(column.is_primary_key, labels),
-          yesNo(column.is_nullable, labels),
-          yesNo(columnIsUnique(column), labels),
-          column.column_default ?? "",
-          column.extra ?? "",
-          columnComment(table, column),
-        ]),
-      ),
-    );
-    if (includeIndexesAndForeignKeys && table.indexes.length > 0) {
-      lines.push(
-        "",
-        `### ${labels.indexesHeading}`,
-        "",
-        markdownTable(
-          [labels.indexName, labels.indexColumns, labels.unique, labels.primaryKey, labels.indexType, labels.comment],
-          table.indexes.map((index) => [index.name, index.columns.join(", "), yesNo(index.is_unique, labels), yesNo(index.is_primary, labels), index.index_type ?? "", index.comment ?? ""]),
-        ),
-      );
-    }
-    if (includeIndexesAndForeignKeys && table.foreignKeys.length > 0) {
-      lines.push(
-        "",
-        `### ${labels.foreignKeysHeading}`,
-        "",
-        markdownTable(
-          [labels.constraintName, labels.column, labels.refSchema, labels.refTable, labels.refColumn, labels.onUpdate, labels.onDelete],
-          table.foreignKeys.map((key) => [key.name, key.column, key.ref_schema ?? "", key.ref_table, key.ref_column, key.on_update ?? "", key.on_delete ?? ""]),
-        ),
-      );
-    }
-    parts.push(lines.join("\n"));
-  }
-  return `${parts.join("\n\n")}\n`;
+export function dictionaryTimestamp(now = new Date()): string {
+  return `${now.getFullYear()}${String(now.getMonth() + 1).padStart(2, "0")}${String(now.getDate()).padStart(2, "0")}${String(now.getHours()).padStart(2, "0")}${String(now.getMinutes()).padStart(2, "0")}${String(now.getSeconds()).padStart(2, "0")}`;
 }
 
-function markdownTable(headers: string[], rows: unknown[][]): string {
-  const head = `| ${headers.map(markdownCell).join(" | ")} |`;
-  const rule = `| ${headers.map(() => "---").join(" | ")} |`;
-  const body = rows.map((row) => `| ${row.map(markdownCell).join(" | ")} |`);
-  return [head, rule, ...body].join("\n");
+export function appendTimestampToFileName(path: string, now = new Date()): string {
+  const stamp = dictionaryTimestamp(now);
+  const slash = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  const dir = slash >= 0 ? path.slice(0, slash + 1) : "";
+  const base = slash >= 0 ? path.slice(slash + 1) : path;
+  const extIndex = base.toLowerCase().endsWith(".pdf") ? base.length - 4 : -1;
+  const stem = extIndex >= 0 ? base.slice(0, extIndex) : base;
+  const ext = extIndex >= 0 ? base.slice(extIndex) : ".pdf";
+  if (/_\d{14}$/.test(stem)) return `${dir}${stem}${ext}`;
+  return `${dir}${stem}_${stamp}${ext}`;
 }
 
-function markdownCell(value: unknown): string {
-  return value === null || value === undefined ? "" : String(value).replace(/\|/g, "\\|").replace(/\r?\n/g, "<br>").trim();
+export function dataDictionaryFileName(database: string, appendTimestamp: boolean, now = new Date()): string {
+  const safe = database.replace(/[\\/:*?"<>|]/g, "_").trim() || "DataDictionary";
+  const name = `${safe}-data-dictionary.pdf`;
+  return appendTimestamp ? appendTimestampToFileName(name, now) : name;
 }
 
-function qualifiedName(table: DocTable): string {
-  return table.schema ? `${table.schema}.${table.name}` : table.name;
+/** Apply the timestamp choice to either a typed/browsed path or the fallback name. */
+export function resolveDictionaryExportPath(existingPath: string, fallbackName: string, appendTimestamp: boolean, now = new Date()): string {
+  const chosen = existingPath.trim();
+  const name = chosen || fallbackName;
+  return appendTimestamp ? appendTimestampToFileName(name, now) : name;
 }
 
-function kindLabel(table: DocTable, labels: DataDictionaryLabels): string {
-  if (table.kind === "VIEW") return labels.kindView;
-  if (table.kind === "MATERIALIZED_VIEW") return labels.kindMaterializedView;
-  return labels.kindTable;
+export function exportBlockedBySkippedTables(warnings: Array<{ kind: string }>, continueOnError: boolean): boolean {
+  return !continueOnError && warnings.some((warning) => warning.kind === "tableSkipped");
 }
 
-function yesNo(value: boolean, labels: DataDictionaryLabels): string {
-  return value ? labels.yes : labels.no;
+function warningNamesSelectedTable(table: string, schema: string, name: string): boolean {
+  if (table === name) return true;
+  // Collector formats skips as `{schema}.{table}`, so an empty schema is `.orders`.
+  return table === `${schema}.${name}`;
 }
 
-function columnIsUnique(column: ColumnInfo): boolean {
-  return (column as ColumnInfo & { is_unique?: boolean }).is_unique === true;
+function schemaWideSkipMatches(table: string, selected: ReadonlyArray<{ schema?: string | null }>): boolean {
+  if (table === "*") return true;
+  if (!table.endsWith(".*")) return false;
+  const schema = table.slice(0, -2);
+  return selected.some((item) => (item.schema ?? "") === schema);
 }
 
-function columnComment(table: DocTable, column: ColumnInfo): string {
+/** Drop skip warnings that do not name a selected object or that object's schema. */
+export function warningsForSelection<T extends { kind: string; table?: string }>(warnings: T[], selected: ReadonlyArray<{ schema?: string | null; name: string }>): T[] {
+  return warnings.filter((warning) => {
+    const table = warning.table;
+    if (!table) return true;
+    if (table === "*" || table.endsWith(".*")) return schemaWideSkipMatches(table, selected);
+    return selected.some((item) => warningNamesSelectedTable(table, item.schema ?? "", item.name));
+  });
+}
+
+export function isDictionaryProfile(value: unknown): value is DictionaryProfile {
+  if (!value || typeof value !== "object") return false;
+  const profile = value as Partial<DictionaryProfile>;
+  return profile.version === 1 && Array.isArray(profile.databases) && Array.isArray(profile.objects) && !!profile.layout && typeof profile.fileName === "string";
+}
+
+export function columnComment(table: DocTable, column: ColumnInfo): string {
   const note = table.columnNotes[column.name]?.note;
   if (note && note.trim() !== "") return note;
   return column.comment ?? "";
 }
 
-/** Match the documentation viewer: keep a spelled-out type, otherwise attach length or precision. */
-function typeLabel(column: ColumnInfo): string {
+export function typeLabel(column: ColumnInfo): string {
   const base = column.data_type.trim();
   if (base.includes("(")) return base;
   if (column.character_maximum_length !== null) return `${base}(${column.character_maximum_length})`;
@@ -243,4 +228,9 @@ function typeLabel(column: ColumnInfo): string {
     return `${base}(${column.numeric_precision}${scale})`;
   }
   return base;
+}
+
+export function qualifiedObjectName(table: Pick<DictionaryTable, "database" | "schema" | "name">): string {
+  const schema = table.schema ? `${table.schema}.` : "";
+  return table.database ? `${table.database}.${schema}${table.name}` : `${schema}${table.name}`;
 }
