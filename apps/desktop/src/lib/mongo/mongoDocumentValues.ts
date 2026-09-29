@@ -209,7 +209,11 @@ function mongoShellDateWrapperDisplayText(inner: unknown): string | undefined {
     const long = (inner as Record<string, unknown>).$numberLong;
     if (typeof long === "string" && /^-?\d+$/.test(long)) {
       const millis = Number(long);
-      if (Number.isFinite(millis)) return `ISODate(${JSON.stringify(new Date(millis).toISOString())})`;
+      // Dates beyond the JS Date range cannot round-trip through toISOString();
+      // fall back to the raw wrapper instead of throwing past the grid formatter.
+      if (Number.isFinite(millis) && Math.abs(millis) <= 8.64e15) {
+        return `ISODate(${JSON.stringify(new Date(millis).toISOString())})`;
+      }
     }
   }
   return undefined;

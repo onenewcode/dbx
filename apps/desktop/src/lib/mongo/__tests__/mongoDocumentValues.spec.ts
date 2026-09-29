@@ -81,4 +81,9 @@ describe("MongoDB array structure display", () => {
     expect(mongoDocumentGridClipboardText(value)).toBe(rawJson);
     expect(mongoDocumentGridExternalValue(value)).toBe(rawJson);
   });
+
+  it("renders out-of-range canonical dates as the raw wrapper instead of throwing", () => {
+    const value = mongoDocumentGridValue({ d: { $date: { $numberLong: "9223372036854775807" } } });
+    expect(mongoDocumentGridDisplayText(value)).toBe('{"d": {"$date": NumberLong("9223372036854775807")}}');
+  });
 });
