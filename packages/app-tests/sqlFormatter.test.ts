@@ -43,6 +43,7 @@ test("aligns explicit SELECT aliases to the widest expression", async () => {
     formatted,
     "SELECT bh.id         AS unique_value,\n       bh.title      AS title,\n       bh.house_type AS type\nFROM biz_house bh",
   );
+  assert.equal(await formatSqlText(formatted, "mysql"), formatted);
 });
 
 test("collapses a single-field statement that fits on one line", async () => {
