@@ -188,7 +188,7 @@ describe("sql layout", () => {
 
   it("keeps nested and simple CASE expressions compact", async () => {
     const sql = "SELECT SUM(CASE WHEN a = 1 AND b = 2 THEN 1 ELSE 0 END) AS total, CASE a WHEN 1 THEN CASE b WHEN 2 THEN 'x  y' END ELSE 'other' END AS label FROM t;";
-    const expected = lines("SELECT SUM(CASE WHEN a = 1 AND b = 2 THEN 1 ELSE 0 END) AS total,", "       CASE a WHEN 1 THEN CASE b WHEN 2 THEN 'x  y' END ELSE 'other' END AS label", "FROM t;");
+    const expected = lines("SELECT SUM(CASE WHEN a = 1 AND b = 2 THEN 1 ELSE 0 END)                  AS total,", "       CASE a WHEN 1 THEN CASE b WHEN 2 THEN 'x  y' END ELSE 'other' END AS label", "FROM t;");
     expect(await format(sql)).toBe(expected);
     expect(await format(expected)).toBe(expected);
   });
