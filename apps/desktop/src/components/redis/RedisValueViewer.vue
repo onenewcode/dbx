@@ -65,6 +65,7 @@ import {
 import { decompressRedisValue, decodeBase64RedisValue, decodePickle, decodeProtobuf, isGzipMagic, type RedisDecompressAlgorithm } from "@/lib/redis/codec";
 import { canFullHighlightRedisText, findRedisTextMatches, nextRedisSearchMatchIndex, REDIS_VALUE_SEARCH_MATCH_LIMIT, renderRedisTextSearchHtml, redisValueSearchStatus } from "@/lib/redis/redisValueSearch";
 import TextContentSearchBar from "@/components/common/TextContentSearchBar.vue";
+import TextContentTextarea from "@/components/common/TextContentTextarea.vue";
 import RedisHorizontalScrollbar from "@/components/redis/RedisHorizontalScrollbar.vue";
 import { decodeJsonUnicodeEscapes, formatJsonSource, mapDisplayToRaw } from "@/lib/common/safeJsonFormat";
 import { unixSecondsToCalendarDateTime } from "@/components/ui/date-time-picker/dateTimePicker";
@@ -419,11 +420,12 @@ let collectionBrowseSnapshot: { items: RedisCollectionItem[]; cursor: number | u
 let collectionSearchIntentRevision = 0;
 const valueSearchBarRef = ref<{ focusInput: (select?: boolean) => void } | null>(null);
 type JsonEditorHandle = { openSearch: () => boolean; selectRange?: (from: number, to: number, options?: { focus?: boolean }) => boolean };
+type TextContentTextareaHandle = { focus: () => void; selectRange: (from: number, to: number, options?: { focus?: boolean }) => boolean };
 const stringJsonEditorRef = ref<JsonEditorHandle | null>(null);
 const redisJsonEditorRef = ref<JsonEditorHandle | null>(null);
 const memberJsonEditorRef = ref<JsonEditorHandle | null>(null);
-const stringTextareaRef = ref<HTMLTextAreaElement | null>(null);
-const memberTextareaRef = ref<HTMLTextAreaElement | null>(null);
+const stringTextareaRef = ref<TextContentTextareaHandle | null>(null);
+const memberTextareaRef = ref<TextContentTextareaHandle | null>(null);
 const valueViewerSearchActive = ref(false);
 
 function toggleHashSort(column: "field" | "value") {
@@ -2740,14 +2742,6 @@ function activateValueSearchMatch(delta: -1 | 1) {
   moveContentSearchMatch(delta);
 }
 
-/** Scroll value body to the active match without stealing focus from the find input. */
-function scrollTextareaToMatch(textarea: HTMLTextAreaElement, match: { start: number; end: number }) {
-  const lineHeight = Number.parseFloat(getComputedStyle(textarea).lineHeight || "20") || 20;
-  const textBefore = textarea.value.slice(0, match.start);
-  const line = textBefore.split("\n").length - 1;
-  textarea.scrollTop = Math.max(0, line * lineHeight - textarea.clientHeight / 3);
-}
-
 /**
  * Never focus the value body here — the find panel must keep the caret so typing stays in the search box.
  * Enter / prev / next only change the active match index and scroll the body into view.
@@ -2760,21 +2754,16 @@ async function scrollContentSearchMatchIntoView() {
   // CM: update selection + scroll, but do not focus (keeps find input active).
   if (showMemberDetail.value) {
     if (usesJsonEditorForMember.value && memberJsonEditorRef.value?.selectRange?.(match.start, match.end, { focus: false })) return;
-    if (isEditingMember.value && memberTextareaRef.value) {
-      scrollTextareaToMatch(memberTextareaRef.value, match);
-      return;
-    }
+    if (isEditingMember.value && memberTextareaRef.value?.selectRange(match.start, match.end, { focus: false })) return;
   } else if (redisKind.value === "json") {
     if (redisJsonEditorRef.value?.selectRange?.(match.start, match.end, { focus: false })) return;
   } else {
     if (usesJsonEditorForMain.value && stringJsonEditorRef.value?.selectRange?.(match.start, match.end, { focus: false })) return;
-    if (stringValueView.value === "utf8" && canEditCurrentStringFormat.value && stringTextareaRef.value) {
-      scrollTextareaToMatch(stringTextareaRef.value, match);
-      return;
-    }
+    if (stringValueView.value === "utf8" && canEditCurrentStringFormat.value && stringTextareaRef.value?.selectRange(match.start, match.end, { focus: false })) return;
   }
 
-  document.querySelector<HTMLElement>('[data-document-search-active="true"]')?.scrollIntoView({ block: "center", inline: "nearest" });
+  const searchRoot = showMemberDetail.value ? document.querySelector<HTMLElement>("[data-redis-member-detail]") : document.querySelector<HTMLElement>("[data-redis-value-viewer]");
+  searchRoot?.querySelector<HTMLElement>('[data-document-search-active="true"]')?.scrollIntoView({ block: "center", inline: "nearest" });
 }
 
 /** Ctrl/Cmd+F on STRING body or member detail → floating find. */
@@ -3118,14 +3107,17 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
             </div>
           </template>
         </div>
-        <textarea
+        <TextContentTextarea
           v-else-if="stringValueView === 'utf8' && canEditCurrentStringFormat && stringValueCodec === 'none'"
           ref="stringTextareaRef"
           v-model="editValue"
-          class="dbx-editor-font-family flex-1 resize-none bg-background p-4 text-sm outline-none"
-          :class="redisJsonWordWrap ? 'whitespace-pre-wrap break-words' : 'whitespace-pre'"
+          class="flex-1"
+          content-class="dbx-editor-font-family text-sm"
+          textarea-class="p-4"
+          :word-wrap="redisJsonWordWrap"
+          :highlight="canHighlightStringSurface"
+          :highlighted-html="contentSearchHighlightedHtml"
           :readonly="!canEditCurrentStringFormat || savingString"
-          spellcheck="false"
         />
         <pre v-else-if="canHighlightStringSurface" class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6" :class="detailTextClass(stringValueView)" v-html="contentSearchHighlightedHtml" />
         <pre v-else class="dbx-editor-font-family min-h-0 w-full min-w-0 max-w-full flex-1 overflow-auto bg-background p-4 text-sm leading-6" :class="detailTextClass(stringValueView)">{{ detailTextForFormat(stringValueDetail, stringValueView) }}</pre>
@@ -3808,7 +3800,17 @@ useUpdateBlocker(() => (hasUnsavedRedisDraft.value || editingTtl.value || saving
           </DialogTitle>
         </DialogHeader>
         <template v-if="isEditingMember">
-          <textarea ref="memberTextareaRef" data-redis-member-utf8-editor v-model="memberEditValue" class="dbx-editor-font-family min-h-0 flex-1 resize-none bg-background p-5 text-[13px] leading-6 outline-none" :readonly="savingMember" spellcheck="false" />
+          <TextContentTextarea
+            ref="memberTextareaRef"
+            v-model="memberEditValue"
+            class="min-h-0 flex-1"
+            content-class="dbx-editor-font-family text-[13px] leading-6"
+            textarea-class="p-5"
+            :input-attrs="{ 'data-redis-member-utf8-editor': '' }"
+            :highlight="canHighlightMemberSurface"
+            :highlighted-html="contentSearchHighlightedHtml"
+            :readonly="savingMember"
+          />
         </template>
         <template v-else>
           <div class="flex h-9 items-center gap-2 border-b px-5 text-xs">
