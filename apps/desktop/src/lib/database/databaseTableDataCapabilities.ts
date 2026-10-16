@@ -96,6 +96,16 @@ const DATABASE_CAPABILITY_OVERRIDES: Partial<Record<DatabaseType, Partial<Databa
     // CTID is injected only by base-table data previews; it is not a schema key.
     syntheticKey: "postgres-ctid",
   },
+  duckdb: {
+    tableData: {
+      insert: true,
+      updateRequiresPrimaryKey: false,
+      deleteRequiresPrimaryKey: false,
+      keylessRowPredicate: true,
+      requiresTransactionalTableForExistingRows: false,
+      transaction: false,
+    },
+  },
   kyuubi: {
     tableData: {
       insert: false,
