@@ -70,16 +70,21 @@ describe("tableEditing", () => {
     const columns = [column("ID"), column("VALUE")];
     expect(editablePrimaryKeys("postgres", columns, "TABLE")).toEqual([]);
     expect(shouldIncludeSyntheticRowId("postgres", [], "TABLE")).toBe(true);
+    // The sidebar's listTables path reports relkind 'r' as `BASE TABLE`.
+    expect(shouldIncludeSyntheticRowId("postgres", [], "BASE TABLE")).toBe(true);
     expect(shouldIncludeSyntheticRowId("postgres", ["ID"], "TABLE")).toBe(false);
     expect(shouldIncludeSyntheticRowId("postgres", [], "PARTITIONED TABLE")).toBe(false);
     expect(shouldIncludeSyntheticRowId("postgres", [], "VIEW")).toBe(false);
     expect(shouldIncludeSyntheticRowId("postgres", [])).toBe(false);
     expect(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN], "TABLE")).toBe(true);
+    expect(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN], "BASE TABLE")).toBe(true);
     expect(usesSyntheticRowIdKey("postgres", [DBX_ROWID_COLUMN], "PARTITIONED TABLE")).toBe(false);
     expect(isHiddenGridColumn("postgres", DBX_ROWID_COLUMN, [], "TABLE")).toBe(true);
+    expect(isHiddenGridColumn("postgres", DBX_ROWID_COLUMN, [], "BASE TABLE")).toBe(true);
     // The "no stable row identifier" badge must not contradict a preview that
     // addresses the selected row through a hidden physical locator.
     expect(showsKeylessEditWarning("postgres", [], "TABLE")).toBe(false);
+    expect(showsKeylessEditWarning("postgres", [], "BASE TABLE")).toBe(false);
     expect(showsKeylessEditWarning("postgres", ["ID"], "TABLE")).toBe(false);
     expect(showsKeylessEditWarning("postgres", [], "VIEW")).toBe(true);
     expect(showsKeylessEditWarning("mysql", [], "TABLE")).toBe(true);

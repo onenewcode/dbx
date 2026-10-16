@@ -1311,6 +1311,14 @@ fn selects_hidden_postgres_tuple_identity_only_for_known_unkeyed_base_tables() {
         "SELECT tableoid::text || ':' || ctid::text || ':' || xmin::text AS \"__DBX_ROWID\", * FROM \"public\".\"duplicate_rows\" LIMIT 20;"
     );
 
+    // The sidebar's `listTables` path spells relkind 'r' as `BASE TABLE`; the
+    // locator must be injected for that spelling too.
+    let base_table_spelling = build_table_data_select_sql(TableDataSelectSqlOptions {
+        table_type: Some("BASE TABLE".to_string()),
+        ..base.clone()
+    });
+    assert!(base_table_spelling.contains("ctid"), "BASE TABLE must receive the locator: {base_table_spelling}");
+
     for table_type in ["PARTITIONED TABLE", "FOREIGN TABLE", "VIEW"] {
         let sql = build_table_data_select_sql(TableDataSelectSqlOptions {
             table_type: Some(table_type.to_string()),

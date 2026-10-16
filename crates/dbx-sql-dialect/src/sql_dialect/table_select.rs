@@ -613,7 +613,14 @@ fn is_oracle_base_table_type(table_type: Option<&str>) -> bool {
 }
 
 fn is_postgres_base_table_type(table_type: Option<&str>) -> bool {
-    table_type.is_some_and(|value| value.trim().eq_ignore_ascii_case("TABLE"))
+    // The PostgreSQL driver reports `relkind = 'r'` as the information-schema
+    // spelling `BASE TABLE`, while other metadata paths (and the hand-written
+    // tests) use `TABLE`. Accept both so the locator is actually injected for a
+    // real sidebar preview.
+    table_type.is_some_and(|value| {
+        let value = value.trim();
+        value.eq_ignore_ascii_case("TABLE") || value.eq_ignore_ascii_case("BASE TABLE")
+    })
 }
 
 pub fn build_table_select_sql(options: TableSelectSqlOptions<'_>) -> String {

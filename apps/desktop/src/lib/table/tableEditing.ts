@@ -14,7 +14,11 @@ function isKnownOracleBaseTableType(tableType?: string): boolean {
 }
 
 function isKnownPostgresBaseTableType(tableType?: string): boolean {
-  return tableType?.trim().toUpperCase() === "TABLE";
+  // PostgreSQL reports `relkind = 'r'` through `listTables` as the
+  // information-schema spelling `BASE TABLE`; `TABLE` still reaches this from
+  // object-browser paths and tests, so both must be accepted.
+  const normalized = tableType?.trim().toUpperCase();
+  return normalized === "TABLE" || normalized === "BASE TABLE";
 }
 
 export function isTdengineStableTableType(tableType?: string): boolean {
