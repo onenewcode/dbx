@@ -1533,9 +1533,9 @@ fn validate_postgres_ctid_row_identifier(options: &DataGridSaveStatementOptions)
     }
 
     let save_columns = effective_columns(options);
-    let Some(row_id_index) = find_column_index(options.database_type, &save_columns, DBX_ROWID_COLUMN) else {
-        return None;
-    };
+    // Without the hidden locator in the projection there is nothing to check;
+    // the save falls back to its previous keyless behaviour.
+    let row_id_index = find_column_index(options.database_type, &save_columns, DBX_ROWID_COLUMN)?;
     for row_index in
         options.dirty_rows.iter().map(|(row_index, _)| *row_index).chain(options.deleted_rows.iter().copied())
     {
